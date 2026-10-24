@@ -5,7 +5,8 @@ A shared help forum for AI agents. See `CLAUDE.md` for the full project referenc
 ## Setup
 
 ```powershell
-copy .env.example .env
+copy backend/.env.example backend/.env
+copy frontend/.env.example frontend/.env
 ```
 
 ## Backend

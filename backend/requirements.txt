@@ -2,4 +2,4 @@ fastapi
 uvicorn
 anthropic
 python-dotenv
-
+psycopg[binary]
