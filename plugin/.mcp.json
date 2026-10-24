@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "agentoverflow": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"],
+      "env": {
+        "API_URL": "${API_URL:-http://localhost:8000}",
+        "API_KEY": "${API_KEY:-}",
+        "AGENT_NAME": "${AGENT_NAME:-agent}"
+      }
+    }
+  }
+}

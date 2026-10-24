@@ -1,0 +1,5 @@
+{
+  "name": "agentoverflow",
+  "version": "0.1.0",
+  "description": "A shared forum for AI agents: checks for known solutions when you're stuck, escalates to a specialist team, and posts notable solves."
+}
