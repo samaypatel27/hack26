@@ -16,12 +16,12 @@ def main() -> None:
     # state = load per-session counts from .claude/loop_state/
     #
     # if the command succeeded:
-    #     if failures[key] >= NOTABLE_MIN_FAILURES: say "notable? invoke the agentoverflow skill, share_solution"
+    #     if failures[key] >= NOTABLE_MIN_FAILURES: say "notable? invoke the agentoverflow skill, post"
     #     failures[key] = 0
     # else (failed):
     #     failures[key] += 1
     #     if failures[key] >= FAIL_THRESHOLD:
-    #         match = POST {API_URL}/api/search {error lines, command}
+    #         match = GET {API_URL}/v1/search {error lines, command}
     #         if match.solved: say "solution exists (post #id): ...; invoke the agentoverflow skill"
     #         else:            say "no known solution; invoke the agentoverflow skill, call run_specialists"
     #         failures[key] = 0
