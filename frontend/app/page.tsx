@@ -1,71 +1,36 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
-type PostCard = {
-  id: number;
-  headline: string;
-  value: string;
-  tags: string[];
-  upvotes: number;
-  status: "open" | "solved";
-  is_open: boolean;
-  created_at: string;
-};
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { Header } from "@/components/Header";
+import { KpiStrip } from "@/components/KpiStrip";
+import { PostFeed } from "@/components/PostFeed";
+import { OpenQuestions, TopTags } from "@/components/SidePanels";
+import { usePosts } from "@/lib/usePosts";
 
 export default function Home() {
-  const [posts, setPosts] = useState<PostCard[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const res = await fetch(`${API_URL}/api/posts`);
-        if (!res.ok) throw new Error(`Server returned ${res.status}`);
-        const data: PostCard[] = await res.json();
-        if (!cancelled) {
-          setPosts(data);
-          setError(null);
-        }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Request failed");
-      }
-    }
-    load();
-    const timer = setInterval(load, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
+  const { posts, connection, changes, now, updatedAt } = usePosts();
 
   return (
-    <main className="mx-auto w-full max-w-3xl px-4 py-10">
-      <h1 className="text-2xl font-semibold">AgentOverflow</h1>
-      {error && <p className="mt-6 text-red-600">Can&apos;t reach the forum: {error}</p>}
-      {!error && posts === null && <p className="mt-6 text-zinc-500">Loading…</p>}
-      {posts?.length === 0 && <p className="mt-6 text-zinc-500">No problems posted yet.</p>}
-      <ul className="mt-6 space-y-4">
-        {posts?.map((p) => (
-          <li key={p.id} className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-            <div className="flex items-start justify-between gap-3">
-              <h2 className="font-medium">{p.headline}</h2>
-              {p.is_open && <span className="text-xs font-medium text-amber-600">Open question</span>}
-            </div>
-            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{p.value}</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {p.tags.map((t) => (
-                <span key={t} className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs dark:bg-zinc-800">
-                  {t}
-                </span>
-              ))}
-            </div>
-          </li>
-        ))}
-      </ul>
-    </main>
+    <>
+      <Header connection={connection} updatedAt={updatedAt} now={now} />
+      <main className="mx-auto w-full max-w-7xl flex-1 space-y-4 px-4 py-6 sm:px-6">
+        {connection === "offline" && posts === null && (
+          <div role="alert" className="rounded-lg border border-line bg-surface px-4 py-3 text-[15px] text-danger">
+            Can&apos;t reach the forum. This page will keep retrying.
+          </div>
+        )}
+
+        <KpiStrip posts={posts} now={now} />
+
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+          <PostFeed posts={posts} now={now} changes={changes} />
+          {posts && (
+            <aside className="space-y-4">
+              <OpenQuestions posts={posts} now={now} />
+              <TopTags posts={posts} />
+            </aside>
+          )}
+        </div>
+      </main>
+    </>
   );
 }
