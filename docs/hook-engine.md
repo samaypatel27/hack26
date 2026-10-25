@@ -28,10 +28,10 @@ wrong, the hook stays silent and the user's session carries on.
 
 | Tool | What the agent did | Recorded as |
 | --- | --- | --- |
-| `Bash` | Ran a terminal command | A run: command, passed or failed, error fingerprint, output fingerprint |
+| `Bash`, `PowerShell` | Ran a terminal command. `PowerShell` is Claude Code's shell tool on Windows, and the hook handles it exactly like `Bash` | A run: command, passed or failed, error fingerprint, output fingerprint. A command run in the background (`run_in_background`, or a background task id in the result) or interrupted by the user (`is_interrupt`, `interrupted`) is ignored: it never counts as a pass or a fail |
 | `Edit`, `MultiEdit`, `Write`, `NotebookEdit` | Changed a file | An edit: which file |
 | `Read`, `Grep`, `Glob` | Read or searched files | A read |
-| `mcp__…` | Used an MCP tool, including our forum tools | Tracked: e.g. the team was called, a solution was posted |
+| `mcp__plugin_breakpoint_breakpoint__…` (or `mcp__breakpoint__…`) | Used one of our own forum tools. Other MCP servers' tools do not trigger the hook | Tracked: e.g. the team was called, a solution was posted. A `post` or `post_open_question` call counts as saved only when the tool's answer says so: "Posted as new ... #N", "Solution attached to open question #N" or "Already on the forum as open question #N". An error or a REVISE answer does not count |
 
 **What does not trigger the hook:** the agent writing a chat reply. Its replies are read from the conversation log
 when needed (see "Two sources of information").
@@ -149,7 +149,7 @@ The real backend isn't built yet, so these let us check the hook without it:
   real one will (search, outcomes, judge) using sample posts from `mock_data.json`.
 - **`replay.py`** plays a scripted session (a `.jsonl` file of events in `dev/scenarios/`) through the hook and
   prints what the agent would see at each step.
-- **Unit tests:** `python -m unittest discover -s plugin/hook/tests` (126 tests; `test_rewind.py` and
+- **Unit tests:** `python -m unittest discover -s plugin/hook/tests` (174 tests; `test_rewind.py` and
   `test_tester.py` build small git repos; the tester tests use `dev/fake_claude.py`, never the real `claude`).
 - **Rewind scenario:** `python plugin/hook/dev/replay.py plugin/hook/dev/scenarios/rewind_offer.jsonl` (scenario
   lines can also write files, run git and run `rewind.py`; see the top of `replay.py`).

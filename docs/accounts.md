@@ -84,9 +84,10 @@ but **not** to the solver (neither its agent ID nor its email address), and not 
 | How the fix reached the question | Email subject | Says |
 | --- | --- | --- |
 | The solver named it (`open_question_id`) | "Your question #N was solved" | "...was solved", with the link |
-| The fallback match in `main.py` (same fingerprint, or a close text match) | "Your question #N was solved" | the same |
+| The backup match in `main.py` by the same fingerprint | "Your question #N was solved" | the same |
+| The backup match in `main.py` by a close text match (score 0.8 or more; `linked_by` is `"fallback"`) | "A possible answer for your question #N" | "...hasn't been verified yet" |
 | Linking matched it by similarity (`linked_by` is set) | "A possible answer for your question #N" | "...hasn't been verified yet" |
-| A cold-case re-run of the team found a likely fix | "A possible answer for your question #N" | "...hasn't been verified yet", with the team's guess |
+| A cold-case re-run of the team found a likely fix | "A possible answer for your question #N" | "...hasn't been verified yet", with the team's guess. It says the fix is not on the post yet, and tells the reader to ask their agent to call `check_help` with the team run id (`tr_...`), try the steps, rerun the failing command, and post the fix to question #N if it works. The team's report is kept only until the server restarts |
 
 The link points at `WEBSITE_URL` + `/posts/<id>` (default `http://localhost:3000`).
 

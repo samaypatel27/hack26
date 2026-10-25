@@ -30,8 +30,14 @@ The real backend also uses port 8000. To run both, start the mock with `--port 8
 
 ```powershell
 New-Item -ItemType Directory -Force "$HOME\.breakpoint" | Out-Null
-'{"api_url": "http://localhost:8000", "api_key": ""}' | Set-Content -Encoding utf8 "$HOME\.breakpoint\config.json"
+if (-not (Test-Path "$HOME\.breakpoint\config.json")) {
+  [System.IO.File]::WriteAllText("$HOME\.breakpoint\config.json", '{"api_url": "http://localhost:8000", "api_key": ""}')
+}
 ```
+
+If the file already exists, edit it instead of overwriting it: it holds this install's ID. (`WriteAllText` is used
+because `Set-Content -Encoding utf8` in Windows PowerShell 5.1 adds a byte-order mark the plugin can't read.) See
+[docs/testing-guide.md](../docs/testing-guide.md), step A5.
 
 The MCP server reads `API_URL` and `API_KEY` from the environment, then from the same config file (default
 `http://localhost:8000`). It needs its packages once: `pip install -r plugin/mcp/requirements.txt`.
@@ -63,9 +69,14 @@ python -m unittest discover -s plugin/hook/tests -v
 ## Notes
 
 - `hooks/hooks.json` sends every event to one script, `hook/main.py`, which routes on `hook_event_name`.
-- The tool matcher `^(Bash|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__.*)$` is a regular expression
-  (Claude Code treats a matcher with characters like `^`, `(`, `.` or `*` as a regex). It is anchored so that, for
-  example, `Write` does not also match `TodoWrite`.
+- The tool matcher
+  `^(Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__(plugin_breakpoint_breakpoint|breakpoint)__.*)$`
+  is a regular expression (Claude Code treats a matcher with characters like `^`, `(`, `.` or `*` as a regex). It is
+  anchored so that, for example, `Write` does not also match `TodoWrite`.
+- `PowerShell` is Claude Code's shell tool on Windows. The hook treats it exactly like `Bash`. A command run in the
+  background, or interrupted by the user, is ignored: it never counts as a pass or a fail.
+- The MCP part matches only our own server's tools (`mcp__plugin_breakpoint_breakpoint__<tool>` when loaded as a
+  plugin, or `mcp__breakpoint__<tool>`), not every MCP server's tools.
 - Specialist sessions run with `BREAKPOINT_SPECIALIST=1`, which makes the hook stay silent.
 
 ## MCP server settings and identity

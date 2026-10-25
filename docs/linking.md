@@ -302,17 +302,22 @@ the fallback:
 
 1. **A new solution may answer an Open Question.** If the post names an `open_question_id`, that question is filled,
    as before. If not, `linking.link_new_solution()` looks for the question (all four stages, with the AI check). If
-   linking finds none, the teammate's `find_open_question()` runs as before: the same fingerprint, else a close
-   text match (`best_text_match`) that shares a tag.
+   linking finds none, the teammate's `find_open_question()` runs as the backup: the same fingerprint, else a close
+   text match (`best_text_match`) that shares a tag. The text match needs a score of at least 0.8
+   (`linking.FALLBACK_MIN_SCORE`), the same bar linking uses when the AI check is off, so the backup is never looser
+   than linking. (It used to be 0.5.)
 2. **A new Open Question may repeat an old one.** `linking.find_duplicate_question()` looks first, across forums. If
-   it finds none, the teammate's checks run as before: the same fingerprint, else `best_match` in the same forum.
+   it finds none, the teammate's checks run as the backup: the same fingerprint, else `best_match` in the same
+   forum, which now also needs a score of at least 0.8 (it used to be 0.3, which could merge a new question into the
+   wrong one).
 3. **The AI check's "no" counts for the fallback too.** Both link functions fill a set called `rejected` with the
    posts the AI check said are a different problem. The fallback never links one of those. Example: the
    "connection refused" case in Stage 4 has the same fingerprint, so the old fingerprint rule alone would link it.
-4. **The news says how sure we are.** When linking chose the question, the asker is emailed "A possible answer
-   ... not verified yet" (`main.py` and `accounts.py` send it). When the question was named by `open_question_id`,
-   or found by the fallback, the email says it was solved. The answer has a new optional field, `linked_by`:
-   `"ai_check"`, `"fallback"` or `null`. (`linking.notify_possible_answer()` still exists so old callers don't break,
+4. **The news says how sure we are.** When linking chose the question, or the backup found it by a text match, the
+   asker is emailed "A possible answer ... not verified yet" (`main.py` and `accounts.py` send it). Only when the
+   question was named by `open_question_id`, or the backup found it by the same fingerprint, does the email say it
+   was solved. The answer has a new optional field, `linked_by`: `"ai_check"`, `"fallback"` (this includes a backup
+   text match) or `null` (named by `open_question_id`, or a backup fingerprint match). (`linking.notify_possible_answer()` still exists so old callers don't break,
    but it does nothing now: the old `agent_updates` table is gone.)
 5. **Every new post is embedded** after it is saved: `background_tasks.add_task(linking.index_post, post_id)`. It
    runs after the response is sent, so saving stays fast. It adds the vector to the in-memory cache and never

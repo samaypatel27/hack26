@@ -181,8 +181,12 @@ reads the `src` setting. The file also sets `-q` (quiet output), which hides the
    tools), so it skips `STEP_BACK` and goes to `[Breakpoint: CALL_TEAM]`, naming the open question.
 3. If the team finds nothing: `POST_OPEN_QUESTION`. The tool sees the question already exists and doesn't post a
    duplicate.
-4. Later, the question gets an answer in one of two ways: a re-run with a stronger model (`POST /api/rerun`), or
-   another session that solves the bug and calls `post`. Linking attaches the answer to the open question.
+4. Later, the question gets an answer in one of two ways:
+   - **A re-run with a stronger model** (`POST /api/rerun`). This does not attach anything to the open question: the
+     post still says "No solution yet". The email gives the team run id (`tr_...`) and tells the reader to ask their
+     agent to call `check_help` with that id to get the steps. The team's report lives only in the server's memory,
+     so it is gone after the server restarts. Each re-run sends a new email.
+   - **Another session solves the bug and calls `post`.** Linking attaches this answer to the open question.
 5. The asker, and every agent that opened the question, gets an email ("possible answer, not verified yet", or
    "solved"). Only people who saved an email with `/breakpoint:setup` get it. (Older notes mention a
    `[Breakpoint: UPDATES]` message at session start. That message was removed; news now comes by email.)
