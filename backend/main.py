@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-import accounts   # ACCOUNTS: install identity, optional email, "your question was solved" (docs/accounts.md)
+import accounts   # ACCOUNTS: agent identity, optional email, "your question was solved" emails (docs/accounts.md)
 import agent
 import agent_db
 import linking    # LINKING: the matching funnel for new posts (docs/linking.md)
@@ -30,6 +30,9 @@ load_dotenv(Path(__file__).with_name(".env"))
 log = logging.getLogger("main")
 
 app = FastAPI(title="Breakpoint")
+# LINKING: embed every post into the in-memory meaning cache in the background (Stage 3). Does nothing
+# without OPENAI_API_KEY (the tests blank it).
+app.router.on_startup.append(linking.warm_up)
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,9 +40,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(agent.router)     # /api/search, /api/outcomes, /api/updates, /api/judge
+app.include_router(agent.router)     # /api/search, /api/outcomes, /api/judge (+ the retired /api/updates stub)
 app.include_router(team_api.router)  # /api/help, /api/help/{run_id}, /api/rerun
-app.include_router(accounts.router)  # ACCOUNTS: /api/agents/register, /api/agents/{id}/public, /api/accounts/*
+app.include_router(accounts.router)  # ACCOUNTS: /api/agents/register, /api/agents/{id}/public
 
 SORTS = {
     "top": "useful_count DESC, visited_count DESC, created_at DESC, id DESC",
@@ -163,9 +166,10 @@ class PostIn(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=32)
     author: str = "anonymous"
     open_question_id: int | None = None
-    # Agent fields (from the hook's messages); stored in agent_post_meta, never shown publicly.
+    # Agent fields (from the hook's messages). Only the fingerprint is stored (posts.fingerprint); the
+    # others have no column in the real tables and are accepted so older plugins keep working.
     fingerprint: str | None = None
-    command: str | None = None
+    command: str | None = None   # used for text matching only, not stored
     project: str | None = None
     team_run_id: str | None = None
     attempt: int | None = None   # QUALITY: 1 on the first send, 2 after one revision, ... (None = old plugin)
@@ -271,9 +275,14 @@ def related_posts(post_id: int) -> list[dict[str, Any]]:
 
 def fill_open_question(conn: psycopg.Connection, question_id: int, solution: str) -> dict[str, Any] | None:
     """Give an Open Question its solution (only if it still has none). Returns the question or None.
-    Sets `solution` and `general_solution` together, like the teammates' post structure."""
+    Sets `solution` and `general_solution` together, like the teammates' post structure, and solved_at
+    (the database trigger keeps status and solved_at in step too).
+
+    Only the request that flips the question from open to solved gets a row back: that is what makes the
+    "solved" email go out once (accounts.solved_emails), without a notices table."""
     return conn.execute(
-        "UPDATE posts SET solution = %s, general_solution = %s, status = 'solved' WHERE id = %s AND solution IS NULL"
+        "UPDATE posts SET solution = %s, general_solution = %s, status = 'solved', solved_at = now()"
+        " WHERE id = %s AND COALESCE(general_solution, solution) IS NULL"
         " RETURNING id, description",
         (solution, solution, question_id),
     ).fetchone()
@@ -286,7 +295,7 @@ def find_open_question(conn: psycopg.Connection, text: str, command: str | None,
     if fingerprint:
         for same in agent_db.posts_with_fingerprint(conn, fingerprint, open_only=True):
             return same["id"]
-    candidates = conn.execute("SELECT * FROM post_cards WHERE solution IS NULL").fetchall()
+    candidates = conn.execute("SELECT * FROM post_cards WHERE COALESCE(general_solution, solution) IS NULL").fetchall()
     # Require a shared tag, unless the post only got the fallback tag.
     wanted = [] if tags == [FALLBACK_FORUM] else tags
     match = best_text_match(
@@ -298,31 +307,20 @@ def find_open_question(conn: psycopg.Connection, text: str, command: str | None,
     return match["id"] if match else None
 
 
-def notify_solved(conn: psycopg.Connection, question: dict[str, Any], solver_project: str | None) -> None:
-    """Queue "your open question was solved" for every project waiting on it (not the solver's own)."""
-    message = f"Your open question '{headline(question['description'])}' now has a solution in post #{question['id']}."
-    for project in agent_db.watchers(conn, question["id"]):
-        if project != solver_project:
-            agent_db.add_update(conn, project, message, question["id"])
-
-
 def email_waiting_humans(conn: psycopg.Connection, background_tasks: BackgroundTasks, question_id: int,
                          solver_agent_id: str | None, possible: bool = False) -> None:
-    """ACCOUNTS (docs/accounts.md): queue the emails for an Open Question that just got its solution, once.
-    The email says what the agent update says: "Your question was solved" when the solver named the question
-    (or it matched by fingerprint / text in the fallback below), "A possible answer ... not verified yet" when
-    linking matched it by similarity (`possible`). The agent_updates rows are written by the caller, so accounts
-    writes none. The emails go out after the response. Needs schema_accounts.sql; never breaks the save."""
+    """ACCOUNTS (docs/accounts.md): queue the emails for an Open Question that this request just flipped
+    from open to solved: its asker and every agent that visited it, minus the solver, one per address.
+    "Your question was solved" when the solver named the question (or it matched by fingerprint / text);
+    "A possible answer ... not verified yet" when linking matched it by similarity (`possible`).
+    The emails go out after the response. Never breaks the save."""
     try:
         with conn.transaction():   # a savepoint: a failure here must not undo the post
-            if possible:
-                result = accounts.notify_possible_answer(
-                    conn, question_id, accounts.LINKED_REF, "A fix from a similar problem was attached to it.",
-                    exclude_agent_id=solver_agent_id)
-            else:
-                result = accounts.notify_post_solved(conn, question_id, exclude_agent_id=solver_agent_id,
-                                                     write_updates=False)
-        background_tasks.add_task(accounts.deliver, result["emails"])
+            emails = accounts.solved_emails(
+                conn, question_id, exclude_agent_id=solver_agent_id, possible=possible,
+                detail="A fix from a similar problem was attached to it." if possible else "",
+                ref="link" if possible else "")
+        background_tasks.add_task(accounts.deliver, emails)
     except Exception:  # noqa: BLE001
         log.exception("accounts: could not queue the emails for Open Question %s", question_id)
 
@@ -370,6 +368,10 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
         for name in ("problem", "description", "value", "relevancy", "command", "author")
     } | {"solution": scrub(solution), "general_solution": scrub(solution)})
     solution = post.solution
+    # There's no column for the failing command, so keep it in the post's text (searchable, shown on the website).
+    cmd = (post.command or "").strip()[:1000]
+    if cmd and cmd not in f"{post.problem or ''}\n{post.description}":
+        post = post.model_copy(update={"description": f"{post.description.rstrip()}\n\nCommand: `{cmd}`"})
     # The whole problem as one text (title on the first line), the shape matching, linking and quality read.
     full_description = f"{post.problem}\n\n{post.description}" if post.problem else post.description
     why = post.relevancy or post.value
@@ -382,8 +384,6 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
         return {"revise": True, "feedback": quality.format_feedback(checked), "problems": checked.problems,
                 "attempt": checked.attempt, "max_attempts": checked.max_attempts, "post_id": None}
     fingerprint = agent_db.clean_fingerprint(post.fingerprint)
-    project = (post.project or "").strip()[:200] or None
-    team_run_id = (post.team_run_id or "").strip()[:200] or None
     command = (post.command or "").strip()[:1000] or None
     solver_agent_id = post.agent_id or x_agent_id
 
@@ -416,12 +416,10 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
                         question_id = None
                     filled = fill_open_question(conn, question_id, solution) if question_id else None
             if filled:
-                agent_db.save_meta(conn, filled["id"], fingerprint, command, None, team_run_id)
-                if linked is not None:   # LINKING: linked by similarity, so "Possible answer, not verified yet"
-                    linking.notify_possible_answer(filled["id"], linked, conn=conn, exclude_project=project)
-                else:
-                    notify_solved(conn, filled, project)
-                email_waiting_humans(conn, background_tasks, filled["id"], solver_agent_id,   # ACCOUNTS
+                agent_db.save_fingerprint(conn, filled["id"], fingerprint)
+                # ACCOUNTS: email the asker and the visitors, once. LINKING: linked by similarity means
+                # "Possible answer, not verified yet" instead of "solved".
+                email_waiting_humans(conn, background_tasks, filled["id"], solver_agent_id,
                                      possible=linked is not None)
                 return {**result, "post_id": filled["id"], "attached_to_open_question": True, "duplicate_of": None,
                         "linked_by": linked.decided_by if linked else None}   # LINKING: new optional field
@@ -440,7 +438,8 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
                     break
             if duplicate_id is None:
                 open_posts = conn.execute(
-                    "SELECT * FROM post_cards WHERE solution IS NULL AND forum = %s", (forum_row["slug"],)
+                    "SELECT * FROM post_cards WHERE COALESCE(general_solution, solution) IS NULL AND forum = %s",
+                    (forum_row["slug"],)
                 ).fetchall()
                 match = best_match(full_description, [{**p, "tags": list(p["tags"])} for p in open_posts],
                                    forum=forum_row["slug"])
@@ -448,14 +447,15 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
             if duplicate_id in rejected_dups:   # LINKING: the AI check said it is a different problem
                 duplicate_id = None
             if duplicate_id is not None:
-                if project:
-                    agent_db.add_watcher(conn, duplicate_id, project)  # tell this project when it is solved
+                if post.agent_id is not None:
+                    # A visit puts this agent on the question's email list (accounts.recipients).
+                    agent_db.record_visit(conn, duplicate_id, post.agent_id)
                 return {**result, "post_id": duplicate_id, "attached_to_open_question": False, "duplicate_of": duplicate_id}
 
         new = conn.execute(
             "INSERT INTO posts (description, value, solution, author, problem, relevancy, general_description,"
-            " general_solution, forum_id, status)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            " general_solution, fingerprint, agent_id, solved_at, forum_id, status)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s THEN now() END, %s, %s) RETURNING id",
             (
                 full_description,
                 why,
@@ -465,12 +465,14 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
                 post.relevancy,
                 post.description if post.problem else None,
                 solution,
+                fingerprint,
+                post.agent_id,   # registered (checked above), so the foreign key holds
+                solution is not None,
                 forum_row["id"],
                 "solved" if solution is not None else "open",
             ),
         ).fetchone()
         register_tags(conn, new["id"], forum_row["id"], tags)
-        agent_db.save_meta(conn, new["id"], fingerprint, command, project, team_run_id)
     background_tasks.add_task(linking.index_post, new["id"])   # LINKING: embed it after the commit (Stage 3)
     return {**result, "post_id": new["id"], "attached_to_open_question": False, "duplicate_of": None}
 
