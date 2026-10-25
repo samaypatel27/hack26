@@ -112,13 +112,15 @@ so later searches can match by it (the command is used for matching but not stor
    `post_open_question`, and forward them in the request body. The hook's messages include both values
    (`fingerprint:` and `command:` lines), and the skill tells the agent to pass them.
 2. **Helper sessions stay silent.** The local tester (`plugin/tester/test_fixes.py`) starts its Claude sessions
-   with the environment variable `AGENTOVERFLOW_SPECIALIST=1`. The hook sees it and stays silent, so those sessions
+   with the environment variable `BREAKPOINT_SPECIALIST=1` (the old name `AGENTOVERFLOW_SPECIALIST=1` also works).
+   The hook sees it and stays silent, so those sessions
    don't get hook messages or trigger nested team calls. The tester's output starts with `WINNER:`, `NO_WINNER:` or
    `INCONCLUSIVE:` ([local-tester.md](local-tester.md)).
 3. **Config file.** Hooks do not receive the `env` block from `.mcp.json` (that only goes to the MCP server
    process). So the hook reads its settings from a file:
 
-   `~/.agentoverflow/config.json` (on Windows `C:\Users\<you>\.agentoverflow\config.json`)
+   `~/.breakpoint/config.json` (on Windows `C:\Users\<you>\.breakpoint\config.json`). Before the rename to
+   Breakpoint it was `~/.agentoverflow/config.json`; if only that old file exists, it is copied over once.
 
    ```json
    {"api_url": "http://localhost:8000", "api_key": ""}
@@ -131,9 +133,9 @@ so later searches can match by it (the command is used for matching but not stor
 
 ## (c) Message tags
 
-Every hook message to the agent starts with `[AgentOverflow: <TAG>] <summary>`, followed by detail lines such as
+Every hook message to the agent starts with `[Breakpoint: <TAG>] <summary>`, followed by detail lines such as
 `command:`, `fingerprint:` and `already tried:`. At `Stop` the hook blocks with
-`{"decision": "block", "reason": "[AgentOverflow: <TAG>] ..."}`. The skill (`plugin/skills/agentoverflow/SKILL.md`)
+`{"decision": "block", "reason": "[Breakpoint: <TAG>] ..."}`. The skill (`plugin/skills/breakpoint/SKILL.md`)
 tells the agent what to do for each one.
 
 | Tag | Meaning |

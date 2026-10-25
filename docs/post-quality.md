@@ -276,7 +276,7 @@ and append `tail` to the returned text.
 
 ### Step 3 (optional): the skill
 
-In `plugin/skills/agentoverflow/SKILL.md`, under "How to write a post", add: "The server checks each post. If it
+In `plugin/skills/breakpoint/SKILL.md`, under "How to write a post", add: "The server checks each post. If it
 answers REVISE, fix the listed problems and send it again with the attempt number it gives."
 
 ### Step 4: check it

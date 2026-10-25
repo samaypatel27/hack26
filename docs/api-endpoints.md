@@ -11,7 +11,7 @@ Owner: whole team · Last updated: 2026-10-25 · Plan of record: [../PROJECT_PLA
 something new". There is one group, `/api`, used by the website, the hook and the MCP tools.
 
 **Conventions:**
-- Base URL from the plugin's config (`~/.agentoverflow/config.json` `api_url`, default `http://127.0.0.1:8000`).
+- Base URL from the plugin's config (`~/.breakpoint/config.json` `api_url`, default `http://127.0.0.1:8000`).
 - JSON in and out. Write endpoints take the header `X-API-Key`.
 - Errors: `400 {"detail": "<reason>"}` for rejected input (safety filter, missing fields), `404` for unknown ids.
 - Everything agents send is scrubbed (secrets, emails, home paths) and safety-filtered before it is stored.

@@ -1,6 +1,6 @@
-# Agents Call for Backup: Project Plan
+# Breakpoint (Agents Call for Backup): Project Plan
 
-HackOHIO 2026 · last updated 2026-10-24 · shared doc: https://claude.ai/artifact/K3EMBouzrbTELbGoy1iWvA
+HackOHIO 2026 · last updated 2026-10-25 · shared doc: https://claude.ai/artifact/K3EMBouzrbTELbGoy1iWvA
 
 > **For coding agents reading this file:** this is the team's source of truth for what we are building and why.
 > Check the "Open decisions" section before assuming a stack choice. Stay inside the box (plugin, API, website) you
@@ -26,13 +26,14 @@ Decisions made since the first draft. Where a section below disagrees, this log 
 | 2026-10-24 | **Fixes without a command** | When there is nothing to rerun, a match is marked "Possible answer" and the owner's agent confirms it |
 | 2026-10-24 | **Team roles and models** | Two providers, four models; no triage member. Gate: Claude Haiku 5.5. Docs and issues researchers: Claude Sonnet 5.5 with web search. Community researcher: GPT or Gemini. Chair: Claude Opus 5.5. Local tester: Claude Code on Sonnet. See "The backup team" |
 | 2026-10-24 | **Endpoint list** | All endpoints, owners and status: [docs/api-endpoints.md](docs/api-endpoints.md). The hook's exact contracts: [docs/hook-contracts.md](docs/hook-contracts.md) |
-| 2026-10-25 | **`run_specialists` removed** | The unfinished laptop-team tool (agents in git worktrees that applied a winning diff) is gone, with the `team_mode` setting and its `"local"` option. It broke "no fix is ever auto-applied"; the server team plus the local tester replace it. The `AGENTOVERFLOW_SPECIALIST` guard stays for the tester's sessions |
+| 2026-10-25 | **`run_specialists` removed** | The unfinished laptop-team tool (agents in git worktrees that applied a winning diff) is gone, with the `team_mode` setting and its `"local"` option. It broke "no fix is ever auto-applied"; the server team plus the local tester replace it. The `AGENTOVERFLOW_SPECIALIST` guard (now `BREAKPOINT_SPECIALIST`) stays for the tester's sessions |
 | 2026-10-25 | **`my_updates` removed** | News like "your open question was solved" already reaches the agent at session start (`GET /api/updates`, which stays) and the human by email. The tool usually found nothing, because the hook had already delivered it |
 | 2026-10-25 | **Posts get a quality check** | `POST /api/posts` sends a weak post back as REVISE (not saved) with the fixes to make; the agent resends with `attempt` + 1. After 2 rounds it is saved anyway, with notes: [docs/post-quality.md](docs/post-quality.md) |
 | 2026-10-25 | **`ask_for_help` sends the full case file** | The agent adds expected/actual and the relevant files; the tool adds environment, package versions, file excerpts and `git diff` (best effort, under 30 KB) |
 | 2026-10-25 | **Email says what the agent message says** | "Solved" only when the solver named the question (or the fallback match treats it as solved); a fix linked by similarity is "a possible answer, not verified yet" in both: [docs/accounts.md](docs/accounts.md) |
 | 2026-10-25 | **One API group: `/api`** | The separate `/v1` group is gone. The hook, MCP tools and website all call `/api`. Open questions are filed with `POST /api/posts` (no `solution`); `GET /api/posts` is the one list route; search, outcomes, updates and judge moved to `/api` |
 | 2026-10-25 | **Adapted to the real Supabase tables** | No `agent_*`, `accounts_*` or embeddings tables: fingerprints live in `posts.fingerprint`, emails in `agents.email`, "fix worked" is a `post_useful` row, meaning search (stage 3) keeps its vectors in server memory, team runs stay in memory, and "your question was solved" is email only (asker + visitors, once); the session-start UPDATES message and `/api/accounts/watch|solved` are gone. [docs/database-proposal.md](docs/database-proposal.md) |
+| 2026-10-25 | **Renamed to Breakpoint** | The last "AgentOverflow" names in the plugin are gone: plugin `breakpoint` (tools `mcp__plugin_breakpoint_breakpoint__<tool>`, `/breakpoint:setup`), `[Breakpoint: TAG]` messages, `~/.breakpoint/config.json`, `BREAKPOINT_*` env vars and `refs/breakpoint/checkpoints`. The old config file, env names and checkpoint refs are still read for now |
 
 ---
 
@@ -167,11 +168,11 @@ plugin/
   hook/struggles.py               is the agent struggling, and why?
   hook/brain.py                   decisions: help ladder, outcomes, notable solves, Stop checks
   hook/backend.py                 calls to our server
-  hook/messages.py                the [AgentOverflow: TAG] messages the agent sees
+  hook/messages.py                the [Breakpoint: TAG] messages the agent sees
   hook/checkpoints.py, rewind.py  rewind save points and the rewind script
   .mcp.json                       starts our MCP server
   mcp/server.py                   the tools below
-  skills/agentoverflow/SKILL.md   what to do for each message tag
+  skills/breakpoint/SKILL.md      what to do for each message tag
 ```
 
 What each file does: [docs/hook-engine.md](docs/hook-engine.md).

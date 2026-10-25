@@ -5,8 +5,9 @@ Plan of record: [../PROJECT_PLAN.md](../PROJECT_PLAN.md) ("The backup team", mem
 
 > **For coding agents:** the tester is `plugin/tester/test_fixes.py`. The hook never runs it: it sends `TEST_FIXES`
 > with the exact command, the agent asks the user, and on a yes runs it with Bash. It only ever works in copies of the
-> project and **never changes the real project**. The agent applies the winning change itself. Keep names and env vars
-> as they are (`AGENTOVERFLOW_SPECIALIST`, `[AgentOverflow: TAG]`); the rename to Breakpoint comes later.
+> project and **never changes the real project**. The agent applies the winning change itself. Names after the rename
+> to Breakpoint: `BREAKPOINT_SPECIALIST`, `BREAKPOINT_TESTER_CLAUDE`, `[Breakpoint: TAG]`. The old `AGENTOVERFLOW_*`
+> env names still work for now.
 
 ---
 
@@ -30,7 +31,7 @@ Why: the team's research is a guess until something runs. The tester turns "like
 CALL_TEAM ─▶ agent calls ask_for_help ─▶ "TEAM_STARTED: run-1"      (hook: team_ran = True, run id saved)
                 agent keeps working, later calls check_help ─▶ "TEAM_WORKING ..."   (nothing to do)
                                               check_help ─▶ "TEAM_REPORT: run-1 ..."
-hook ─▶ [AgentOverflow: TEST_FIXES] + the exact tester command
+hook ─▶ [Breakpoint: TEST_FIXES] + the exact tester command
 agent ─▶ asks the user ("may I test the fixes in copies? a few minutes, uses Sonnet")
    no  ─▶ agent tries the ranked fixes itself, in order, rerunning the check after each
    yes ─▶ agent runs: python ".../plugin/tester/test_fixes.py" --project "..." --session <id> --run-id run-1 --check '<cmd>'
@@ -60,7 +61,7 @@ The hook never posts and never runs the tester. It only tells the agent which to
 | `plugin/hook/messages.py` | changed | New tags `TEST_FIXES` and `TEAM_STATUS`; `tester_command()` builds the exact command (absolute script path, project, session, run id, check); `CALL_TEAM` mentions the tester step; `NOTABLE_SOLVE` can credit the team |
 | `plugin/hook/brain.py` | changed | Parses `ask_for_help` / `check_help` results (`TEAM_*`, `KNOWN_FIX`, `TRY_FIRST`) after stripping the community label; recognizes the tester command in Bash and reads its first line; the Open Question rule now needs a real team run that gave up; a direct `ask_for_help` is tied to the command failing right now |
 | `plugin/hook/notebook.py` | changed | New episode fields (`team_run_id`, `team_status`, `team_report_idx`, `tester_offered`, `team_fix`); MCP results shaped `{"content": [...]}` are read as text |
-| `plugin/skills/agentoverflow/SKILL.md` | changed | Sections "Team replies", `TEST_FIXES`, `TEAM_STATUS`; `CALL_TEAM` shortened |
+| `plugin/skills/breakpoint/SKILL.md` | changed | Sections "Team replies", `TEST_FIXES`, `TEAM_STATUS`; `CALL_TEAM` shortened |
 | `plugin/hook/dev/mock_backend.py`, `mock_data.json` | changed | Fake `POST /api/help` (`KNOWN_FIX` for a known fingerprint, else `TEAM_STARTED: run-1`) and `GET /api/help/{run_id}` (first `TEAM_WORKING` with events, then `TEAM_REPORT` with a canned 3-hypothesis report); `--selftest` checks them |
 | `plugin/hook/dev/fake_claude.py` | **new** | A stand-in for `claude -p` for tests and the replay: applies scripted edits per hypothesis and logs what it saw |
 | `plugin/hook/dev/replay.py` | changed | New scenario lines `_env` and `_run` (run a command like the agent's Bash and feed the result to the hook) |
@@ -75,7 +76,7 @@ The hook never posts and never runs the tester. It only tells the agent which to
 ## How the tester works
 
 **1. The report.** `--run-id run-1` fetches `GET /api/help/run-1` with the hook's own config and request helper
-(`backend.py`: `~/.agentoverflow/config.json` or `AGENTOVERFLOW_API_URL`). The shape is the one in
+(`backend.py`: `~/.breakpoint/config.json` or `BREAKPOINT_API_URL`). The shape is the one in
 [api-endpoints.md](api-endpoints.md) (`report.hypotheses[]` with `rank`, `cause`, `confidence`, `steps`, `check`).
 `--report file.json` reads the same JSON from a file instead (for tests and demos). The top `--max-hypotheses`
 (default 3), by rank, are tested.
@@ -88,7 +89,7 @@ error) and ends its reply with `CHECK: <command>`. The tester runs it in an unto
 or the run stops (INCONCLUSIVE). That test is then copied into every hypothesis copy, the sessions are told not to
 touch it, a changed test marks the hypothesis as suspect, and it is left out of the diffs.
 
-**3. The copies.** `git worktree add --detach <system temp>/agentoverflow_tester_h<n>_*/copy <commit>`, outside the
+**3. The copies.** `git worktree add --detach <system temp>/breakpoint_tester_h<n>_*/copy <commit>`, outside the
 project folder. `<commit>` is the session's **`episode_start` checkpoint** (from `checkpoints.py`, the one rewind uses:
 "the files when this problem started", uncommitted and new files included, ignored files and `.claude/` left out). If
 there is none: a fresh checkpoint of the files now (label `tester_start`), then `HEAD` (the output says which). The
@@ -128,7 +129,7 @@ Checked against `claude --help` (Claude Code 2.1.283) and with real calls:
   `node --version`).
 - `--strict-mcp-config` with no MCP config: no MCP servers, so a tester can never post to the forum or call the team.
 - `--max-turns` is accepted by `-p` although `--help` does not list it (verified).
-- Env: `AGENTOVERFLOW_SPECIALIST=1` (our hook stays silent there, so there is no chain reaction), and the parent
+- Env: `BREAKPOINT_SPECIALIST=1` (our hook stays silent there, so there is no chain reaction), and the parent
   session's variables (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PROJECT_DIR`, ...) are removed.
 - The prompt: apply ONLY this hypothesis's steps, work only in this directory, never weaken tests or the check, don't
   run the check, no installs or network unless listed, reply with one short paragraph.
@@ -156,7 +157,7 @@ The first line is for the hook; the rest is for the agent:
 ```
 WINNER: hypothesis 2 (src layout: src/ is not on sys.path when the tests run)
 Team run: run-1 | check: `python -m unittest discover -s tests` (--check)
-Copies started from: checkpoint episode_start (refs/agentoverflow/checkpoints/<session>/1): the files when this problem started
+Copies started from: checkpoint episode_start (refs/breakpoint/checkpoints/<session>/1): the files when this problem started
 Baseline (untouched copy): the check fails, as expected (0.25s)
 
 Hypothesis 1: ... result: FAILED, time: copy 0.18s, session 10.7s, check 0.14s, total 11.27s, session: 3 turns, $0.17,
@@ -181,7 +182,7 @@ to the hook's notes (the folder is git-ignored).
 - **Never auto-applied.** The tester prints the diff; the agent applies it in the real project where the user sees it,
   and the hook confirms it by watching the check pass (same as every other fix).
 - **Two yeses.** The agent asks the user before running the tester, and Claude Code asks permission for the Bash call.
-- **Specialist flag.** `AGENTOVERFLOW_SPECIALIST=1` in every tester session: our hook does nothing there, so a tester
+- **Specialist flag.** `BREAKPOINT_SPECIALIST=1` in every tester session: our hook does nothing there, so a tester
   can never start another team call or tester run. No MCP servers either.
 - **Least permissions.** Edits only inside the copy, no commands except exact, listed package-manager commands, no web.
 - **Shortcuts are caught.** A pass that came from skipping or silencing checks is `suspect`, never the winner.
@@ -215,8 +216,8 @@ python plugin/tester/test_fixes.py --project "<project>" --session <id> --report
 # options: --max-hypotheses 3  --timeout 180  --check-timeout 120  --no-parallel  --deps link|copy|none
 #          --link NAME  --setup "npm ci"  --model sonnet  --max-turns 30  --no-baseline  --keep
 
-# with a fake claude (no cost): AGENTOVERFLOW_TESTER_CLAUDE='["python", "plugin/hook/dev/fake_claude.py"]'
-#                               AGENTOVERFLOW_FAKE_PLAN=plan.json   (see the top of fake_claude.py)
+# with a fake claude (no cost): BREAKPOINT_TESTER_CLAUDE='["python", "plugin/hook/dev/fake_claude.py"]'
+#                               BREAKPOINT_FAKE_PLAN=plan.json   (see the top of fake_claude.py)
 ```
 
 Tests and demos:

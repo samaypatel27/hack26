@@ -76,10 +76,10 @@ GIT_INDEX_FILE=<temp file> git add -A          # respects .gitignore
 tree=$(GIT_INDEX_FILE=<temp file> git write-tree)
 
 # 2. Wrap it in a commit that is not on any branch
-commit=$(git commit-tree "$tree" -p HEAD -m "agentoverflow checkpoint: last_good")
+commit=$(git commit-tree "$tree" -p HEAD -m "breakpoint checkpoint: last_good")
 
 # 3. Keep it reachable under a hidden ref
-git update-ref refs/agentoverflow/checkpoints/<session_id>/<n> "$commit"
+git update-ref refs/breakpoint/checkpoints/<session_id>/<n> "$commit"
 ```
 
 Rules:
@@ -100,7 +100,7 @@ All of these must be true:
 
 Example message:
 
-> [AgentOverflow: REWIND_OFFER] You've made 9 edits since the build last passed (7:42 PM) and it still fails. The
+> [Breakpoint: REWIND_OFFER] You've made 9 edits since the build last passed (7:42 PM) and it still fails. The
 > edits may be stacking on top of each other. Options: rewind to **last time it passed** (undoes 9 edits in 4 files)
 > or **when this problem started** (undoes 6 edits in 2 files). Already tried and failed: (1) …, (2) …
 > Ask the user before rewinding.
@@ -198,7 +198,7 @@ python "C:/.../plugin/hook/rewind.py" --project "C:/path/to/project" --session <
 
 It accepts `last_good`, `episode_start`, `before_rewind` or a checkpoint id from `--list`. It exits 1 with a message
 on stderr if the checkpoint does not exist or git fails. It prints the clean slate note, tagged
-`[AgentOverflow: CLEAN_SLATE]`: the point it went back to, files restored, brought back and deleted, "files only",
+`[Breakpoint: CLEAN_SLATE]`: the point it went back to, files restored, brought back and deleted, "files only",
 the attempts that already failed, "start from here with a different approach", and the undo command.
 
 **What it changes in the hook's notes:** it adds a `{"kind": "rewind"}` record to the history, marks the episode
@@ -219,7 +219,7 @@ tried list and failure count carry on, so a later pass still gets `NOTABLE_SOLVE
   made and the new name points at the same snapshot. The notes record `{id, ref, label, time, history_idx, key, cmd}`
   and edit counts are computed from the history (instead of storing `edits_since`).
 - **The repo's top folder is what gets snapshotted**, even if the project folder is a subfolder of a bigger repo.
-- Snapshot commits use a fixed identity (`AgentOverflow <agentoverflow@localhost>`) and `--no-gpg-sign`, so they
+- Snapshot commits use a fixed identity (`Breakpoint <breakpoint@localhost>`) and `--no-gpg-sign`, so they
   work without `user.name` and never stop for a signing prompt. They are never on a branch.
 - Timeouts: 2 seconds per git call from the hook (skip silently), 60 seconds per git call in `rewind.py` (the user
   is waiting for it, and the undo point must be saved before any file changes).
@@ -243,4 +243,5 @@ passes with a new approach (`NOTABLE_SOLVE`, whose tried list includes the rewin
 - A checkpoint saved before the hook's 200-action history window still works, but its edit count only covers the
   actions still in the history.
 - Hidden refs are kept until pruned (20 per session). They are local only (never pushed by a normal `git push`);
-  `git for-each-ref refs/agentoverflow` lists them and `git update-ref -d` removes one.
+  `git for-each-ref refs/breakpoint` lists them and `git update-ref -d` removes one. Checkpoints saved before the
+  rename to Breakpoint live under `refs/agentoverflow/checkpoints/`; they are still listed and can still be rewound to.
