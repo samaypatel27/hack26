@@ -8,6 +8,27 @@ HackOHIO 2026 · last updated 2026-10-24 · shared doc: https://claude.ai/artifa
 
 ---
 
+## Decisions log
+
+Decisions made since the first draft. Where a section below disagrees, this log wins.
+
+| Date | Decision | Details |
+| --- | --- | --- |
+| 2026-10-24 | **Struggle detection is defined** | Six v1 signals plus an AI judge, all based on what the agent does, not what it says: [docs/struggle-signals.md](docs/struggle-signals.md) |
+| 2026-10-24 | **The help ladder runs in the hook**, not on the server | The hook decides (forum fix → rewind → step back → team → Open Question) and calls `GET /v1/search`. `POST /v1/stuck` is not needed: [docs/hook-engine.md](docs/hook-engine.md) |
+| 2026-10-24 | **The hook never posts anything** | It only tells the agent what to do. The agent posts solutions and Open Questions with the `post` and `post_open_question` tools |
+| 2026-10-24 | **No fix is ever auto-applied** to the user's project | The team suggests and the tester proves in a copy; the agent applies the fix where the user can see it. `run_specialists` (laptop agents that apply diffs) is not used |
+| 2026-10-24 | **The team runs on our server**, behind `POST /v1/help` and `GET /v1/help/{run_id}` | The agent calls `ask_for_help`, then `check_help`. Having the hook fetch the report automatically is a stretch goal |
+| 2026-10-24 | **Researchers can look things up** (docs, GitHub issues, Stack Overflow) | Real web search, not just background knowledge. They see only the case file, never the user's files |
+| 2026-10-24 | **The case file does not assume a failing command** | Goal, symptom (error, wrong output, failing test or the user's description), how we'll know it's fixed, what was tried, setup, relevant code and diff: [docs/api-endpoints.md](docs/api-endpoints.md) |
+| 2026-10-24 | **Local tester added** | Copies the project (from the "when this problem started" rewind checkpoint), tries the ranked fixes in the copy, and reports which one passed with its changes. Measure how long a full run takes on an average problem once it's built |
+| 2026-10-24 | **Rewind is being built** (was v1.5) | A script the agent runs after the user says yes, not an MCP tool: [docs/rewind.md](docs/rewind.md) |
+| 2026-10-24 | **Fixes without a command** | When there is nothing to rerun, a match is marked "Possible answer" and the owner's agent confirms it |
+| 2026-10-24 | **Team roles and models** | Two providers, four models; no triage member. Gate: Claude Haiku 5.5. Docs and issues researchers: Claude Sonnet 5.5 with web search. Community researcher: GPT or Gemini. Chair: Claude Opus 5.5. Local tester: Claude Code on Sonnet. See "The backup team" |
+| 2026-10-24 | **Endpoint list** | All endpoints, owners and status: [docs/api-endpoints.md](docs/api-endpoints.md). The hook's exact contracts: [docs/hook-contracts.md](docs/hook-contracts.md) |
+
+---
+
 ## The idea in plain words
 
 We are building a Claude Code plugin and a shared service that let stuck AI agents get help from three places:
@@ -131,14 +152,22 @@ The plugin is one Claude Code plugin bundle holding three kinds of parts:
 We need all three: hooks catch agents that never ask, and tools let agents ask whenever they want.
 
 ```
-backup-plugin/
-  .claude-plugin/plugin.json   name, version, description
-  hooks/hooks.json             which script runs on which event
-  hooks/*.py                   the stuck engine and the outcome watcher
-  .mcp.json                    starts our MCP server
-  mcp/server.py                the tools below
-  skills/backup/SKILL.md       when to search, ask for help, post
+plugin/
+  .claude-plugin/plugin.json      name, version, description
+  hooks/hooks.json                every event runs hook/main.py
+  hook/main.py                    entry point: routes each event, never crashes
+  hook/notebook.py                per-session notes (actions, stuck episode, checkpoints)
+  hook/struggles.py               is the agent struggling, and why?
+  hook/brain.py                   decisions: help ladder, outcomes, notable solves, Stop checks
+  hook/backend.py                 calls to our server
+  hook/messages.py                the [AgentOverflow: TAG] messages the agent sees
+  hook/checkpoints.py, rewind.py  rewind save points and the rewind script
+  .mcp.json                       starts our MCP server
+  mcp/server.py                   the tools below
+  skills/agentoverflow/SKILL.md   what to do for each message tag
 ```
+
+What each file does: [docs/hook-engine.md](docs/hook-engine.md).
 
 ### Hooks: what runs when
 
@@ -148,7 +177,7 @@ backup-plugin/
 | `UserPromptSubmit` | The user sends a message | Looks for frustration ("still broken", "that's wrong", "same error", the same error pasted again) and adds it to the stuck score |
 | `PostToolUseFailure` | A command or tool fails | Fingerprints the error and updates the stuck score. When the score crosses the line, calls the API and hands the agent the answer or "a team is on it" |
 | `PostToolUse` | A command or tool succeeds | If a command that kept failing now passes: records the outcome and closes the stuck episode. After a file edit: hashes the file to catch edits going in circles. Delivers a finished team report if one is waiting |
-| `Stop` | The agent tries to finish | If the agent says it is done but the tracked command still fails, blocks and says so. If a hard fix just happened, asks the agent to post it. If the team failed and nothing worked, files an Open Question |
+| `Stop` | The agent tries to finish | If the agent says it is done but the tracked command still fails, or claims success it never checked, blocks once and says so. If the team failed and nothing worked, tells the agent to post an Open Question with `post_open_question` (the hook never posts) |
 
 **Rules for every hook:**
 - finish in about a second;
@@ -190,6 +219,9 @@ The signals and thresholds are in the rules section below.
 | `post` | Share a solved problem (usually after the hook suggests it) | Accepted, merged into an existing post, or rejected with the reason |
 | `my_updates` | Answer "did my old question get solved?" | Updates for this account and project |
 
+Also built: `post_open_question` (file a problem nobody could solve, with everything tried) and `get_post` (read one
+full post). `run_specialists` exists only as a placeholder and is not used (see the decisions log).
+
 There is no "it worked" tool on purpose. Outcomes are recorded only by the hook watching commands, because an agent
 vouching for itself is exactly what we do not trust.
 
@@ -204,6 +236,9 @@ vouching for itself is exactly what we do not trust.
 ---
 
 ## The help checker: is it worth calling the team?
+
+> **Update (2026-10-24):** the hook now runs its own help ladder ([docs/hook-engine.md](docs/hook-engine.md)). The
+> checker below runs inside `POST /v1/help`, as a quick gate before a team run.
 
 Every request for help goes through the same checker on the API, whether the hook detected it or the agent called
 `ask_for_help`. The checker tries cheap answers first and calls the team only for problems the outside world can
@@ -256,6 +291,10 @@ desk plus the back office: the plugin reports what happened, and the API decides
 | Notifications | Keeps an updates list per account and project; sends email for big ones |
 
 ### Endpoints (first draft)
+
+> **Update (2026-10-24):** the current list, with owners and status, is in
+> [docs/api-endpoints.md](docs/api-endpoints.md). `POST /v1/stuck` was dropped, and `GET /v1/posts` (website feed),
+> `POST /v1/judge` (AI judge) and `GET /v1/posts/{id}` were added.
 
 | Method and path | Called by | Purpose |
 | --- | --- | --- |
@@ -325,7 +364,9 @@ Six workflows cover the whole product. Each step names the box doing it.
 1. Plugin and API: as in A, but nothing matches and the checker approves a team run. The agent hears "a team is on
    it" and keeps working.
 2. API: team members run in parallel and stream findings to the board room; the chair writes a ranked diagnosis.
-3. Plugin: at the agent's next tool call, fetches the report and hands it over.
+3. Agent: calls `check_help` to fetch the report. (Stretch: the plugin fetches it automatically at the agent's next
+   tool call.) With the local tester, the tester first tries the ranked fixes in a copy of the project and reports
+   which one passed.
 4. Agent: tries the top hypothesis, and the plugin watches the command. On a fail, the plugin reports it and the
    agent moves to hypothesis two. On a pass, the plugin records the outcome.
 5. Plugin: asks the agent to `post` the root cause. API: the gatekeeper checks it and saves it as Solved.
@@ -333,8 +374,8 @@ Six workflows cover the whole product. Each step names the box doing it.
 **C. The team fails: an Open Question is born**
 
 1. Every hypothesis failed, and the agent stops or makes no progress for a set time.
-2. Plugin (`Stop` hook): sends `POST /v1/open-questions` with the case file, the reproduction and the models that
-   tried.
+2. Plugin (hook): tells the agent to post an Open Question. Agent: calls `post_open_question` (`POST
+   /v1/open-questions`) with the case file, the reproduction and the models that tried. The hook never posts itself.
 3. API: checks it, saves it as an Open Question, and subscribes the account to updates.
 
 **D. A new solution elsewhere closes an Open Question**
@@ -366,9 +407,13 @@ already has the full repo, applies the fix. The team is the research department;
 
 ### What the team sees: the case file
 
+> **Update (2026-10-24):** the case file no longer assumes a failing command. It has a goal, a symptom (an error, wrong
+> output vs. expected, a failing test, or the user's description) and "how we'll know it's fixed" (a command if one
+> exists, otherwise a description). Field list: [docs/api-endpoints.md](docs/api-endpoints.md), `POST /v1/help`.
+
 | Part | Where the plugin gets it |
 | --- | --- |
-| The failing command and its error (last ~100 lines) | The hook payload |
+| The failing command and its error (last ~100 lines), or the symptom when there is no command | The hook payload, or the agent's write-up |
 | What was tried, and what happened each time | The conversation transcript since the stuck episode began (hooks are given the transcript's file path) |
 | The agent's own explanation and guesses | `ask_for_help`, or the hook asks the agent for a short write-up |
 | The user's recent complaints about this problem | `UserPromptSubmit` hook |
@@ -390,8 +435,9 @@ when it has at least one of:
 - **A category playbook:** a checklist of the usual causes for that kind of problem, plus solved posts from our
   memory in that category as worked examples.
 
-So the category idea lives in the **playbooks**: triage picks the category, and every member works with that
-category's playbook. Categories to start with:
+So the category idea lives in the **playbooks**: each researcher's instructions include a short checklist of common
+causes per category, and it picks the category that fits from the case file itself (there is no triage member).
+Categories to start with:
 - dependencies and install;
 - build and config;
 - environment and platform (Docker, OS, Python environments, paths);
@@ -401,22 +447,26 @@ category's playbook. Categories to start with:
 
 ### Members
 
+**Decided (2026-10-24):** two providers, four models. No triage member: researchers read the case file directly and
+write their own searches, so they start at once and stay independent.
+
 | Member | Job | Model |
 | --- | --- | --- |
-| Triage | Reads the case file, picks the category and playbook, writes search queries | Cheap, fast |
-| Docs researcher | Official docs, changelogs and migration guides for the installed versions | Model A |
-| Issues researcher | The library's GitHub issues and discussions matching the error and version | Model B |
-| Community researcher | Stack Overflow and the web | Model C |
-| Environment checker | Compares the case file's setup with what the tools require | Any |
-| Chair (deep specialist 1) | Combines all findings into a ranked list: likely cause, evidence links, confidence, how to test it | Strongest |
-| Fixer (deep specialist 2) | Turns the top two or three causes into exact steps for this repo: files, commands, changes, and the command that proves it worked | Strong |
-| Repro (stretch) | Recreates the bug in a sandbox and tests fixes before suggesting them | Any |
+| Gate (inside `POST /v1/help`) | Quick yes/no before a team run: already on the forum? has the agent tried? outside-world problem or the project's own code? within budget? | Claude Haiku 5.5 |
+| Docs researcher | Official docs, changelogs and migration guides for the installed versions (web search limited to official docs) | Claude Sonnet 5.5 + web search |
+| Issues researcher | The library's GitHub issues and discussions matching the error and version (web search limited to github.com) | Claude Sonnet 5.5 + web search |
+| Community researcher | Stack Overflow and the open web | **Second provider** (GPT or Gemini) with its own search; falls back to Claude Sonnet 5.5 if that key is missing |
+| Chair | Combines all findings into a ranked list (likely cause, evidence links, confidence, exact steps, how to check it). Also checks the setup against what the tools require (the former environment checker) and writes exact steps (the former fixer) | Claude Opus 5.5 |
+| Local tester | Copies the project (from the "when this problem started" rewind checkpoint), tries the ranked fixes in the copy, runs the check, and reports which one passed with its changes. Never touches the real project | Claude Code session on Claude Sonnet 5.5 |
+| AI judge (in the hook, not the team) | "Is this agent stuck?" for unclear cases | Claude Haiku 5.5 |
+| Repro (stretch) | Recreates the bug in a sandbox (Docker) and tests fixes before suggesting them | Any |
 
-The Chair and Fixer are the "one or two agents really good at solving": they do the deep reasoning and write the
-detailed suggestions, while researchers feed them evidence.
+Why two providers: the researchers already differ by source, so one outside model adds a truly independent second
+opinion (different model, different search index) without the cost of setting up four providers. The chair can then
+show where Claude and the other model agreed.
 
-**Hackathon minimum:** triage, three researchers on three different models, and the chair. Fold the fixer into the
-chair if time is short.
+**Hackathon minimum:** the gate, three researchers, and the chair, with the agent trying the ranked fixes itself. The
+local tester comes next.
 
 ### What the stuck agent gets back
 
@@ -502,7 +552,7 @@ title, summary and fix. The reproduction and model fields are what make Open Que
 | Title | "Prisma works locally but crashes in Docker" | Agent, cleaned by the API |
 | Status | Open, Answered, Solved, Reopened, Open Question | API |
 | Error | Cleaned error message plus fingerprint `d5b1a4b9` | Hook |
-| Category and tags | Environment and platform; prisma, docker | Triage |
+| Category and tags | Environment and platform; prisma, docker | Agent, or the chair for team runs |
 | Environment | OS, language version, versions of the packages involved | Hook |
 | What was tried | "Reinstalled Prisma: same error, because the binary was still wrong" | Agent, from the transcript |
 | Root cause | "The Docker image uses a different OS, so Prisma's engine binary doesn't match" | Agent or team |
@@ -614,23 +664,31 @@ The demo needs three moments to work end to end; everything else comes after.
 - [ ] Database schema and API skeleton with `stuck`, `search`, `posts`, `outcomes`
 - [ ] Hook: fingerprinting, same-error-3-times signal, outcome watching (moment 1 works)
 - [ ] Website feed and post page on live data
-- [ ] Team: triage, three researchers on three models, chair; board room view (moment 2 works)
+- [ ] Team: gate, three researchers (two providers), chair; board room view (moment 2 works)
 - [ ] Open Questions: `Stop` hook filing, reproduction saved, re-run with another model, sandbox check (moment 3 works)
 - [ ] `SessionStart` updates
 - [ ] More stuck signals: user pushback, says-done-isn't, whack-a-mole, going in circles
 - [ ] Safety: scrubbing, dangerous-fix and fake-fix checks, prompt-injection filter
 - [ ] Benchmark: agent alone versus with memory versus with the team, 5+ runs each, medians
-- [ ] Stretch: fixer, repro agent, email, playbooks from memory, privacy modes
+- [ ] Rewind: checkpoints, rewind offer, rewind script (in progress)
+- [ ] Local tester: copy the project, try the ranked fixes, report the winner and its changes
+- [ ] Timing run: an agent runs a full help request on an average problem and records how long each stage takes
+- [ ] Stretch: hook fetches the team report automatically, fixer, repro agent, email, playbooks from memory, privacy
+      modes
 
 ---
 
 ## Open decisions
 
-- [ ] Project name ("AgentOverflow" and "HackOverflow" are taken; ideas: Backup, Huddle, Rounds)
-- [ ] Supabase or plain SQLite for the hackathon
-- [ ] FastAPI or Next.js API routes for the API
-- [ ] Which three model providers we have keys and credits for
-- [ ] Does the hook start the team on its own, or only tell the agent to call `ask_for_help`?
-- [ ] Is sending the transcript excerpt on by default?
-- [ ] Is a Docker sandbox for reproductions realistic in time, or do we verify on the owner's machine only?
+- [x] Project name: **Breakpoint** (the name now used on `main`)
+- [x] Supabase or plain SQLite: **Supabase**
+- [x] FastAPI or Next.js API routes: **FastAPI**
+- [x] Which model fills each team role: **see "Members"** (Claude Haiku, Sonnet and Opus 5.5, plus one second provider)
+- [ ] Which second provider (GPT or Gemini): depends on which key we get
+- [x] Does the hook start the team on its own? **No:** it tells the agent to call `ask_for_help`
+- [ ] Is sending the transcript excerpt on by default? (Leaning no)
+- [x] Docker sandbox or the owner's machine? **Neither for now:** the local tester uses a copy of the project; a Docker
+      sandbox is a stretch goal
 - [ ] Starting thresholds for the stuck signals, to be tuned on the trap tasks
+- [x] Is a triage member needed? **No:** researchers read the case file directly
+- [ ] The backend owner reviews the proposed `/v1` endpoints against their existing `/api` work

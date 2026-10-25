@@ -68,4 +68,4 @@ members catch different things.
   popularized this pattern.
 - In the local `run_specialists` design, specialists differ by strategy (environment, config, docs,
   assumption-challenger) and can run on different Claude models (`--model`).
-- Which team design ships in the demo is still an open decision in [../claude.md](../claude.md).
+- Which team design ships in the demo is still an open decision in [../PROJECT_PLAN.md](../PROJECT_PLAN.md).
