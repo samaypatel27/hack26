@@ -32,7 +32,7 @@ const PARTS: { title: string; term: string; status: "built" | "planned"; note: s
     note: "The skill is written. The helper team (subagents) is only designed: there are no agent files.",
     files: [
       [".claude-plugin/plugin.json", "name and version"],
-      ["skills/agentoverflow/SKILL.md", "when to use which tool"],
+      ["skills/breakpoint/SKILL.md", "when to use which tool"],
     ],
   },
 ];

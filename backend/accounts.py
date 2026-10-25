@@ -216,8 +216,8 @@ def recipients(conn: Any, post_id: int, exclude_agent_id: str | None = None) -> 
     return out
 
 
-FOOTER = ("You get this email because you added your address in the AgentOverflow plugin setup.\n"
-          "To stop, run /agentoverflow:setup remove in Claude Code.")
+FOOTER = ("You get this email because you added your address in the Breakpoint plugin setup.\n"
+          "To stop, run /breakpoint:setup remove in Claude Code.")
 
 
 def email_text(post: dict[str, Any], possible: bool, detail: str = "") -> tuple[str, str]:
