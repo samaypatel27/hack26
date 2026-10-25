@@ -1,0 +1,842 @@
+{
+ "_note": "Board-room demo: a reconstructed team run for backend/team/samples/prisma_alpine_docker.json, in the exact shapes of GET /api/help/{run_id}. 'at' is seconds since the run started; the player turns it into ids and times.",
+ "run_id": "tr_demo5a1c0e9b",
+ "case_file": {
+  "goal": "Run the Node/Express API in Docker with docker compose; it works with `npm run dev` on the laptop but crashes on startup inside the container.",
+  "symptom": "PrismaClientInitializationError: Prisma Client could not locate the Query Engine for runtime \"linux-musl-openssl-3.0.x\".\n\nThis happened because Prisma Client was generated for \"darwin-arm64\", but the actual deployment required \"linux-musl-openssl-3.0.x\".\nAdd \"linux-musl-openssl-3.0.x\" to `binaryTargets` in the \"schema.prisma\" file and run `prisma generate` after saving it:\n\ngenerator client {\n  provider      = \"prisma-client-js\"\n  binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"]\n}\n\nThe following locations have been searched:\n  /app/node_modules/.prisma/client\n  /app/node_modules/@prisma/client\n    at Ln (/app/node_modules/@prisma/client/runtime/library.js:111:9)\n    at async Object.loadLibrary (/app/node_modules/@prisma/client/runtime/library.js:111:2134)",
+  "environment": "macOS 15 on Apple Silicon (darwin-arm64) for development; Docker image node:20-alpine (Alpine 3.20, musl, OpenSSL 3); Node 20.18; prisma 5.22.0, @prisma/client 5.22.0; PostgreSQL 16 in a second compose service.",
+  "check_command": "docker compose up --build api",
+  "tried": [
+   {
+    "attempt": "Deleted node_modules and ran npm ci again on the laptop, then rebuilt the image",
+    "result": "Same error"
+   },
+   {
+    "attempt": "Ran `npx prisma generate` on the laptop before docker compose build",
+    "result": "Same error, still says generated for darwin-arm64"
+   },
+   {
+    "attempt": "Upgraded prisma and @prisma/client from 5.14.0 to 5.22.0",
+    "result": "Same error"
+   }
+  ],
+  "project": "demo-prisma-api",
+  "model": "claude-haiku-5-5"
+ },
+ "events": [
+  {
+   "id": 1,
+   "at": 0.0,
+   "member": "runner",
+   "type": "started",
+   "text": "team run started",
+   "data": {
+    "models": {
+     "gate": "claude-haiku-5-5",
+     "docs": "claude-sonnet-5-5",
+     "issues": "claude-sonnet-5-5",
+     "community": "gpt-6.1-sol",
+     "community_fallback": "claude-sonnet-5-5",
+     "chair": "claude-opus-5-5"
+    }
+   }
+  },
+  {
+   "id": 2,
+   "at": 0.1,
+   "member": "docs",
+   "type": "started",
+   "text": "docs researcher started (claude-sonnet-5-5)",
+   "data": {
+    "model": "claude-sonnet-5-5"
+   }
+  },
+  {
+   "id": 3,
+   "at": 0.1,
+   "member": "issues",
+   "type": "started",
+   "text": "issues researcher started (claude-sonnet-5-5)",
+   "data": {
+    "model": "claude-sonnet-5-5"
+   }
+  },
+  {
+   "id": 4,
+   "at": 0.2,
+   "member": "community",
+   "type": "started",
+   "text": "community researcher started (gpt-6.1-sol)",
+   "data": {
+    "model": "gpt-6.1-sol"
+   }
+  },
+  {
+   "id": 5,
+   "at": 2.9,
+   "member": "docs",
+   "type": "searching",
+   "text": "prisma binaryTargets linux-musl-openssl-3.0.x alpine",
+   "data": {
+    "query": "prisma binaryTargets linux-musl-openssl-3.0.x alpine"
+   }
+  },
+  {
+   "id": 6,
+   "at": 3.3,
+   "member": "issues",
+   "type": "searching",
+   "text": "\"linux-musl-openssl-3.0.x\" \"generated for darwin-arm64\" docker",
+   "data": {
+    "query": "\"linux-musl-openssl-3.0.x\" \"generated for darwin-arm64\" docker"
+   }
+  },
+  {
+   "id": 7,
+   "at": 4.2,
+   "member": "docs",
+   "type": "source",
+   "text": "Prisma schema API reference | Prisma Documentation",
+   "data": {
+    "url": "https://www.prisma.io/docs/orm/reference/prisma-schema-reference",
+    "title": "Prisma schema API reference | Prisma Documentation"
+   }
+  },
+  {
+   "id": 8,
+   "at": 4.2,
+   "member": "docs",
+   "type": "source",
+   "text": "System requirements (Reference) | Prisma Documentation",
+   "data": {
+    "url": "https://www.prisma.io/docs/orm/reference/system-requirements",
+    "title": "System requirements (Reference) | Prisma Documentation"
+   }
+  },
+  {
+   "id": 9,
+   "at": 4.3,
+   "member": "docs",
+   "type": "source",
+   "text": "Generators (Reference) | Prisma Documentation",
+   "data": {
+    "url": "https://www.prisma.io/docs/orm/prisma-schema/overview/generators",
+    "title": "Generators (Reference) | Prisma Documentation"
+   }
+  },
+  {
+   "id": 10,
+   "at": 4.9,
+   "member": "issues",
+   "type": "source",
+   "text": "Alpine: Query engine could not be found · Issue #1642 · prisma/prisma",
+   "data": {
+    "url": "https://github.com/prisma/prisma/issues/1642",
+    "title": "Alpine: Query engine could not be found · Issue #1642 · prisma/prisma"
+   }
+  },
+  {
+   "id": 11,
+   "at": 4.9,
+   "member": "issues",
+   "type": "source",
+   "text": "Unable to require libquery_engine-debian-openssl-3.0.x.so.node · Issue #24159",
+   "data": {
+    "url": "https://github.com/prisma/prisma/issues/24159",
+    "title": "Unable to require libquery_engine-debian-openssl-3.0.x.so.node · Issue #24159"
+   }
+  },
+  {
+   "id": 12,
+   "at": 5.0,
+   "member": "issues",
+   "type": "source",
+   "text": "Issues · prisma/prisma: linux-musl-openssl-3.0.x docker",
+   "data": {
+    "url": "https://github.com/prisma/prisma/issues?q=linux-musl-openssl-3.0.x+docker",
+    "title": "Issues · prisma/prisma: linux-musl-openssl-3.0.x docker"
+   }
+  },
+  {
+   "id": 13,
+   "at": 5.6,
+   "member": "community",
+   "type": "searching",
+   "text": "prisma docker alpine \"could not locate the Query Engine\" linux-musl-openssl-3.0.x; prisma generated for darwin-arm64 docker container crash",
+   "data": {
+    "queries": [
+     "prisma docker alpine \"could not locate the Query Engine\" linux-musl-openssl-3.0.x",
+     "prisma generated for darwin-arm64 docker container crash"
+    ]
+   }
+  },
+  {
+   "id": 14,
+   "at": 5.6,
+   "member": "community",
+   "type": "source",
+   "text": "https://station.railway.com/questions/prisma-suddenly-crashes-on-today-s-deplo-1d3c525f",
+   "data": {
+    "url": "https://station.railway.com/questions/prisma-suddenly-crashes-on-today-s-deplo-1d3c525f"
+   }
+  },
+  {
+   "id": 15,
+   "at": 5.6,
+   "member": "community",
+   "type": "source",
+   "text": "https://station.railway.com/questions/prisma-binary-issue-e3cbfc9e",
+   "data": {
+    "url": "https://station.railway.com/questions/prisma-binary-issue-e3cbfc9e"
+   }
+  },
+  {
+   "id": 16,
+   "at": 5.6,
+   "member": "community",
+   "type": "source",
+   "text": "https://zenn.dev/gtca/scraps/8e53ee95ad57c0",
+   "data": {
+    "url": "https://zenn.dev/gtca/scraps/8e53ee95ad57c0"
+   }
+  },
+  {
+   "id": 17,
+   "at": 7.4,
+   "member": "docs",
+   "type": "fetching",
+   "text": "https://www.prisma.io/docs/orm/reference/prisma-schema-reference#binarytargets-options",
+   "data": {
+    "url": "https://www.prisma.io/docs/orm/reference/prisma-schema-reference#binarytargets-options"
+   }
+  },
+  {
+   "id": 18,
+   "at": 8.8,
+   "member": "issues",
+   "type": "fetching",
+   "text": "https://github.com/prisma/prisma/issues/1642",
+   "data": {
+    "url": "https://github.com/prisma/prisma/issues/1642"
+   }
+  },
+  {
+   "id": 19,
+   "at": 9.1,
+   "member": "docs",
+   "type": "source",
+   "text": "read https://www.prisma.io/docs/orm/reference/prisma-schema-reference#binarytargets-options",
+   "data": {
+    "url": "https://www.prisma.io/docs/orm/reference/prisma-schema-reference#binarytargets-options"
+   }
+  },
+  {
+   "id": 20,
+   "at": 10.7,
+   "member": "issues",
+   "type": "source",
+   "text": "read https://github.com/prisma/prisma/issues/1642",
+   "data": {
+    "url": "https://github.com/prisma/prisma/issues/1642"
+   }
+  },
+  {
+   "id": 21,
+   "at": 11.6,
+   "member": "docs",
+   "type": "searching",
+   "text": "dockerignore node_modules COPY . . overwrites installed dependencies",
+   "data": {
+    "query": "dockerignore node_modules COPY . . overwrites installed dependencies"
+   }
+  },
+  {
+   "id": 22,
+   "at": 12.9,
+   "member": "docs",
+   "type": "source",
+   "text": "Build context | Docker Docs",
+   "data": {
+    "url": "https://docs.docker.com/build/concepts/context/#dockerignore-files",
+    "title": "Build context | Docker Docs"
+   }
+  },
+  {
+   "id": 23,
+   "at": 12.9,
+   "member": "docs",
+   "type": "source",
+   "text": "Building best practices | Docker Docs",
+   "data": {
+    "url": "https://docs.docker.com/build/building/best-practices/",
+    "title": "Building best practices | Docker Docs"
+   }
+  },
+  {
+   "id": 24,
+   "at": 13.1,
+   "member": "community",
+   "type": "fetching",
+   "text": "https://station.railway.com/questions/prisma-suddenly-crashes-on-today-s-deplo-1d3c525f",
+   "data": {
+    "url": "https://station.railway.com/questions/prisma-suddenly-crashes-on-today-s-deplo-1d3c525f"
+   }
+  },
+  {
+   "id": 25,
+   "at": 14.0,
+   "member": "issues",
+   "type": "searching",
+   "text": "prisma docker node_modules copied from host wrong engine dockerignore",
+   "data": {
+    "query": "prisma docker node_modules copied from host wrong engine dockerignore"
+   }
+  },
+  {
+   "id": 26,
+   "at": 15.2,
+   "member": "docs",
+   "type": "fetching",
+   "text": "https://docs.docker.com/build/concepts/context/#dockerignore-files",
+   "data": {
+    "url": "https://docs.docker.com/build/concepts/context/#dockerignore-files"
+   }
+  },
+  {
+   "id": 27,
+   "at": 15.6,
+   "member": "issues",
+   "type": "source",
+   "text": "Prisma on Alpine: workarounds · Discussion #702 · prisma/prisma",
+   "data": {
+    "url": "https://github.com/prisma/prisma/discussions/702",
+    "title": "Prisma on Alpine: workarounds · Discussion #702 · prisma/prisma"
+   }
+  },
+  {
+   "id": 28,
+   "at": 16.5,
+   "member": "docs",
+   "type": "source",
+   "text": "read https://docs.docker.com/build/concepts/context/#dockerignore-files",
+   "data": {
+    "url": "https://docs.docker.com/build/concepts/context/#dockerignore-files"
+   }
+  },
+  {
+   "id": 29,
+   "at": 18.9,
+   "member": "issues",
+   "type": "fetching",
+   "text": "https://github.com/prisma/prisma/discussions/702",
+   "data": {
+    "url": "https://github.com/prisma/prisma/discussions/702"
+   }
+  },
+  {
+   "id": 30,
+   "at": 19.4,
+   "member": "community",
+   "type": "searching",
+   "text": "node:20-alpine prisma openssl 3 libssl missing \"apk add openssl\"",
+   "data": {
+    "queries": [
+     "node:20-alpine prisma openssl 3 libssl missing \"apk add openssl\""
+    ]
+   }
+  },
+  {
+   "id": 31,
+   "at": 19.4,
+   "member": "community",
+   "type": "source",
+   "text": "https://station.railway.com/questions/error-with-prisma-open-ssl-259588ed",
+   "data": {
+    "url": "https://station.railway.com/questions/error-with-prisma-open-ssl-259588ed"
+   }
+  },
+  {
+   "id": 32,
+   "at": 19.4,
+   "member": "community",
+   "type": "source",
+   "text": "https://zenn.dev/gtca/scraps/8e53ee95ad57c0",
+   "data": {
+    "url": "https://zenn.dev/gtca/scraps/8e53ee95ad57c0"
+   }
+  },
+  {
+   "id": 33,
+   "at": 19.7,
+   "member": "docs",
+   "type": "searching",
+   "text": "prisma generate inside docker image alpine guide",
+   "data": {
+    "query": "prisma generate inside docker image alpine guide"
+   }
+  },
+  {
+   "id": 34,
+   "at": 20.6,
+   "member": "issues",
+   "type": "source",
+   "text": "read https://github.com/prisma/prisma/discussions/702",
+   "data": {
+    "url": "https://github.com/prisma/prisma/discussions/702"
+   }
+  },
+  {
+   "id": 35,
+   "at": 21.0,
+   "member": "docs",
+   "type": "source",
+   "text": "How to use Prisma in Docker | Prisma Documentation",
+   "data": {
+    "url": "https://www.prisma.io/docs/guides/docker",
+    "title": "How to use Prisma in Docker | Prisma Documentation"
+   }
+  },
+  {
+   "id": 36,
+   "at": 21.0,
+   "member": "docs",
+   "type": "source",
+   "text": "Multi-stage builds | Docker Docs",
+   "data": {
+    "url": "https://docs.docker.com/build/building/multi-stage/",
+    "title": "Multi-stage builds | Docker Docs"
+   }
+  },
+  {
+   "id": 37,
+   "at": 23.4,
+   "member": "docs",
+   "type": "fetching",
+   "text": "https://www.prisma.io/docs/guides/docker",
+   "data": {
+    "url": "https://www.prisma.io/docs/guides/docker"
+   }
+  },
+  {
+   "id": 38,
+   "at": 24.2,
+   "member": "issues",
+   "type": "searching",
+   "text": "npm ci --omit=dev prisma generate postinstall not run docker",
+   "data": {
+    "query": "npm ci --omit=dev prisma generate postinstall not run docker"
+   }
+  },
+  {
+   "id": 39,
+   "at": 24.8,
+   "member": "docs",
+   "type": "source",
+   "text": "read https://www.prisma.io/docs/guides/docker",
+   "data": {
+    "url": "https://www.prisma.io/docs/guides/docker"
+   }
+  },
+  {
+   "id": 40,
+   "at": 25.8,
+   "member": "issues",
+   "type": "source",
+   "text": "Issues · prisma/prisma",
+   "data": {
+    "url": "https://github.com/prisma/prisma/issues?q=linux-musl-openssl-3.0.x+docker",
+    "title": "Issues · prisma/prisma"
+   }
+  },
+  {
+   "id": 41,
+   "at": 27.0,
+   "member": "community",
+   "type": "fetching",
+   "text": "https://zenn.dev/gtca/scraps/8e53ee95ad57c0",
+   "data": {
+    "url": "https://zenn.dev/gtca/scraps/8e53ee95ad57c0"
+   }
+  },
+  {
+   "id": 42,
+   "at": 31.4,
+   "member": "docs",
+   "type": "finished",
+   "text": "2 finding(s) in 31.3s, $0.118",
+   "data": {
+    "findings": [
+     {
+      "cause": "The .dockerignore doesn't list node_modules, so COPY . . copies the laptop's node_modules (with a Prisma Client generated for darwin-arm64) over the one npm ci built in the image.",
+      "confidence": 0.8,
+      "evidence": [
+       {
+        "url": "https://docs.docker.com/build/concepts/context/#dockerignore-files",
+        "source": "docs",
+        "quote": "Use a .dockerignore file to exclude files and directories from the build context.",
+        "seen": true
+       },
+       {
+        "url": "https://www.prisma.io/docs/guides/docker",
+        "source": "docs",
+        "quote": "Add node_modules to your .dockerignore so host dependencies are not copied into the image.",
+        "seen": true
+       }
+      ],
+      "steps": [
+       "Add node_modules to .dockerignore",
+       "Rebuild the image with docker compose build --no-cache api"
+      ],
+      "check": {
+       "command": "docker compose up --build api",
+       "description": "The api service logs 'listening on :3000' and stays up."
+      }
+     },
+     {
+      "cause": "binaryTargets has no Alpine engine; Prisma 5 needs linux-musl-openssl-3.0.x for Alpine 3.17+.",
+      "confidence": 0.7,
+      "evidence": [
+       {
+        "url": "https://www.prisma.io/docs/orm/reference/prisma-schema-reference#binarytargets-options",
+        "source": "docs",
+        "quote": "linux-musl-openssl-3.0.x: Alpine Linux 3.17+ (x86_64)",
+        "seen": true
+       }
+      ],
+      "steps": [
+       "In prisma/schema.prisma, set binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"] in the generator client block",
+       "Run npx prisma generate inside the image"
+      ],
+      "check": {
+       "command": "docker compose up --build api",
+       "description": "The api service logs 'listening on :3000' and stays up."
+      }
+     }
+    ],
+    "category": "environment_platform",
+    "elapsed_s": 31.3,
+    "cost_usd": 0.118,
+    "model": "claude-sonnet-5-5"
+   }
+  },
+  {
+   "id": 43,
+   "at": 34.6,
+   "member": "issues",
+   "type": "finished",
+   "text": "2 finding(s) in 34.5s, $0.104",
+   "data": {
+    "findings": [
+     {
+      "cause": "Prisma Client is generated on the host and copied into the container, so the image only has the darwin-arm64 engine; maintainers say to generate inside the image with the musl target.",
+      "confidence": 0.75,
+      "evidence": [
+       {
+        "url": "https://github.com/prisma/prisma/issues/1642",
+        "source": "github",
+        "quote": "generate the client inside the container, not on your machine",
+        "seen": true
+       },
+       {
+        "url": "https://github.com/prisma/prisma/discussions/702",
+        "source": "github",
+        "quote": "add the musl binary target and run prisma generate in the Dockerfile",
+        "seen": true
+       }
+      ],
+      "steps": [
+       "Add node_modules to .dockerignore",
+       "In prisma/schema.prisma, set binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"] in the generator client block",
+       "Run npx prisma generate in the Dockerfile after COPY . ."
+      ],
+      "check": {
+       "command": "docker compose up --build api",
+       "description": "The api service logs 'listening on :3000' and stays up."
+      }
+     },
+     {
+      "cause": "npm ci --omit=dev drops the prisma CLI (a devDependency), so nothing regenerates the client inside the image.",
+      "confidence": 0.5,
+      "evidence": [
+       {
+        "url": "https://github.com/prisma/prisma/issues?q=linux-musl-openssl-3.0.x+docker",
+        "source": "github",
+        "quote": "prisma generate never ran in the production stage",
+        "seen": true
+       }
+      ],
+      "steps": [
+       "Install all dependencies, run npx prisma generate and npm run build, then npm prune --omit=dev"
+      ],
+      "check": {
+       "command": "docker compose up --build api",
+       "description": "The api service logs 'listening on :3000' and stays up."
+      }
+     }
+    ],
+    "category": "environment_platform",
+    "elapsed_s": 34.5,
+    "cost_usd": 0.104,
+    "model": "claude-sonnet-5-5"
+   }
+  },
+  {
+   "id": 44,
+   "at": 37.9,
+   "member": "community",
+   "type": "finished",
+   "text": "2 finding(s) in 37.7s, $0.071",
+   "data": {
+    "findings": [
+     {
+      "cause": "The client was generated for the wrong platform; adding the Alpine target to binaryTargets and regenerating fixed the same crash for others.",
+      "confidence": 0.65,
+      "evidence": [
+       {
+        "url": "https://station.railway.com/questions/prisma-suddenly-crashes-on-today-s-deplo-1d3c525f",
+        "source": "community",
+        "quote": "Add the target the deployment needs to binaryTargets and run prisma generate again",
+        "seen": true
+       }
+      ],
+      "steps": [
+       "In prisma/schema.prisma, set binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"] in the generator client block",
+       "Run npx prisma generate and rebuild"
+      ],
+      "check": {
+       "command": "docker compose up --build api",
+       "description": "The api service logs 'listening on :3000' and stays up."
+      }
+     },
+     {
+      "cause": "OpenSSL is missing from the Alpine image, so Prisma can't detect libssl and loads no engine.",
+      "confidence": 0.35,
+      "evidence": [
+       {
+        "url": "https://station.railway.com/questions/error-with-prisma-open-ssl-259588ed",
+        "source": "community",
+        "quote": "apk add --no-cache openssl in the Dockerfile fixed it",
+        "seen": true
+       },
+       {
+        "url": "https://zenn.dev/gtca/scraps/8e53ee95ad57c0",
+        "source": "community",
+        "quote": "Prisma failed to detect the libssl/openssl version to use",
+        "seen": true
+       }
+      ],
+      "steps": [
+       "Add RUN apk add --no-cache openssl to the Dockerfile before npm ci"
+      ],
+      "check": {
+       "command": "docker compose up --build api",
+       "description": "The api service logs 'listening on :3000' and stays up."
+      }
+     }
+    ],
+    "category": "environment_platform",
+    "elapsed_s": 37.7,
+    "cost_usd": 0.071,
+    "model": "gpt-6.1-sol"
+   }
+  },
+  {
+   "id": 45,
+   "at": 38.1,
+   "member": "chair",
+   "type": "chair_started",
+   "text": "chair merging 3 researcher report(s)",
+   "data": {
+    "model": "claude-opus-5-5"
+   }
+  },
+  {
+   "id": 46,
+   "at": 58.4,
+   "member": "chair",
+   "type": "chair_done",
+   "text": "3 hypothesis(es) in 20.3s, $0.212",
+   "data": {
+    "elapsed_s": 20.3,
+    "cost_usd": 0.212
+   }
+  },
+  {
+   "id": 47,
+   "at": 58.6,
+   "member": "runner",
+   "type": "done",
+   "text": "report in 58.6s, $0.505",
+   "data": {
+    "status": "report",
+    "cost_usd": 0.505,
+    "timings": {
+     "docs_s": 31.3,
+     "issues_s": 34.5,
+     "community_s": 37.7,
+     "researchers_s": 37.9,
+     "chair_s": 20.3,
+     "total_s": 58.6
+    }
+   }
+  }
+ ],
+ "final": {
+  "status": "report",
+  "elapsed_s": 58.6,
+  "report": {
+   "status": "report",
+   "hypotheses": [
+    {
+     "rank": 1,
+     "cause": "The laptop's node_modules is copied into the image. .dockerignore doesn't exclude it, so COPY . . replaces the Prisma Client that npm ci built in the container with one generated for darwin-arm64, which has no Alpine (musl) engine.",
+     "confidence": 0.86,
+     "evidence": [
+      {
+       "url": "https://docs.docker.com/build/concepts/context/#dockerignore-files",
+       "source": "docs",
+       "quote": "Use a .dockerignore file to exclude files and directories from the build context.",
+       "seen": true
+      },
+      {
+       "url": "https://github.com/prisma/prisma/issues/1642",
+       "source": "github",
+       "quote": "generate the client inside the container, not on your machine",
+       "seen": true
+      },
+      {
+       "url": "https://station.railway.com/questions/prisma-suddenly-crashes-on-today-s-deplo-1d3c525f",
+       "source": "community",
+       "quote": "Add the target the deployment needs to binaryTargets and run prisma generate again",
+       "seen": true
+      }
+     ],
+     "steps": [
+      "Add node_modules to .dockerignore (next to .git, .env and dist).",
+      "Rebuild without the cached layers: docker compose build --no-cache api."
+     ],
+     "check": {
+      "command": "docker compose up --build api",
+      "description": "The api service logs 'listening on :3000' and stays up."
+     },
+     "agreed_by": [
+      "docs",
+      "issues",
+      "community"
+     ]
+    },
+    {
+     "rank": 2,
+     "cause": "Nothing generates the client for Alpine inside the image: binaryTargets has no musl target, and npm ci --omit=dev leaves out the prisma CLI, so prisma generate never runs in the container.",
+     "confidence": 0.64,
+     "evidence": [
+      {
+       "url": "https://www.prisma.io/docs/orm/reference/prisma-schema-reference#binarytargets-options",
+       "source": "docs",
+       "quote": "linux-musl-openssl-3.0.x: Alpine Linux 3.17+ (x86_64)",
+       "seen": true
+      },
+      {
+       "url": "https://github.com/prisma/prisma/discussions/702",
+       "source": "github",
+       "quote": "add the musl binary target and run prisma generate in the Dockerfile",
+       "seen": true
+      }
+     ],
+     "steps": [
+      "In prisma/schema.prisma, set binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"] in the generator client block.",
+      "In the Dockerfile, run npm ci (with dev dependencies), then COPY . ., then npx prisma generate and npm run build.",
+      "Finish the Dockerfile with npm prune --omit=dev to drop dev dependencies from the final image."
+     ],
+     "check": {
+      "command": "docker compose up --build api",
+      "description": "The api service logs 'listening on :3000' and stays up."
+     },
+     "agreed_by": [
+      "docs",
+      "issues"
+     ]
+    },
+    {
+     "rank": 3,
+     "cause": "OpenSSL isn't installed in the Alpine image, so Prisma can't detect libssl and picks no engine even when the right one is there.",
+     "confidence": 0.31,
+     "evidence": [
+      {
+       "url": "https://station.railway.com/questions/error-with-prisma-open-ssl-259588ed",
+       "source": "community",
+       "quote": "apk add --no-cache openssl in the Dockerfile fixed it",
+       "seen": true
+      },
+      {
+       "url": "https://zenn.dev/gtca/scraps/8e53ee95ad57c0",
+       "source": "community",
+       "quote": "Prisma failed to detect the libssl/openssl version to use",
+       "seen": true
+      }
+     ],
+     "steps": [
+      "Add RUN apk add --no-cache openssl to the Dockerfile, before npm ci."
+     ],
+     "check": {
+      "command": "docker compose run --rm api npx prisma -v",
+      "description": "Lists linux-musl-openssl-3.0.x as the platform, with no libssl warning."
+     },
+     "agreed_by": [
+      "community"
+     ]
+    }
+   ],
+   "models": {
+    "docs": "claude-sonnet-5-5",
+    "issues": "claude-sonnet-5-5",
+    "community": "gpt-6.1-sol",
+    "chair": "claude-opus-5-5"
+   },
+   "notes": [],
+   "chair_fallback": false,
+   "category": "environment_platform",
+   "environment_check": "Development is on darwin-arm64; the image is node:20-alpine (Alpine 3.20, musl, OpenSSL 3), which needs Prisma's linux-musl-openssl-3.0.x engine. Prisma 5.22 supports it.",
+   "if_none_work": "Run docker compose run --rm api npx prisma -v and compare the engine platform with the image. If it still says darwin-arm64, a host-built client is still being copied in: check every COPY line and the .dockerignore.",
+   "cost_usd": 0.505,
+   "costs": {
+    "docs": {
+     "model": "claude-sonnet-5-5",
+     "cost_usd": 0.118,
+     "web_searches": 3,
+     "web_fetches": 3
+    },
+    "issues": {
+     "model": "claude-sonnet-5-5",
+     "cost_usd": 0.104,
+     "web_searches": 3,
+     "web_fetches": 2
+    },
+    "community": {
+     "model": "gpt-6.1-sol",
+     "cost_usd": 0.071,
+     "web_searches": 2,
+     "web_fetches": 0
+    },
+    "chair": {
+     "model": "claude-opus-5-5",
+     "cost_usd": 0.212,
+     "web_searches": 0,
+     "web_fetches": 0
+    }
+   },
+   "timings": {
+    "docs_s": 31.3,
+    "issues_s": 34.5,
+    "community_s": 37.7,
+    "researchers_s": 37.9,
+    "chair_s": 20.3,
+    "total_s": 58.6
+   },
+   "min_confidence": 0.4,
+   "verification": "possible_answer",
+   "flagged": []
+  },
+  "message": "TEAM_REPORT: run tr_demo5a1c0e9b. 3 likely cause(s), most likely first. Try them one at a time on the real project and rerun the check after each.\n\n1. [86% confidence] The laptop's node_modules is copied into the image. .dockerignore doesn't exclude it, so COPY . . replaces the Prisma Client that npm ci built in the container with one generated for darwin-arm64, which has no Alpine (musl) engine.\n   found by: docs, issues, community\n   evidence (docs): https://docs.docker.com/build/concepts/context/#dockerignore-files - \"Use a .dockerignore file to exclude files and directories from the build context.\"\n   evidence (github): https://github.com/prisma/prisma/issues/1642 - \"generate the client inside the container, not on your machine\"\n   evidence (community): https://station.railway.com/questions/prisma-suddenly-crashes-on-today-s-deplo-1d3c525f - \"Add the target the deployment needs to binaryTargets and run prisma generate again\"\n   steps:\n     1. Add node_modules to .dockerignore (next to .git, .env and dist).\n     2. Rebuild without the cached layers: docker compose build --no-cache api.\n   check: run `docker compose up --build api` (The api service logs 'listening on :3000' and stays up.)\n\n2. [64% confidence] Nothing generates the client for Alpine inside the image: binaryTargets has no musl target, and npm ci --omit=dev leaves out the prisma CLI, so prisma generate never runs in the container.\n   found by: docs, issues\n   evidence (docs): https://www.prisma.io/docs/orm/reference/prisma-schema-reference#binarytargets-options - \"linux-musl-openssl-3.0.x: Alpine Linux 3.17+ (x86_64)\"\n   evidence (github): https://github.com/prisma/prisma/discussions/702 - \"add the musl binary target and run prisma generate in the Dockerfile\"\n   steps:\n     1. In prisma/schema.prisma, set binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"] in the generator client block.\n     2. In the Dockerfile, run npm ci (with dev dependencies), then COPY . ., then npx prisma generate and npm run build.\n     3. Finish the Dockerfile with npm prune --omit=dev to drop dev dependencies from the final image.\n   check: run `docker compose up --build api` (The api service logs 'listening on :3000' and stays up.)\n\n3. [31% confidence] OpenSSL isn't installed in the Alpine image, so Prisma can't detect libssl and picks no engine even when the right one is there.\n   found by: community\n   evidence (community): https://station.railway.com/questions/error-with-prisma-open-ssl-259588ed - \"apk add --no-cache openssl in the Dockerfile fixed it\"\n   evidence (community): https://zenn.dev/gtca/scraps/8e53ee95ad57c0 - \"Prisma failed to detect the libssl/openssl version to use\"\n   steps:\n     1. Add RUN apk add --no-cache openssl to the Dockerfile, before npm ci.\n   check: run `docker compose run --rm api npx prisma -v` (Lists linux-musl-openssl-3.0.x as the platform, with no libssl warning.)\n\nSetup check: Development is on darwin-arm64; the image is node:20-alpine (Alpine 3.20, musl, OpenSSL 3), which needs Prisma's linux-musl-openssl-3.0.x engine. Prisma 5.22 supports it.\n\nIf none work: Run docker compose run --rm api npx prisma -v and compare the engine platform with the image. If it still says darwin-arm64, a host-built client is still being copied in: check every COPY line and the .dockerignore.\n\nPossible answer: untested suggestions from web research. The server can't run the check, so try each one on the real project; it only counts as solved once the check passes."
+ }
+}
