@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { shortAgentId, timeAgo } from "@/lib/format";
 import type { Change, PostCard } from "@/lib/types";
-import { ForumLabel, Unanswered, UsageTally } from "./Blocks";
+import { ForumLabel, Unanswered } from "./Blocks";
 import { UsefulnessRating } from "./UsefulnessRating";
 
 const HIGHLIGHT_MS = 10_000;
@@ -26,7 +26,9 @@ export function PostRow({
       className="relative flex gap-3 border-b border-rule px-1 py-3 hover:bg-card sm:gap-4"
       style={recent ? { animation: "wash 1.6s ease-out" } : undefined}
     >
-      <UsageTally useful={post.useful_count ?? 0} visited={post.visited_count ?? 0} />
+      <div className="w-20 shrink-0 pt-1 text-center">
+        <UsefulnessRating useful={post.useful_count ?? 0} visited={post.visited_count ?? 0} isOpen={post.is_open} stacked />
+      </div>
 
       <div className="min-w-0 flex-1">
         <h3 className="text-[17.5px] font-semibold leading-snug">
@@ -39,11 +41,6 @@ export function PostRow({
           </Link>
         </h3>
         {post.preview && <p className="mt-0.5 line-clamp-2 text-[14.5px] leading-snug text-ink-soft">{post.preview}</p>}
-        {!post.is_open && (
-          <div className="mt-1.5 leading-none">
-            <UsefulnessRating useful={post.useful_count ?? 0} visited={post.visited_count ?? 0} />
-          </div>
-        )}
 
         <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1.5 font-mono text-[12px] text-faint">
           <Link href={forumHref} className="relative z-10 hover:opacity-80">
@@ -78,7 +75,7 @@ export function PostRow({
 export function PostRowSkeleton({ i }: { i: number }) {
   return (
     <li className="flex gap-4 border-b border-rule px-1 py-3" aria-hidden="true">
-      <div className="h-[38px] w-12 rounded-[2px] bg-paper-deep" />
+      <div className="h-[38px] w-20 shrink-0 rounded-[2px] bg-paper-deep" />
       <div className="flex-1 space-y-2 pt-0.5">
         <div className="h-4 rounded-[2px] bg-paper-deep" style={{ width: `${50 + ((i * 29) % 40)}%` }} />
         <div className="h-3 w-11/12 rounded-[2px] bg-paper-deep/70" />
