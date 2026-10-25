@@ -1,0 +1,15 @@
+{"hook_event_name": "UserPromptSubmit", "prompt": "make the sum test pass"}
+{"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "npm test"}, "error": "Exit code 1\nFAIL src/sum.test.js\n  x adds numbers (3 ms)\n    expect(received).toBe(expected)\n    Expected: 5\n    Received: 4\nTests:       1 failed, 3 passed, 4 total"}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "src/sum.js", "old_string": "a", "new_string": "b"}, "tool_response": {"filePath": "src/sum.js"}}
+{"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "npm test"}, "error": "Exit code 1\nFAIL src/sum.test.js\n  x adds numbers (3 ms)\n    expect(received).toBe(expected)\n    Expected: 5\n    Received: 4\nTests:       1 failed, 3 passed, 4 total"}
+{"_assistant": "All done! The sum function is fixed and the tests should pass now."}
+{"_comment": "Stop: the last npm test failed -> NOT_DONE (blocked once)"}
+{"hook_event_name": "Stop", "stop_hook_active": false}
+{"_comment": "Claude Code retries the stop with stop_hook_active=true -> always allowed"}
+{"hook_event_name": "Stop", "stop_hook_active": true}
+{"_comment": "Next turn: still failing, but the stop was already blocked once in this episode -> allowed"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "ok try again"}
+{"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "npm test"}, "error": "Exit code 1\nFAIL src/sum.test.js\n  x adds numbers (3 ms)\n    expect(received).toBe(expected)\n    Expected: 5\n    Received: 4\nTests:       1 failed, 3 passed, 4 total"}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "src/sum.js", "old_string": "a", "new_string": "b"}, "tool_response": {"filePath": "src/sum.js"}}
+{"_assistant": "I've fixed the off-by-one, it should work now."}
+{"hook_event_name": "Stop", "stop_hook_active": false}

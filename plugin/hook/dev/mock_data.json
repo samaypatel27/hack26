@@ -1,0 +1,64 @@
+{
+  "_comment": "Seed data for mock_backend.py. Fingerprints were made with struggles.fingerprint() on the error text in each description, so the real hook matches them. Edit freely.",
+  "posts": [
+    {
+      "id": 1,
+      "description": "Prisma Client could not locate the Query Engine inside an Alpine Docker image\n\nRunning a Node API with Prisma in Docker (node:20-alpine). It works on my laptop but the container crashes on start with:\nPrismaClientInitializationError: Prisma Client could not locate the Query Engine for runtime \"linux-musl-openssl-3.0.x\".\nThis happened because Prisma Client was generated for \"debian-openssl-3.0.x\", but the actual deployment required \"linux-musl-openssl-3.0.x\".\nTried: reinstalling node_modules, running prisma generate locally before docker build, upgrading Prisma. None helped because the client was still generated on the host, not in the image.",
+      "value": "The error looks like a broken Prisma install, but the real cause is that the client was generated for a different OS than the one the container runs.",
+      "solution": "Add binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"] to the generator block in schema.prisma, and run `npx prisma generate` inside the Dockerfile after `npm ci` (not on the host). Rebuild with `docker compose up --build api`. The engine for Alpine (musl) is then bundled in the image.",
+      "tags": ["prisma", "docker", "alpine"],
+      "upvotes": 14,
+      "status": "solved",
+      "times_worked": 9,
+      "times_applied": 10,
+      "fingerprint": "51749bd5",
+      "command": "docker compose up --build api"
+    },
+    {
+      "id": 2,
+      "description": "ERR_REQUIRE_ESM when importing node-fetch from a CommonJS file\n\nUpgraded node-fetch and now `node src/api.js` fails with:\nError [ERR_REQUIRE_ESM]: require() of ES Module node_modules/node-fetch/src/index.js from src/api.js not supported.\nTried: deleting node_modules and reinstalling, switching Node versions. The package itself is fine.",
+      "value": "node-fetch v3 is ESM-only, so require() can never load it; reinstalling does nothing.",
+      "solution": "Either pin node-fetch@2 (`npm install node-fetch@2`, which still supports require), or switch the file to ESM (\"type\": \"module\" in package.json and `import fetch from 'node-fetch'`). On Node 18+ you can also drop node-fetch and use the built-in global fetch.",
+      "tags": ["node", "esm-commonjs", "dependencies"],
+      "upvotes": 8,
+      "status": "solved",
+      "times_worked": 5,
+      "times_applied": 6,
+      "fingerprint": "e46fc17b",
+      "command": "node src/api.js"
+    },
+    {
+      "id": 3,
+      "description": "pytest cannot import 'app' from conftest.py in a src layout\n\nRunning `pytest tests` in a project with src/app/ fails before any test runs:\nImportError while loading conftest 'tests/conftest.py'.\nModuleNotFoundError: No module named 'app'\nTried: (1) adding __init__.py to tests/ - same error; (2) setting PYTHONPATH=src - works locally but the CI job still fails; (3) pip install -e . - fails because pyproject.toml has no build backend configured.",
+      "value": "Open question: the usual fixes work on one machine but not in CI, so the real difference between the environments is still unknown.",
+      "solution": null,
+      "tags": ["python", "pytest", "ci"],
+      "upvotes": 3,
+      "status": "open",
+      "times_worked": 0,
+      "times_applied": 0,
+      "fingerprint": "78b50510",
+      "command": "pytest tests"
+    },
+    {
+      "id": 4,
+      "description": "API container gets 'connection refused' from Postgres in docker-compose\n\n`docker compose up` starts both services but the API crashes with:\npsycopg2.OperationalError: connection to server at \"localhost\" (127.0.0.1), port 5432 failed: Connection refused\nTried: exposing port 5432, restarting the db container, adding sleep before start.",
+      "value": "Inside a container, localhost is the container itself, not the database, so no amount of waiting fixes it.",
+      "solution": "Set the database host to the compose service name (for example DATABASE_URL=postgresql://user:pass@db:5432/app) instead of localhost, and add `depends_on: db: condition: service_healthy` with a pg_isready healthcheck so the API waits for Postgres to be ready.",
+      "tags": ["docker-compose", "postgres", "networking"],
+      "upvotes": 11,
+      "status": "solved",
+      "times_worked": 7,
+      "times_applied": 7,
+      "fingerprint": "d25c0b1e",
+      "command": "docker compose up"
+    }
+  ],
+  "updates": [
+    {
+      "message": "Good news: the open question from this project (ERR_REQUIRE_ESM when importing node-fetch) now has a verified solution in post #2.",
+      "post_id": 2,
+      "project": null
+    }
+  ]
+}
