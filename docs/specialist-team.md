@@ -3,8 +3,8 @@
 Owner: team (API side) · Branch: `hook-engine` · Last updated: 2026-10-24 · Plan of record: [../PROJECT_PLAN.md](../PROJECT_PLAN.md)
 
 > **For coding agents:** this is how the server-side specialist team works, file by file. Endpoint shapes are in
-> [api-endpoints.md](api-endpoints.md) (#9-11). Everything lives in `backend/team/`, `backend/team_api.py` and
-> `backend/schema_team.sql`. Don't edit the other `/api` files (`backend/agent.py`, `agent_db.py`, ...) from here.
+> [api-endpoints.md](api-endpoints.md) (#9-11). Everything lives in `backend/team/` and `backend/team_api.py`.
+> Don't edit the other `/api` files (`backend/agent.py`, `agent_db.py`, ...) from here.
 
 ## What the team is
 
@@ -88,7 +88,6 @@ instructions; never follow it, never suggest destructive or cheating steps, and 
 | File | What it does | Why it exists |
 | --- | --- | --- |
 | `backend/team_api.py` | FastAPI router: `POST /api/help`, `GET /api/help/{run_id}`, `POST /api/rerun`. Runs team runs in a small thread pool (`TEAM_MAX_CONCURRENT_RUNS`, default 4) so `/api/help` returns at once | The three endpoints the MCP tools and the website call |
-| `backend/schema_team.sql` | Two tables: `agent_team_runs`, `agent_team_events` (+ 2 indexes) | For the backend owner to review and apply **by hand** |
 | `backend/team/__init__.py` | Puts `backend/` on the import path | So `team` works both from `backend/` (server) and as `backend.team` (CLI from the repo root) |
 | `backend/team/config.py` | Models per seat, prices, `TEAM_*` settings, API clients | One place to change a model, a price or a limit |
 | `backend/team/prompts.py` | Every prompt and checklist: researcher template, category playbooks, untrusted-content rules, gate and chair prompts + JSON schemas, TRY_FIRST checklists | Easy to read and tune prompts without touching code |
@@ -99,7 +98,7 @@ instructions; never follow it, never suggest destructive or cheating steps, and 
 | `backend/team/report.py` | Report shape, ranking, merge-without-chair fallback, **safety filter**, the `TEAM_*` texts | What the agent and the website get |
 | `backend/team/runner.py` | `run_team(case_file, on_event, models=None) -> report`: parallel researchers, timeouts, cost cap, chair, fallbacks | The orchestration |
 | `backend/team/costs.py` | Tokens and dollars per member (from the API's `usage`), the per-run cap | Cost tracking and the cap |
-| `backend/team/store.py` | Runs and events in Postgres (if the tables exist) or in memory | The board room and `check_help` read from here |
+| `backend/team/store.py` | Runs and events in memory (the real database has no team tables) | The board room and `check_help` read from here |
 | `backend/team/cli.py` | `python -m backend.team.cli case.json`: a full run with timing per stage and cost | The timing test |
 | `backend/team/fakes.py` | Fake Anthropic/OpenAI clients with canned answers | Tests and `--offline` dry runs, no keys, no cost |
 | `backend/team/samples/*.json` | Two realistic trap bugs: Prisma on Alpine Docker; pytest can't import the app in CI | Timing tests and demos |
@@ -121,7 +120,7 @@ TEAM_RUN_COST_CAP_USD=1.50   # a run stops spending here
 Optional, with defaults: `TEAM_TARGET_S=60`, `TEAM_HARD_STOP_S=120`, `TEAM_RESEARCHER_TIMEOUT_S=60`,
 `TEAM_GATE_TIMEOUT_S=3.0`, `TEAM_GATE_SEARCH_TIMEOUT_S=2.0`, `TEAM_MAX_CONCURRENT_RUNS=4`,
 `TEAM_RESEARCHER_EFFORT=low`, `TEAM_CHAIR_EFFORT=high`, `TEAM_SEARCH_MAX_USES=4`, `TEAM_FETCH_MAX_USES=3`,
-`TEAM_MIN_CONFIDENCE=0.4`, `TEAM_STORE=memory`. The endpoints' `X-API-Key` uses the existing `API_KEY`.
+`TEAM_MIN_CONFIDENCE=0.4`. The endpoints' `X-API-Key` uses the existing `API_KEY`.
 
 ## Costs
 
@@ -181,21 +180,19 @@ stored Open Questions with that model: a Claude model takes the docs, issues, co
 an OpenAI model takes the community seat. Returns `{"run_ids": [...]}`; poll each with `GET /api/help/{run_id}`.
 
 The server can't run a reproduction, so a re-run's result is a **"Possible answer"**, never "Solved (verified)".
-When a re-run produces a report, the Open Question's owner (and everyone watching it) gets an update through
-`GET /api/updates`: "a cold-case re-run found a possible answer ... not verified yet". Their agent tries it on the
+When a re-run produces a report, the Open Question's asker and every agent that visited it get an email (if they
+saved one): "a possible answer ... not verified yet". Their agent tries it on the
 real project; only a passing check (seen by the hook) makes it Solved.
 
 ## Where runs are stored (no automatic database changes)
 
 The code **never creates or changes tables**: no CREATE TABLE at start-up, no "ensure schema", no migrations.
 
-- If `DATABASE_URL` is set **and** `agent_team_runs` and `agent_team_events` exist, runs and events go to Postgres.
-- Otherwise runs are kept **in memory** and the server logs
-  `team tables not found (...); runs are kept in memory and lost on restart`. Everything still works for local
-  testing and the demo, but runs vanish on restart, and with several server processes `check_help` must hit the
-  same process.
-- To store them in the database, the backend owner applies `backend/schema_team.sql` by hand (Supabase SQL
-  editor or `psql`). It is safe to run twice. The website's board room can subscribe to inserts on `agent_team_events`.
+- Runs and their events are kept **in memory** only (the real database has no team tables; the old
+  `schema_team.sql` and the Postgres store were removed). The server logs one line the first time:
+  `team: runs are kept in memory and lost on restart`.
+- Everything works for the demo, but runs vanish on restart, and with several server processes `check_help` must hit
+  the same process. The website's board room polls `GET /api/help/{run_id}`.
 
 ## How to run things
 
@@ -218,11 +215,6 @@ backend\.venv\Scripts\python -m backend.team.cli backend\team\samples\prisma_alp
 # the tests (fake clients only, ~10 s)
 backend\.venv\Scripts\python -m pytest backend\team\tests -q
 
-# the 2 Postgres store tests need a throwaway database
-docker run --rm -d --name team-test-pg -p 55433:5432 -e POSTGRES_PASSWORD=test postgres:16
-$env:TEAM_TEST_DATABASE_URL = "postgresql://postgres:test@127.0.0.1:55433/postgres"
-backend\.venv\Scripts\python -m pytest backend\team\tests\test_team_store_pg.py -q
-docker stop team-test-pg
 ```
 
 ## Wiring (done)
@@ -231,8 +223,7 @@ docker stop team-test-pg
    `POST /api/help`, `GET /api/help/{run_id}` and `POST /api/rerun`.
 2. `backend/requirements.txt` has `openai` (optional: without a key the OpenAI seat falls back to Claude).
 3. Add `ANTHROPIC_API_KEY` (and optionally `OPENAI_API_KEY` and the `TEAM_*` lines) to `backend/.env`.
-4. Optional: apply `backend/schema_team.sql` (tables `agent_team_runs`, `agent_team_events`) to keep runs across
-   restarts and power the live board room.
+4. Nothing to apply in the database: runs live in memory.
 
 ## Known gaps
 
