@@ -1,8 +1,10 @@
 """API tests with a fake connection: no database needed.
 
 Each FakeConn result answers one conn.execute() in order. POST /api/posts runs (for a new solved post):
-forum lookup, the Open Question candidates (text-match fallback), INSERT INTO posts, the tag insert,
-agent_post_meta. Linking makes no calls on a FakeConn (it has no transaction()), so it adds none.
+forum lookup, the Open Question candidates (text-match fallback), INSERT INTO posts (with the fingerprint and
+agent_id columns), the tag insert. The `fake` fixture stubs out linking (tested in test_linking.py) and the
+email lookup (tested in test_accounts.py), so they add no calls; FakeConn still has transaction() (savepoints)
+like a real connection.
 """
 
 import contextlib
@@ -47,6 +49,9 @@ class FakeConn:
     def __exit__(self, *exc):
         return False
 
+    def transaction(self):   # a savepoint, like psycopg's Connection.transaction()
+        return contextlib.nullcontext()
+
     def execute(self, sql, params=()):
         self.calls.append((sql, tuple(params)))
         self.current = self.results.pop(0) if self.results else []
@@ -65,6 +70,12 @@ def fake(monkeypatch):
         conn = FakeConn(results)
         monkeypatch.setattr(main, "connect", lambda: conn)
         return conn
+
+    # Linking and the email lookup run their own queries; they have their own tests.
+    monkeypatch.setattr(main.linking, "link_new_solution", lambda post, conn=None, rejected=None: None)
+    monkeypatch.setattr(main.linking, "find_duplicate_question", lambda question, conn=None, rejected=None: None)
+    monkeypatch.setattr(main.linking, "index_post", lambda post_id, conn=None: False)
+    monkeypatch.setattr(main.accounts, "solved_emails", lambda conn, post_id, **kw: [])
 
     main._votes_by_ip.clear()
     monkeypatch.setenv("API_KEY", "secret")
@@ -256,14 +267,17 @@ def test_secrets_are_scrubbed_before_saving(fake):
 def test_solution_attaches_to_the_open_question_with_the_same_fingerprint(fake):
     conn = fake(
         [{"id": 3, "slug": "databases"}],
-        [{**ROW, "id": 41, "tags": ["prisma"]}],      # open question with fingerprint 51749bd5
+        [{**ROW, "id": 41, "tags": ["prisma"]}],      # open question with fingerprint 51749bd5 (posts.fingerprint)
         [{"id": 41, "description": "Prisma crashes in Docker\nmore"}],   # the UPDATE ... RETURNING
-        [], [{"project": "proj-a"}],                    # save_meta, watchers
+        [],                                             # save_fingerprint
     )
     r = client.post("/api/posts", json={**NEW_SOLVED, "fingerprint": "51749bd5", "project": "proj-b"}, headers=AUTH).json()
     assert r["attached_to_open_question"] is True and r["post_id"] == 41
-    assert any("INSERT INTO agent_updates" in sql and params[0] == "proj-a" for sql, params in conn.calls)
-    assert not any("INSERT INTO posts" in sql for sql, _ in conn.calls)
+    assert "p.fingerprint = %s" in conn.calls[1][0] and conn.calls[1][1] == ("51749bd5",)
+    fill_sql, _ = conn.calls[2]
+    assert "solved_at = now()" in fill_sql and "COALESCE(general_solution, solution) IS NULL" in fill_sql
+    assert "UPDATE posts SET fingerprint" in conn.calls[3][0] and conn.calls[3][1] == ("51749bd5", 41)
+    assert not any("INSERT INTO posts" in sql or "agent_" in sql.split("FROM")[0] for sql, _ in conn.calls)
 
 
 def test_solution_without_a_matching_open_question_is_a_new_post(fake):
@@ -273,22 +287,42 @@ def test_solution_without_a_matching_open_question_is_a_new_post(fake):
     assert r["attached_to_open_question"] is False and r["post_id"] == 99
 
 
-def test_duplicate_open_question_watches_the_existing_one(fake):
+def test_duplicate_open_question_records_a_visit_for_the_agent(fake):
+    """The visit puts the agent on the existing question's "solved" email list (accounts.recipients)."""
     desc = "Redis connection reset every five minutes\nConnection reset by peer behind the load balancer."
     existing = {**ROW, "id": 20, "forum": "databases", "tags": ["redis"], "description": desc}
-    conn = fake([{"id": 3, "slug": "databases"}], [existing])
-    r = client.post("/api/posts", json={"description": desc, "value": "v", "forum": "databases", "project": "proj-b"},
+    conn = fake([{"id": AGENT, "model_name": "claude-sonnet-5-5"}], [{"id": 3, "slug": "databases"}], [existing], [])
+    r = client.post("/api/posts", json={"description": desc, "value": "v", "forum": "databases", "agent_id": AGENT},
                     headers=AUTH).json()
     assert r["duplicate_of"] == 20
-    assert any("INSERT INTO agent_watchers" in sql and params == (20, "proj-b") for sql, params in conn.calls)
+    assert any("INSERT INTO post_visits" in sql and params == (20, AGENT) for sql, params in conn.calls)
 
 
 def test_agent_fields_are_stored_with_a_new_post(fake):
-    conn = fake([{"id": 3, "slug": "databases"}], [], [], [{"id": 99}], [], [])
+    conn = fake([{"id": 3, "slug": "databases"}], [], [], [{"id": 99}], [])
     client.post("/api/posts", json={**NEW_SOLVED, "fingerprint": "51749BD5", "command": "docker compose up",
                                     "project": "proj-b"}, headers=AUTH)
-    sql, params = conn.calls[5]
-    assert "agent_post_meta" in sql and params == (99, "51749bd5", "docker compose up", "proj-b", None)
+    sql, params = conn.calls[3]
+    assert "INSERT INTO posts" in sql and "fingerprint" in sql and "agent_id" in sql and "solved_at" in sql
+    assert params[8:11] == ("51749bd5", None, True)   # fingerprint, agent_id (none given), solved now
+    assert not any("agent_post_meta" in q for q, _ in conn.calls)
+
+
+def test_failing_command_is_kept_in_the_post_text(fake):
+    """There's no command column, so the command goes into the saved description (once)."""
+    conn = fake([{"id": 3, "slug": "databases"}], [], [], [{"id": 99}], [])
+    client.post("/api/posts", json={**NEW_SOLVED, "fingerprint": "51749BD5", "command": "docker compose up"},
+                headers=AUTH)
+    _, params = conn.calls[3]
+    saved = [p for p in params if isinstance(p, str) and "Command: `docker compose up`" in p]
+    assert saved and all(p.count("docker compose up") == 1 for p in saved)
+
+    conn = fake([{"id": 3, "slug": "databases"}], [], [], [{"id": 99}], [])
+    already = {**NEW_SOLVED, "description": NEW_SOLVED["description"] + "\nRunning docker compose up crashes."}
+    client.post("/api/posts", json={**already, "fingerprint": "51749BD5", "command": "docker compose up"},
+                headers=AUTH)
+    _, params = conn.calls[3]
+    assert not any(isinstance(p, str) and "Command: `" in p for p in params)
 
 
 def test_new_content_post_stores_problem_and_details_together(fake):
@@ -305,7 +339,7 @@ def test_new_content_post_stores_problem_and_details_together(fake):
 
 def test_agent_routes_are_mounted_under_api():
     paths = set(main.app.openapi()["paths"])
-    assert {"/api/search", "/api/outcomes", "/api/updates", "/api/judge", "/api/posts",
+    assert {"/api/search", "/api/outcomes", "/api/judge", "/api/posts",
             "/api/help", "/api/help/{run_id}", "/api/rerun"} <= paths
     assert not any(p.startswith("/v1") for p in paths)
 
@@ -429,21 +463,16 @@ def test_post_without_attempt_is_still_saved_with_notes(fake, rules_only):
 
 # ---- who hears "solved" and who hears "possible answer" -------------------------------------------
 
-class TxConn(FakeConn):
-    def transaction(self):
-        return contextlib.nullcontext()
+TxConn = FakeConn   # (older name) FakeConn has transaction() now
 
 
 @pytest.fixture
 def notices(monkeypatch):
-    """Record which accounts notice (email) create_post queues, and the linking agent update."""
+    """Record which emails create_post queues: (post id, possible?, excluded solver)."""
     seen = []
-    monkeypatch.setattr(main.accounts, "notify_post_solved",
-                        lambda conn, post_id, **kw: seen.append(("solved", post_id)) or {"emails": []})
-    monkeypatch.setattr(main.accounts, "notify_possible_answer",
-                        lambda conn, post_id, ref, detail, **kw: seen.append(("possible", post_id, ref)) or {"emails": []})
-    monkeypatch.setattr(main.linking, "notify_possible_answer",
-                        lambda question_id, match, **kw: seen.append(("update: possible", question_id)) or 1)
+    monkeypatch.setattr(main.accounts, "solved_emails",
+                        lambda conn, post_id, exclude_agent_id=None, possible=False, **kw:
+                        seen.append((post_id, possible, exclude_agent_id)) or [])
     monkeypatch.setenv("QUALITY_AI", "0")
     return seen
 
@@ -451,9 +480,10 @@ def notices(monkeypatch):
 def test_named_open_question_gets_the_solved_email(fake, monkeypatch, notices):
     conn = TxConn([[{"id": 3, "slug": "databases"}], [{"id": 41, "description": "Q"}]])
     monkeypatch.setattr(main, "connect", lambda: conn)
-    r = client.post("/api/posts", json={**NEW_SOLVED, "open_question_id": 41}, headers=AUTH).json()
+    r = client.post("/api/posts", json={**NEW_SOLVED, "open_question_id": 41},
+                    headers={**AUTH, "X-Agent-Id": AGENT}).json()
     assert r["attached_to_open_question"] is True and r["linked_by"] is None
-    assert notices == [("solved", 41)]
+    assert notices == [(41, False, AGENT)]   # "solved", and never to the solver
 
 
 def test_question_linked_by_similarity_gets_the_possible_answer_email(fake, monkeypatch, notices):
@@ -463,26 +493,13 @@ def test_question_linked_by_similarity_gets_the_possible_answer_email(fake, monk
                         lambda post, conn=None, rejected=None: SimpleNamespace(id=41, decided_by="ai_check"))
     r = client.post("/api/posts", json=NEW_SOLVED, headers=AUTH).json()
     assert r["attached_to_open_question"] is True and r["linked_by"] == "ai_check"
-    assert notices == [("update: possible", 41), ("possible", 41, accounts.LINKED_REF)]
+    assert notices == [(41, True, None)]
 
 
-def test_possible_answer_email_says_not_verified_yet(monkeypatch):
-    sent = {}
-    monkeypatch.setattr(accounts, "tables_ready", lambda conn: True)
-    monkeypatch.setattr(accounts, "_post", lambda conn, post_id: {"id": post_id, "description": "Prisma on Alpine"})
-    monkeypatch.setattr(accounts, "notify_watchers", lambda conn, post_id, kind, update, subject, text, **kw:
-                        sent.update(kind=kind, subject=subject, text=text, ref=kw.get("ref")) or {"emails": []})
-    accounts.notify_possible_answer(object(), 41, accounts.LINKED_REF, "A fix from a similar problem was attached to it.")
-    assert sent["kind"] == "possible_answer" and sent["ref"] == "link"
-    assert "A possible answer was posted for the question" in sent["text"]
-    assert "hasn't been verified yet" in sent["text"] and "/posts/41" in sent["text"]
-    assert "possible answer" in sent["subject"].lower()
-
-
-def test_solved_announce_after_a_similarity_link_sends_nothing(monkeypatch):
-    """The plugin may still call POST /api/accounts/solved after a linked attach: no "solved" email then."""
-    monkeypatch.setattr(accounts, "tables_ready", lambda conn: True)
-    monkeypatch.setattr(accounts, "_post", lambda conn, post_id: {"id": post_id, "description": "Q", "solution": "fix"})
-    conn = FakeConn([[{"?column?": 1}]])   # the possible-answer notice for this post exists
-    assert accounts.notify_post_solved(conn, 41)["status"] == "possible_answer"
-    assert "accounts_notices" in conn.calls[0][0] and conn.calls[0][1] == (41, accounts.LINKED_REF)
+def test_an_already_solved_question_sends_no_email(fake, monkeypatch, notices):
+    """The fill UPDATE only matches a question that has no solution yet; no row back means no email."""
+    conn = TxConn([[{"id": 3, "slug": "databases"}], [], [], [{"id": 99}], []])
+    monkeypatch.setattr(main, "connect", lambda: conn)
+    r = client.post("/api/posts", json={**NEW_SOLVED, "open_question_id": 41}, headers=AUTH).json()
+    assert r["attached_to_open_question"] is False and r["post_id"] == 99
+    assert notices == []

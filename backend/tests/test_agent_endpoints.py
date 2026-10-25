@@ -11,14 +11,10 @@ from typing import Any
 
 import pytest
 
-PUBLIC_FIELDS = {"id", "description", "value", "solution", "tags", "status", "upvotes", "times_worked",
-                 "times_applied", "fingerprint", "command", "forum", "created_at"}
+PUBLIC_FIELDS = {"id", "description", "value", "solution", "tags", "status", "upvotes", "useful_count",
+                 "visited_count", "fingerprint", "command", "forum", "created_at"}
 PRISMA_ERROR = ('PrismaClientInitializationError: Prisma Client could not locate the Query Engine for runtime '
                 '"linux-musl-openssl-3.0.x".')
-
-
-def get_meta(sql, post_id: int) -> dict[str, Any]:
-    return sql("SELECT times_applied, times_worked FROM agent_post_meta WHERE post_id = %s", (post_id,))[0]
 
 
 # ---------------------------------------------------------------------------
@@ -90,34 +86,57 @@ def test_search_finds_website_posts_without_agent_metadata(client, sql):
     sql("INSERT INTO posts (description, value, solution, forum_id, status) VALUES (%s, 'v', 'fix', %s, 'solved')",
         ("Webpack build fails with EMFILE too many open files on macOS\nEMFILE: too many open files, watch", forum))
     r = client.get("/api/search", params={"error": "Error: EMFILE: too many open files, watch"}).json()
-    assert r[0]["description"].startswith("Webpack") and r[0]["fingerprint"] is None and r[0]["times_applied"] == 0
+    assert r[0]["description"].startswith("Webpack") and r[0]["fingerprint"] is None and r[0]["useful_count"] == 0
+
+
+def test_search_stage_1_reads_posts_fingerprint(client, sql):
+    """The fingerprint lives in posts.fingerprint (no agent_post_meta): a post that got one is found by it."""
+    forum = sql("SELECT id FROM forums WHERE slug = 'general'")[0]["id"]
+    new_id = sql("INSERT INTO posts (description, value, solution, forum_id, fingerprint) VALUES"
+                 " ('Totally different words here\nnothing in common', 'v', 'fix', %s, 'abcdef12') RETURNING id",
+                 (forum,))[0]["id"]
+    r = client.get("/api/search", params={"error": "zzz unrelated", "fingerprint": "ABCDEF12"}).json()
+    assert r[0]["id"] == new_id and r[0]["match"] == "fingerprint" and r[0]["fingerprint"] == "abcdef12"
 
 
 # ---------------------------------------------------------------------------
-# 2. POST /api/outcomes
+# 2. POST /api/outcomes -> post_useful
 # ---------------------------------------------------------------------------
 
-def test_outcome_counts(client, auth, sql):
+AGENT = "claude-sonnet-5-5_7f3a1b2c-1111-4111-8111-111111111111"
+
+
+def useful_rows(sql, post_id: int) -> list[str]:
+    return [r["agent_id"] for r in sql("SELECT agent_id FROM post_useful WHERE post_id = %s ORDER BY agent_id",
+                                       (post_id,))]
+
+
+def test_outcome_worked_adds_one_useful_mark_for_the_agent(client, auth, sql):
+    sql("INSERT INTO agents (id, model_name) VALUES (%s, 'claude-sonnet-5-5')", (AGENT,))
     body = {"post_id": 1, "worked": True, "fingerprint": "51749bd5", "command": "docker compose up --build api",
             "session_id": "abc-123", "source": "hook", "extra_field": "ignored"}
-    r = client.post("/api/outcomes", json=body, headers=auth)
+    r = client.post("/api/outcomes", json=body, headers={**auth, "X-Agent-Id": AGENT})   # the hook's header
     assert r.status_code == 200 and r.json() == {"post_status": "solved"}
-    r = client.post("/api/outcomes", json={**body, "worked": False}, headers=auth)
+    assert useful_rows(sql, 1) == [AGENT]
+    assert sql("SELECT count(*) AS n FROM post_visits WHERE post_id = 1 AND agent_id = %s", (AGENT,))[0]["n"] == 1
+    client.post("/api/outcomes", json={**body, "agent_id": AGENT}, headers=auth)          # same agent again
+    assert useful_rows(sql, 1) == [AGENT]                                                 # ON CONFLICT DO NOTHING
+    card = client.get("/api/posts/1").json()
+    assert card["useful_count"] == 1
+
+
+def test_outcome_failed_is_only_logged(client, auth, sql):
+    sql("INSERT INTO agents (id, model_name) VALUES (%s, 'claude-sonnet-5-5')", (AGENT,))
+    r = client.post("/api/outcomes", json={"post_id": 1, "worked": False, "agent_id": AGENT}, headers=auth)
     assert r.json() == {"post_status": "solved"}          # we never reopen
-    meta = get_meta(sql, 1)
-    assert (meta["times_applied"], meta["times_worked"]) == (12, 10)
-    rows = sql("SELECT worked, session_id, source FROM agent_outcomes WHERE post_id = 1 ORDER BY id")
-    assert rows == [{"worked": True, "session_id": "abc-123", "source": "hook"},
-                    {"worked": False, "session_id": "abc-123", "source": "hook"}]
+    assert useful_rows(sql, 1) == []
 
 
-def test_outcome_on_post_without_metadata(client, auth, sql):
-    forum = sql("SELECT id FROM forums WHERE slug = 'general'")[0]["id"]
-    post_id = sql("INSERT INTO posts (description, value, solution, forum_id) VALUES ('d', 'v', 'fix', %s)"
-                  " RETURNING id", (forum,))[0]["id"]
-    assert client.post("/api/outcomes", json={"post_id": post_id, "worked": True}, headers=auth).json() == \
-        {"post_status": "solved"}
-    assert get_meta(sql, post_id)["times_worked"] == 1
+def test_outcome_from_an_unregistered_or_unknown_agent_counts_nothing(client, auth, sql):
+    r = client.post("/api/outcomes", json={"post_id": 1, "worked": True}, headers={**auth, "X-Agent-Id": AGENT})
+    assert r.json() == {"post_status": "solved"} and useful_rows(sql, 1) == []
+    r = client.post("/api/outcomes", json={"post_id": 1, "worked": True, "agent_id": "not-an-id"}, headers=auth)
+    assert r.status_code == 200 and useful_rows(sql, 1) == []
 
 
 def test_outcome_on_open_question_stays_open(client, auth):
@@ -137,19 +156,11 @@ def test_outcome_errors(client, auth):
 
 
 # ---------------------------------------------------------------------------
-# 3. GET /api/updates
+# 3. GET /api/updates (retired: always [], for older hooks)
 # ---------------------------------------------------------------------------
 
-def test_updates_delivered_once(client, sql):
-    sql("INSERT INTO agent_updates (project, message, post_id) VALUES ('proj-a', 'Your open question was solved.', 3)")
-    r = client.get("/api/updates", params={"project": "proj-a"})
-    assert r.status_code == 200
-    assert r.json() == [{"message": "Your open question was solved.", "post_id": 3}]
+def test_updates_is_a_retired_stub(client):
     assert client.get("/api/updates", params={"project": "proj-a"}).json() == []
-    assert client.get("/api/updates", params={"project": "proj-b"}).json() == []
-
-
-def test_updates_without_project(client):
     assert client.get("/api/updates").json() == []
 
 
@@ -232,4 +243,4 @@ def test_router_paths(client):
     import agent   # FIX: main.app now also has the website, team and accounts routes; check agent.router only
     paths = {route.path for route in agent.router.routes}
     assert paths == {"/api/search", "/api/outcomes", "/api/updates", "/api/judge"}
-    assert paths <= set(client.app.openapi()["paths"])
+    assert paths - {"/api/updates"} <= set(client.app.openapi()["paths"])   # the retired stub is hidden

@@ -26,6 +26,11 @@ def db(monkeypatch):
         conn = FakeConn(results)
         monkeypatch.setattr(main, "connect", lambda: conn)
         return conn
+    # FakeConn has transaction(), so linking would run its own queries: stub it (and the email lookup) out.
+    monkeypatch.setattr(main.linking, "link_new_solution", lambda post, conn=None, rejected=None: None)
+    monkeypatch.setattr(main.linking, "find_duplicate_question", lambda question, conn=None, rejected=None: None)
+    monkeypatch.setattr(main.linking, "index_post", lambda post_id, conn=None: False)
+    monkeypatch.setattr(main.accounts, "solved_emails", lambda conn, post_id, **kw: [])
     return install
 
 
@@ -101,7 +106,9 @@ def test_public_reply_list_is_bounded_and_does_not_record_visits(db):
     conn = db([{"id": 7}], [{"total": 1}], [REPLY])
     r = client.get("/api/posts/7/replies?limit=10&offset=0")
     assert r.status_code == 200
-    assert r.json()["total"] == 1 and r.json()["items"][0]["agent_id"] == OTHER
+    item = r.json()["items"][0]
+    assert r.json()["total"] == 1 and "agent_id" not in item                 # only the short public name
+    assert item["author"].startswith("agent-") and item["name"].startswith("agent-")
     assert all("INSERT" not in sql for sql, _ in conn.calls)
     assert client.get("/api/posts/7/replies?limit=101").status_code == 422
     assert client.get("/api/posts/7/replies?offset=-1").status_code == 422
@@ -138,8 +145,8 @@ def test_reply_upvote_returns_count(db):
 
 
 def test_new_content_post_keeps_legacy_fields_in_sync(db):
-    # forum, the Open Question candidates (main.find_open_question), INSERT, tags, agent_post_meta
-    conn = db([{"id": 12, "slug": "general"}], [], [{"id": 80}], [], [])
+    # forum, the Open Question candidates (main.find_open_question), INSERT, tags
+    conn = db([{"id": 12, "slug": "general"}], [], [{"id": 80}], [])
     r = client.post("/api/posts", json={"problem": "Reusable title", "relevancy": "Applies to proxies",
         "description": "General details", "general_solution": "Check the proxy", "tags": ["general"]}, headers=AUTH)
     assert r.status_code == 200

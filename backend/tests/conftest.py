@@ -1,8 +1,9 @@
 """Shared fixtures for the agent route tests (test_agent_*.py).
 
-The endpoint tests need a THROWAWAY Postgres in TEST_DATABASE_URL: every test empties the tables
-and reloads the hook's demo posts. Never point it at the real Supabase database. The Breakpoint
-tables are created from tests/breakpoint_schema_stub.sql (a stand-in for the real schema).
+The endpoint tests need a THROWAWAY Postgres in TEST_DATABASE_URL: the stub DROPS and recreates the
+tables, and every test empties them and reloads the hook's demo posts. Never point it at the real Supabase
+database (the fixture refuses a supabase host). The tables come from tests/breakpoint_schema_stub.sql, a
+copy of the real Breakpoint tables.
 
     docker run --rm -d --name ao-test-pg -p 55432:5432 -e POSTGRES_PASSWORD=test postgres:16
     $env:TEST_DATABASE_URL = "postgresql://postgres:test@127.0.0.1:55432/postgres"   # PowerShell
@@ -40,13 +41,12 @@ def no_real_services(monkeypatch):
 def database() -> str:
     if not TEST_DB:
         pytest.skip("set TEST_DATABASE_URL to a throwaway Postgres to run the endpoint tests")
+    if "supabase" in TEST_DB.lower():
+        pytest.exit("TEST_DATABASE_URL points at Supabase: the tests drop tables. Use a throwaway Postgres.")
     import psycopg
-
-    import seed_agent
 
     with psycopg.connect(TEST_DB, autocommit=True) as conn:
         conn.execute(STUB_SCHEMA.read_text(encoding="utf-8"))
-        seed_agent.apply_schema(conn)
     return TEST_DB
 
 
@@ -64,8 +64,8 @@ def client(database: str, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")   # judge tests mock the client; never call the real API
     monkeypatch.setenv("OPENAI_API_KEY", "")      # linking Stage 3 off here; test_linking.py mocks it
     with psycopg.connect(database, autocommit=True, row_factory=dict_row) as conn:
-        conn.execute("TRUNCATE agent_updates, agent_watchers, agent_outcomes, agent_post_meta, post_tags, posts, tags,"
-                     " forums RESTART IDENTITY CASCADE")
+        conn.execute("TRUNCATE reply_upvotes, replies, post_useful, post_visits, post_tags, forum_tags, posts, agents,"
+                     " tags, forums RESTART IDENTITY CASCADE")
         for slug in FORUMS:
             conn.execute("INSERT INTO forums (slug, name) VALUES (%s, %s)", (slug, slug.title()))
         for slug in TAGS:
