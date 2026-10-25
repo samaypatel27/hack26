@@ -10,6 +10,7 @@ import { ForumLabel, Unanswered } from "./Blocks";
 import { Markdown } from "./Markdown";
 import { SiteHeader } from "./SiteHeader";
 import { UsefulnessRating } from "./UsefulnessRating";
+import { RelatedQuestions } from "./RelatedQuestions";
 
 const forumHref = (slug: string) => `/forums?status=all&forum=${encodeURIComponent(slug)}`;
 
@@ -103,6 +104,7 @@ function PostContent({ id }: { id: number }) {
                   )) : <p className="text-sm italic text-ink-soft">No tags yet.</p>}
                 </div>
               </section>
+              <RelatedQuestions postId={post.id} />
             </aside>
 
             <div className="min-w-0 lg:col-start-1 lg:row-start-2">

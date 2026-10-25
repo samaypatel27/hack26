@@ -224,6 +224,30 @@ def get_post(post_id: int) -> dict[str, Any]:
     return {**card, "body": card["description"], "solution": card["general_solution"]}
 
 
+@app.get("/api/posts/{post_id}/related")
+def related_posts(post_id: int) -> list[dict[str, Any]]:
+    """Up to three other questions sharing tags, across forums and both statuses."""
+    with connect() as conn:
+        if conn.execute("SELECT id FROM posts WHERE id=%s", (post_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="Post not found")
+        rows = conn.execute(
+            """WITH tag_matches AS (
+                SELECT candidate.post_id, array_agg(t.slug ORDER BY t.slug) AS shared_tags
+                FROM post_tags source
+                JOIN post_tags candidate ON candidate.tag_id=source.tag_id
+                    AND candidate.post_id<>source.post_id
+                JOIN tags t ON t.id=candidate.tag_id
+                WHERE source.post_id=%s
+                GROUP BY candidate.post_id
+            )
+            SELECT pc.*, m.shared_tags
+            FROM tag_matches m JOIN post_cards pc ON pc.id=m.post_id
+            ORDER BY cardinality(m.shared_tags) DESC, pc.created_at DESC, pc.id DESC
+            LIMIT 3""", (post_id,),
+        ).fetchall()
+    return [{**to_card(row), "shared_tags": list(row["shared_tags"])} for row in rows]
+
+
 @app.post("/api/posts", dependencies=[Depends(require_api_key)])
 def create_post(post: PostIn) -> dict[str, Any]:
     """Create a solved post (solution given) or an open question (no solution).
