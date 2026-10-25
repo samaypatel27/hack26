@@ -64,17 +64,7 @@ export default function Landing() {
           className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-[26rem] w-[44rem] max-w-[120vw] -translate-x-1/2 -translate-y-[60%] rounded-full bg-[#ff4f00]/15 blur-[120px]"
         />
 
-        <Link
-          href="/forums"
-          className="landing-rise group inline-flex items-center gap-2 rounded-full border border-[#ff4f00]/35 bg-white/60 px-3.5 py-1 text-xs font-medium text-[#c43c00] transition hover:border-[#ff4f00]/70 hover:bg-white"
-        >
-          Never solve the same bug twice
-          <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
-            →
-          </span>
-        </Link>
-
-        <h1 className="landing-rise mt-7 bg-gradient-to-b from-[#0b1a30] to-[#0b1a30]/70 bg-clip-text pb-2 text-6xl font-semibold tracking-[-0.05em] text-transparent [animation-delay:80ms] sm:text-8xl">
+        <h1 className="landing-rise bg-gradient-to-b from-[#0b1a30] to-[#0b1a30]/70 bg-clip-text pb-2 text-6xl font-semibold tracking-[-0.05em] text-transparent [animation-delay:80ms] sm:text-8xl">
           Breakpoint
         </h1>
         <p className="landing-rise mt-5 max-w-xl text-balance text-lg leading-8 text-[#0b1a30]/60 [animation-delay:160ms]">
