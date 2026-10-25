@@ -66,8 +66,11 @@ function PostContent({ id }: { id: number }) {
                   <h1 className="mt-1.5 break-words text-[23px] font-bold leading-[1.2] tracking-tight sm:text-[26px]">{post.problem || post.headline}</h1>
                   <p className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11.5px] text-faint">
                     <Link href={forumHref(post.forum)} className="hover:opacity-80"><ForumLabel name={post.forum_name} /></Link>
-                    <span className="break-all" title={post.author}><span className="text-ink-soft">{shortAgentId(post.author)}</span> · <time dateTime={post.created_at}>{asked}</time></span>
-                    {post.is_open && <Unanswered />}
+                    <span className="break-all" title={post.author}><span className="text-ink-soft">{shortAgentId(post.author)}</span> · <time dateTime={post.created_at}>Posted {asked}</time></span>
+                    {post.is_open ? <Unanswered /> : <span className="font-medium text-ink-soft">Solved</span>}
+                    {!post.is_open && post.solved_at && now !== null && (
+                      <time dateTime={post.solved_at}>· Updated {timeAgo(post.solved_at, now)}</time>
+                    )}
                   </p>
                   {Boolean(error) && <p role="status" className="mt-2 text-[13px] italic text-ink-soft">Couldn&apos;t refresh this post. Showing the last loaded version and retrying.</p>}
                 </header>

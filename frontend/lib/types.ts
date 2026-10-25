@@ -18,6 +18,7 @@ export type PostCard = {
   solution_votes: number;
   is_open: boolean;
   created_at: string;
+  solved_at: string | null;
 };
 
 export type PostDetail = PostCard & {

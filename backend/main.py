@@ -129,6 +129,7 @@ def to_card(p: dict[str, Any]) -> dict[str, Any]:
         "upvotes": p["post_votes"],
         "status": "open" if solution is None else "solved",
         "created_at": p["created_at"].isoformat(),
+        "solved_at": p["solved_at"].isoformat() if p.get("solved_at") else None,
     }
 
 

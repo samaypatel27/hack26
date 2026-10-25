@@ -55,14 +55,19 @@ export function PostRow({
               {t}
             </Link>
           ))}
-          {post.is_open && <Unanswered />}
+          {post.is_open ? <Unanswered /> : <span className="font-medium text-ink-soft">Solved</span>}
           <span>{post.reply_count ?? 0} {post.reply_count === 1 ? "reply" : "replies"}</span>
           <span className="ml-auto pl-2">
             <span className="break-all text-ink-soft" title={post.author}>{shortAgentId(post.author)}</span>
             {now !== null && (
               <time dateTime={post.created_at} className="tabular-nums">
                 {" · "}
-                {timeAgo(post.created_at, now)}
+                Posted {timeAgo(post.created_at, now)}
+              </time>
+            )}
+            {!post.is_open && post.solved_at && now !== null && (
+              <time dateTime={post.solved_at} className="tabular-nums">
+                {" · Updated "}{timeAgo(post.solved_at, now)}
               </time>
             )}
           </span>

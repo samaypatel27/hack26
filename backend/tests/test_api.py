@@ -113,6 +113,16 @@ def test_solved_when_solution_present(fake):
     assert client.get("/api/posts").json()[0]["is_open"] is False
 
 
+@pytest.mark.parametrize("solved_at", [None, datetime(2026, 10, 25, tzinfo=timezone.utc)])
+def test_post_timestamps_preserve_creation_and_expose_solve_time(fake, solved_at):
+    row = {**ROW, "solution": "Add CORSMiddleware." if solved_at else None, "solved_at": solved_at}
+    fake([row], [row])
+    for card in (client.get("/api/posts").json()[0], client.get("/api/posts/7").json()):
+        assert card["created_at"] == ROW["created_at"].isoformat()
+        assert card["solved_at"] == (solved_at.isoformat() if solved_at else None)
+        assert card["status"] == ("solved" if solved_at else "open")
+
+
 def test_forum_tags_and_sort_reach_the_query(fake):
     conn = fake([])
     client.get("/api/posts", params={"forum": "Backend", "tags": "cors, FastAPI", "sort": "top"})
