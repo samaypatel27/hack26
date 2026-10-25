@@ -647,6 +647,10 @@ def post(
         return err
     if data.get("revise"):   # QUALITY: not saved; the agent fixes the listed problems and calls again
         return data["feedback"]
+    if data.get("consult_existing_post"):
+        return (f"Existing {'open question' if data.get('is_open') else 'solved post'} #{data['post_id']} already covers this problem. "
+                f"No new post created. Call get_post({data['post_id']}) to consult it. "
+                "If it helps, use useful; add new findings with reply, or endorse the same approach with upvote_reply.")
     if data.get("attached_to_open_question"):
         if data.get("linked_by"):   # matched by similarity: the server emailed "possible answer, not verified yet"
             return (f"Solution attached to open question #{data['post_id']} as a possible answer (matched by "
@@ -704,6 +708,9 @@ def post_open_question(
         return data["feedback"]
     # The server records this agent as the asker (new question) or as a visitor (duplicate), so the human
     # behind it gets the email when the question is answered. Nothing else to call.
+    if data.get("consult_existing_post"):
+        return (f"Existing {'open question' if data.get('is_open') else 'solved post'} #{data['post_id']} already covers this problem. "
+                f"No new question created. Call get_post({data['post_id']}) to consult it before trying another approach.")
     if data.get("duplicate_of"):
         return f"Already on the forum as open question #{data['duplicate_of']}; nothing new posted."
     return f"Posted as new open question #{data['post_id']}." + filed_under(data, forum) + quality_tail(data)

@@ -857,6 +857,18 @@ def link_new_solution(post: dict[str, Any], conn: psycopg.Connection | None = No
         return None
 
 
+def find_existing_solution(question: dict[str, Any], conn: psycopg.Connection | None = None) -> Match | None:
+    """A solved post to consult rather than copying it. Same confidence rules as linking."""
+    try:
+        with _maybe_savepoint(conn):
+            matches = find_matches(problem_text(question), fingerprint=question.get("fingerprint"), kind="solved",
+                                   tags=_link_tags(question), top_k=CHECK_TOP_K, confirm=True, conn=conn)
+        return decide(matches, need_fix=True)
+    except Exception:  # lookup failure must not prevent saving a distinct question
+        log.exception("linking: find_existing_solution failed")
+        return None
+
+
 def find_duplicate_question(question: dict[str, Any], conn: psycopg.Connection | None = None,
                             rejected: set[int] | None = None) -> Match | None:
     """An existing Open Question that is the same problem as this new one, or None. Never raises.

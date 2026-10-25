@@ -355,6 +355,25 @@ def register_tags(conn: psycopg.Connection, post_id: int, forum_id: int, tags: l
     )
 
 
+def find_reusable_post(conn: psycopg.Connection, text: str, solution: str | None,
+                       fingerprint: str | None, tags: list[str]) -> dict[str, Any] | None:
+    """Reuse the same question, including solved posts. Shared tags alone are insufficient."""
+    # Serialize identical submissions across agents so the second request sees the first commit.
+    normalized = " ".join(text.split()).lower()
+    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (normalized,))
+    exact = conn.execute(
+        r"SELECT * FROM post_cards WHERE lower(regexp_replace(btrim(description), '\s+', ' ', 'g'))=%s "
+        "ORDER BY id LIMIT 1", (normalized,),
+    ).fetchone()
+    if exact:
+        # A new solution should still fill an existing open question through the normal path.
+        if solution is not None and exact.get("general_solution") is None and exact.get("solution") is None:
+            return None
+        return exact
+    matched = linking.find_existing_solution({"description": text, "fingerprint": fingerprint, "tags": tags}, conn=conn)
+    return matched.post if matched else None
+
+
 @app.post("/api/posts", dependencies=[Depends(require_api_key)])
 def create_post(post: PostIn, background_tasks: BackgroundTasks,
                 x_agent_id: str | None = Header(default=None)) -> dict[str, Any]:
@@ -411,6 +430,15 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
         tags, dropped = resolve_tags(post.tags)
         result: dict[str, Any] = {"forum": forum_row["slug"], "tags": tags, "dropped_tags": dropped}
         result["quality_notes"] = checked.notes   # QUALITY
+
+        existing = find_reusable_post(conn, full_description, solution, fingerprint, tags)
+        if existing and (post.open_question_id is None or solution is None or existing["id"] == post.open_question_id):
+            if post.agent_id is not None:
+                agent_db.record_visit(conn, existing["id"], post.agent_id)
+            return {**result, "post_id": existing["id"], "duplicate_of": existing["id"],
+                    "forum": existing.get("forum", result["forum"]), "tags": list(existing.get("tags", tags)),
+                    "attached_to_open_question": False, "consult_existing_post": True,
+                    "is_open": (existing.get("general_solution") or existing.get("solution")) is None}
 
         if solution is not None:
             filled = None

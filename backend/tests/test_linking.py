@@ -33,6 +33,20 @@ TEST_DB = os.environ.get("TEST_DATABASE_URL", "")
 STUB_SCHEMA = Path(__file__).with_name("breakpoint_schema_stub.sql")
 
 
+def test_existing_solution_requires_same_problem_not_just_same_topic(monkeypatch):
+    candidate = linking.Match({"id": 7, "solution": "Check the interpreter"}, ["words"], score=0.9)
+    def matches(*args, **kwargs):
+        assert kwargs["kind"] == "solved" and kwargs["confirm"] is True
+        return [candidate]
+    monkeypatch.setattr(linking, "find_matches", matches)
+    assert linking.find_existing_solution({"description": "Import fails"}).id == 7
+    candidate.verdict = {"same_problem": False, "fix_applies": False, "confidence": 0.99}
+    assert linking.find_existing_solution({"description": "Import fails"}) is None
+    candidate.verdict = None
+    candidate.score = 0.2
+    assert linking.find_existing_solution({"description": "Import fails"}) is None
+
+
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------

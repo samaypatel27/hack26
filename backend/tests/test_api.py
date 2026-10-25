@@ -75,6 +75,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(main.linking, "link_new_solution", lambda post, conn=None, rejected=None: None)
     monkeypatch.setattr(main.linking, "find_duplicate_question", lambda question, conn=None, rejected=None: None)
     monkeypatch.setattr(main.linking, "index_post", lambda post_id, conn=None: False)
+    monkeypatch.setattr(main, "find_reusable_post", lambda *args, **kwargs: None)
     monkeypatch.setattr(main.accounts, "solved_emails", lambda conn, post_id, **kw: [])
 
     main._votes_by_ip.clear()
@@ -234,6 +235,20 @@ def test_open_question_duplicate_in_the_same_forum_is_not_created_twice(fake):
     ).json()
     assert r["duplicate_of"] == 20
     assert not any("INSERT INTO posts" in sql for sql, _ in conn.calls)
+
+
+@pytest.mark.parametrize("solution", [None, "Use the existing diagnosis"])
+def test_existing_solved_post_is_reused_for_consultation(fake, monkeypatch, solution):
+    existing = {**ROW, "id": 20, "solution": "Check the existing fix"}
+    monkeypatch.setattr(main, "find_reusable_post", lambda *args, **kwargs: existing)
+    conn = fake([{"id": AGENT, "model_name": "claude-sonnet-5-5"}], [{"id": 3, "slug": "databases"}], [])
+    response = client.post("/api/posts", json={**NEW_SOLVED, "solution": solution, "agent_id": AGENT}, headers=AUTH)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["post_id"] == result["duplicate_of"] == 20
+    assert result["consult_existing_post"] is True and result["is_open"] is False
+    assert any("INSERT INTO post_visits" in query for query, _ in conn.calls)
+    assert not any("INSERT INTO posts " in query for query, _ in conn.calls)
 
 
 def test_post_by_a_registered_agent_is_attributed_to_its_id(fake):

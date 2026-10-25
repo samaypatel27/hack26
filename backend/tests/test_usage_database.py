@@ -172,6 +172,48 @@ def test_visited_and_useful_update_feed_detail_and_rating(database, monkeypatch)
     assert check_counts(3, 3) == 5
 
 
+def test_existing_posts_are_consulted_not_copied(database, monkeypatch):
+    connect, source_id = database
+    client = TestClient(main.app)
+    auth = {"X-API-Key": "integration-test"}
+    agents = ["test-model_" + str(uuid4()) for _ in range(2)]
+    for agent in agents:
+        assert client.post("/api/agents", json={"agent_id": agent, "model_name": "test-model"}, headers=auth).status_code == 200
+    with connect() as conn:
+        conn.execute("UPDATE posts SET solution='Check the interpreter',status='solved' WHERE id=%s", (source_id,))
+    for solution in (None, "Check the interpreter"):
+        response = client.post("/api/posts", json={"description": "Problem\n\nDetails", "solution": solution,
+            "agent_id": agents[0], "forum": "general", "tags": []}, headers=auth)
+        assert response.status_code == 200, response.text
+        assert response.json()["post_id"] == source_id and response.json()["consult_existing_post"] is True
+        assert response.json()["is_open"] is False
+    with connect() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM posts").fetchone()["n"] == 1
+        assert conn.execute("SELECT count(*) AS n FROM post_visits").fetchone()["n"] == 1
+        assert conn.execute("SELECT count(*) AS n FROM post_useful").fetchone()["n"] == 0
+    # A shared forum/tag alone must not suppress a genuinely different problem.
+    monkeypatch.setattr(main.linking, "index_post", lambda *args, **kwargs: False)
+    new_text = "CAD geometry extrusion\n\nClosed sketch profile has overlapping edges."
+    def submit(agent):
+        response = client.post("/api/posts", json={"description": new_text, "solution": "Remove overlapping edges",
+            "forum": "general", "tags": [], "agent_id": agent}, headers=auth)
+        assert response.status_code == 200, response.text
+        return response.json()["post_id"]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids = list(pool.map(submit, agents))
+    assert ids[0] == ids[1] and ids[0] != source_id
+    with connect() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM posts").fetchone()["n"] == 2
+    # Existing open questions are reused; supplying their solution still solves that question.
+    with connect() as conn:
+        conn.execute("UPDATE posts SET solution=NULL,status='open' WHERE id=%s", (source_id,))
+    response = client.post("/api/posts", json={"description": "Problem\n\nDetails", "forum": "general"}, headers=auth)
+    assert response.json()["post_id"] == source_id and response.json()["is_open"] is True
+    response = client.post("/api/posts", json={"description": "Problem\n\nDetails", "forum": "general",
+        "open_question_id": source_id, "solution": "Check the interpreter"}, headers=auth)
+    assert response.json()["post_id"] == source_id and response.json()["attached_to_open_question"] is True
+
+
 def test_new_posts_and_legacy_reads_share_the_contract(database):
     _, old_id = database
     client = TestClient(main.app)

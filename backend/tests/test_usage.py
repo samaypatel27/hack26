@@ -30,6 +30,7 @@ def db(monkeypatch):
     monkeypatch.setattr(main.linking, "link_new_solution", lambda post, conn=None, rejected=None: None)
     monkeypatch.setattr(main.linking, "find_duplicate_question", lambda question, conn=None, rejected=None: None)
     monkeypatch.setattr(main.linking, "index_post", lambda post_id, conn=None: False)
+    monkeypatch.setattr(main, "find_reusable_post", lambda *args, **kwargs: None)
     monkeypatch.setattr(main.accounts, "solved_emails", lambda conn, post_id, **kw: [])
     return install
 

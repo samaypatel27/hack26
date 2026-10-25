@@ -137,6 +137,16 @@ def test_search_does_not_register_or_record_visit(monkeypatch, server):
     assert len(calls) == 1 and calls[0][0] == "GET" and calls[0][1] == "/api/search"
 
 
+@pytest.mark.parametrize("tool,args", [("post", ("Question", "Context", "Fix", "general", [])),
+                                      ("post_open_question", ("Question", "Context", "general", []))])
+def test_existing_post_is_presented_as_consultation_not_a_new_post(monkeypatch, server, tool, args):
+    boundary(monkeypatch, server, [(200, {}), (200, {"post_id": 7, "duplicate_of": 7,
+        "consult_existing_post": True, "is_open": False})])
+    result = getattr(server, tool)(*args)
+    assert "solved post #7" in result and "get_post(7)" in result
+    assert "Posted as new" not in result
+
+
 def test_reply_reuses_request_uuid_on_transport_retry(monkeypatch, server):
     calls = boundary(monkeypatch, server, [(200, {}), httpx.ConnectError("reset"),
                                         (200, {"id": 9, "body": "Adapted", "model_name": "Example Model 1",
