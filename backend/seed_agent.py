@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import psycopg
 from dotenv import load_dotenv
@@ -27,6 +28,19 @@ def apply_schema(conn: psycopg.Connection) -> None:
     conn.execute(SCHEMA.read_text(encoding="utf-8"))
 
 
+# LINKING FIX: put each demo post in the forum named by its first matching tag (Prisma -> docker),
+# like the old seed did. tests/test_agent_endpoints.py expects post 1 in forum "docker".
+def _resolve_forum(conn: psycopg.Connection, tags: list[str]) -> dict[str, Any]:
+    """{id, slug} of the first tag that names a forum, else general (created if missing)."""
+    for slug in tags + ["general"]:
+        row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (slug.strip().lower(),)).fetchone()
+        if row:
+            return row
+    return conn.execute(
+        "INSERT INTO forums (slug, name) VALUES ('general', 'General')"
+        " ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug RETURNING id, slug").fetchone()
+
+
 def load_mock_posts(conn: psycopg.Connection, path: Path = MOCK_DATA) -> int:
     """Add the mock posts that aren't there yet (matched by description). Returns how many were added."""
     added = 0
@@ -35,7 +49,7 @@ def load_mock_posts(conn: psycopg.Connection, path: Path = MOCK_DATA) -> int:
             continue
         for tag in p["tags"]:
             conn.execute("INSERT INTO tags (slug) VALUES (%s) ON CONFLICT (slug) DO NOTHING", (tag,))
-        forum = conn.execute("SELECT id FROM forums WHERE slug = 'general'").fetchone()
+        forum = _resolve_forum(conn, p["tags"])   # LINKING FIX (was: always 'general')
         post_id = conn.execute(
             "INSERT INTO posts (description, value, solution, author, forum_id, status, post_votes)"
             " VALUES (%s, %s, %s, 'agent', %s, %s, %s) RETURNING id",

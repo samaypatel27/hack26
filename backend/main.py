@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 from collections import defaultdict, deque
@@ -6,19 +7,23 @@ from typing import Any, Literal
 
 import psycopg
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
+import accounts   # ACCOUNTS: install identity, optional email, "your question was solved" (docs/accounts.md)
 import agent
 import agent_db
+import linking    # LINKING: the matching funnel for new posts (docs/linking.md)
 import safety
 import team_api
 from matching import ATTACH_MIN_SCORE, best_match, best_text_match, words
 from scrub import scrub
 
 load_dotenv(Path(__file__).with_name(".env"))
+
+log = logging.getLogger("main")
 
 app = FastAPI(title="Breakpoint")
 
@@ -30,6 +35,7 @@ app.add_middleware(
 )
 app.include_router(agent.router)     # /api/search, /api/outcomes, /api/updates, /api/judge
 app.include_router(team_api.router)  # /api/help, /api/help/{run_id}, /api/rerun
+app.include_router(accounts.router)  # ACCOUNTS: /api/agents/register, /api/agents/{id}/public, /api/accounts/*
 
 SORTS = {
     "top": "post_votes DESC, created_at DESC, id DESC",
@@ -238,15 +244,32 @@ def notify_solved(conn: psycopg.Connection, question: dict[str, Any], solver_pro
             agent_db.add_update(conn, project, message, question["id"])
 
 
+def email_waiting_humans(conn: psycopg.Connection, background_tasks: BackgroundTasks, question_id: int,
+                         solver_agent_id: str | None) -> None:
+    """ACCOUNTS (docs/accounts.md): queue the "your question was answered" emails for an Open Question
+    that just got its solution, once. The agent_updates rows are written by the caller, so accounts
+    writes none. The emails go out after the response. Needs schema_accounts.sql; never breaks the save."""
+    try:
+        with conn.transaction():   # a savepoint: a failure here must not undo the post
+            result = accounts.notify_post_solved(conn, question_id, exclude_agent_id=solver_agent_id,
+                                                 write_updates=False)
+        background_tasks.add_task(accounts.deliver, result["emails"])
+    except Exception:  # noqa: BLE001
+        log.exception("accounts: could not queue the emails for Open Question %s", question_id)
+
+
 @app.post("/api/posts", dependencies=[Depends(require_api_key)])
-def create_post(post: PostIn) -> dict[str, Any]:
+def create_post(post: PostIn, background_tasks: BackgroundTasks,
+                x_agent_id: str | None = Header(default=None)) -> dict[str, Any]:
     """Create a solved post (solution given) or an open question (no solution).
 
     Everything is safety-checked (400 if refused) and scrubbed of secrets first. An unknown forum
     falls back to "general"; unknown tags are dropped. A solution for an existing open question
     fills that question in instead of creating a new post: the question is the one named by
-    `open_question_id`, else the one with the same error fingerprint, else a close text match.
-    An open question that duplicates an existing one is not created twice.
+    `open_question_id`, else the one linking finds (docs/linking.md), else the one with the same
+    error fingerprint or a close text match. An open question that duplicates an existing one is not
+    created twice. LINKING: a question linked by similarity is told "Possible answer, not verified
+    yet", and the answer has `linked_by` ("ai_check" | "fallback" | null).
     """
     reason = safety.check(post.description, post.value, post.solution, post.command)
     if reason:
@@ -269,19 +292,41 @@ def create_post(post: PostIn) -> dict[str, Any]:
 
         if post.solution is not None:
             filled = None
+            linked = None   # LINKING: the match linking chose, if it chose the question
             if post.open_question_id is not None:
                 filled = fill_open_question(conn, post.open_question_id, post.solution)
             if filled is None:
-                question_id = find_open_question(conn, post, fingerprint, tags)
-                filled = fill_open_question(conn, question_id, post.solution) if question_id else None
+                # LINKING: the linking funnel picks the question first; the text match below is the fallback.
+                rejected: set[int] = set()   # questions the AI check said are a different problem
+                linked = linking.link_new_solution({"description": post.description, "solution": post.solution,
+                                                    "tags": tags, "fingerprint": fingerprint},
+                                                   conn=conn, rejected=rejected)
+                filled = fill_open_question(conn, linked.id, post.solution) if linked else None
+                if filled is None:
+                    linked = None
+                    question_id = find_open_question(conn, post, fingerprint, tags)
+                    if question_id in rejected:   # LINKING
+                        question_id = None
+                    filled = fill_open_question(conn, question_id, post.solution) if question_id else None
             if filled:
                 agent_db.save_meta(conn, filled["id"], fingerprint, command, None, team_run_id)
-                notify_solved(conn, filled, project)
-                return {**result, "post_id": filled["id"], "attached_to_open_question": True, "duplicate_of": None}
+                if linked is not None:   # LINKING: linked by similarity, so "Possible answer, not verified yet"
+                    linking.notify_possible_answer(filled["id"], linked, conn=conn, exclude_project=project)
+                else:
+                    notify_solved(conn, filled, project)
+                email_waiting_humans(conn, background_tasks, filled["id"], x_agent_id)   # ACCOUNTS
+                return {**result, "post_id": filled["id"], "attached_to_open_question": True, "duplicate_of": None,
+                        "linked_by": linked.decided_by if linked else None}   # LINKING: new optional field
 
         if post.solution is None:
             duplicate_id = None
-            if fingerprint:
+            # LINKING: fingerprint + words + meaning + AI check, across forums. The teammate's checks below
+            # (same fingerprint, then best_match in the same forum) are the fallback.
+            rejected_dups: set[int] = set()
+            dup = linking.find_duplicate_question({"description": post.description, "tags": tags,
+                                                   "fingerprint": fingerprint}, conn=conn, rejected=rejected_dups)
+            duplicate_id = dup.id if dup else None
+            if duplicate_id is None and fingerprint:
                 for same in agent_db.posts_with_fingerprint(conn, fingerprint, open_only=True):
                     duplicate_id = same["id"]
                     break
@@ -291,6 +336,8 @@ def create_post(post: PostIn) -> dict[str, Any]:
                 ).fetchall()
                 match = best_match(post.description, [{**p, "tags": list(p["tags"])} for p in open_posts], forum=forum_row["slug"])
                 duplicate_id = match["id"] if match else None
+            if duplicate_id in rejected_dups:   # LINKING: the AI check said it is a different problem
+                duplicate_id = None
             if duplicate_id is not None:
                 if project:
                     agent_db.add_watcher(conn, duplicate_id, project)  # tell this project when it is solved
@@ -313,6 +360,7 @@ def create_post(post: PostIn) -> dict[str, Any]:
             (new["id"], tags),
         )
         agent_db.save_meta(conn, new["id"], fingerprint, command, project, team_run_id)
+    background_tasks.add_task(linking.index_post, new["id"])   # LINKING: embed it after the commit (Stage 3)
     return {**result, "post_id": new["id"], "attached_to_open_question": False, "duplicate_of": None}
 
 

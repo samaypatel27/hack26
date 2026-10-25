@@ -30,7 +30,7 @@ def test_search_fingerprint_first(client):
     assert r.status_code == 200
     first = r.json()[0]
     assert (first["id"], first["match"], first["score"]) == (1, "fingerprint", 1.0)
-    assert set(first) == PUBLIC_FIELDS | {"match", "score"}
+    assert set(first) == PUBLIC_FIELDS | {"match", "score", "stages", "stage_scores"}   # LINKING: +stages
     assert set(first["tags"]) == {"prisma", "docker", "alpine"} and first["status"] == "solved"
     assert first["forum"] == "docker" and first["upvotes"] == 14
 
@@ -229,5 +229,7 @@ def test_judge_client_settings(monkeypatch):
 
 
 def test_router_paths(client):
-    paths = set(client.app.openapi()["paths"])
+    import agent   # FIX: main.app now also has the website, team and accounts routes; check agent.router only
+    paths = {route.path for route in agent.router.routes}
     assert paths == {"/api/search", "/api/outcomes", "/api/updates", "/api/judge"}
+    assert paths <= set(client.app.openapi()["paths"])

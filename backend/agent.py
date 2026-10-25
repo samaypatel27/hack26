@@ -20,6 +20,7 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
 import agent_db as db
 import judge
+import linking   # LINKING: search uses the linking funnel (docs/linking.md)
 import matching
 from scrub import scrub
 
@@ -74,24 +75,21 @@ def clean_id(raw: Any) -> int | None:
 @router.get("/search")
 def search(error: str = "", command: str = "", fingerprint: str = "", tags: str = "") -> list[dict[str, Any]]:
     """Matching posts, best first: exact fingerprint matches (score 1.0), then text matches (score >= 0.2).
-    `tags` (comma-separated) narrows the text matches to posts sharing a tag; unknown tags are ignored."""
+    `tags` (comma-separated) narrows the text matches to posts sharing a tag; unknown tags are ignored.
+
+    LINKING: the matching itself is linking.find_matches (stages 1-3: fingerprint, words, meaning;
+    docs/linking.md). Same response shape as before, plus `stages` and `stage_scores` per result.
+    No AI check here: the hook waits only 2 seconds."""
     fp = db.clean_fingerprint(fingerprint)
-    query = matching.words(f"{error[:MAX_QUERY_CHARS]} {command[:LIMITS['command']]}")
-    results: list[dict[str, Any]] = []
+    text = f"{error[:MAX_QUERY_CHARS]} {command[:LIMITS['command']]}".strip()
+    if not fp and not matching.words(text):
+        return []
     with db.connect() as conn:
-        exact = db.posts_with_fingerprint(conn, fp) if fp else []
-        results += [{**db.public_post(p), "match": "fingerprint", "score": 1.0} for p in exact]
-        if query:
-            wanted = requested_tags(tags)
-            tag_filter = [t for t in wanted if t in db.known_tags(conn)] if wanted else []
-            seen = {p["id"] for p in exact}
-            for post in db.candidate_posts(conn, tags=tag_filter or None):
-                if post["id"] in seen:
-                    continue
-                score = matching.text_score(query, post["description"])
-                if score >= matching.SEARCH_MIN_SCORE:
-                    results.append({**db.public_post(post), "match": "text", "score": score})
-    return matching.rank(results)[:MAX_SEARCH_RESULTS]
+        wanted = requested_tags(tags)
+        tag_filter = [t for t in wanted if t in db.known_tags(conn)] if wanted else []
+        matches = linking.find_matches(text, fingerprint=fp, tags=tag_filter or None,
+                                       top_k=MAX_SEARCH_RESULTS, conn=conn)
+    return [m.as_result() for m in matches]
 
 
 # ---------------------------------------------------------------------------

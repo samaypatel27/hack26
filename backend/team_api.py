@@ -175,8 +175,13 @@ def _load_open_questions(ids: list[int] | str, limit: int) -> list[dict[str, Any
     import agent_db
 
     with agent_db.connect() as conn:
-        posts = agent_db.candidate_posts(conn, open_only=True)
-    posts = posts[:limit] if ids == "all" else [p for p in posts if p["id"] in ids]
+        if ids == "all":
+            posts = agent_db.candidate_posts(conn, open_only=True)[:limit]
+        else:
+            # FIX: look the chosen ids up directly (candidate_posts only holds the 500 newest posts),
+            # in the order they were asked for. The caller drops ones that are already solved.
+            found = {p["id"]: p for p in agent_db.posts_by_ids(conn, ids)}
+            posts = [found[i] for i in ids if i in found]
     return [{**p, "tags": list(p.get("tags") or [])} for p in posts]
 
 
@@ -200,6 +205,25 @@ def _notify_possible_answer(open_question_id: int, run_id: str, result: dict[str
                 agent_db.add_update(conn, project, message, open_question_id)
     except Exception:  # noqa: BLE001
         log.exception("could not queue the possible-answer update for Open Question %s", open_question_id)
+        return
+    _email_possible_answer(open_question_id, run_id, top.get("cause", "")[:300])
+
+
+def _email_possible_answer(open_question_id: int, run_id: str, cause: str) -> None:
+    """ACCOUNTS (docs/accounts.md): email the humans waiting on the Open Question, once per team run.
+    The agent_updates rows were written above, so accounts writes none. Needs schema_accounts.sql;
+    without it nothing is sent. Never raises."""
+    try:
+        import accounts
+        import agent_db
+
+        detail = (f"A cold-case re-run of the specialist team suggests: {cause or 'see the team report'} "
+                  f"(team run {run_id}).")
+        with agent_db.connect() as conn:
+            result = accounts.notify_possible_answer(conn, open_question_id, run_id, detail, write_updates=False)
+        accounts.deliver(result["emails"])   # after the commit; this already runs in the team's thread pool
+    except Exception:  # noqa: BLE001
+        log.exception("could not email the possible answer for Open Question %s", open_question_id)
 
 
 @router.post("/rerun", dependencies=[Depends(require_api_key)])
