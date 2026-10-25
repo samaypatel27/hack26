@@ -27,6 +27,7 @@ HANDLER_NAMES = {
     "UserPromptSubmit": "on_user_prompt",
     "PostToolUse": "on_tool_use",
     "PostToolUseFailure": "on_tool_use",
+    "PreToolUse": "on_pre_tool_use",   # only while the stuck menu waits (brain.py); a quick file check otherwise
     "Stop": "on_stop",
 }
 
@@ -55,10 +56,15 @@ def run(raw: bytes) -> dict[str, Any] | None:
     if not name:
         return None
     try:
+        import notebook
+        if name == "on_pre_tool_use":   # before every tool call: read the notes file only (no git, no network)
+            state = notebook.peek(payload)
+            if not state or not state.get("pending_menu"):
+                return None   # nearly always: no stuck menu waits for an answer
+        else:
+            state = notebook.load(payload)
         import backend
         import brain
-        import notebook
-        state = notebook.load(payload)
         output = getattr(brain, name)(payload, state, backend)
         notebook.save(payload, state)
         return output

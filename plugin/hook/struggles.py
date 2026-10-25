@@ -26,6 +26,7 @@ Entry points (one per moment the hook runs):
 
 import hashlib
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +43,9 @@ JUDGE_EVERY = 10             # AI judge: at most once per this many actions
 PROBE_COMMANDS = {
     "grep", "rg", "find", "ls", "dir", "cat", "head", "tail", "which", "where", "type",
     "test", "[", "diff", "echo", "pwd", "git status", "git diff", "git log", "git show",
+    "cd", "wc", "sort", "less", "more", "file", "stat", "tree", "printf", "true", "sleep",
+    "findstr", "where.exe", "write-output", "write-host", "set-location", "select-string", "select-object",
+    "test-path", "format-table", "format-list", "measure-object", "out-string", "sl", "gci", "cls", "clear",
 }
 
 PUSHBACK_PHRASES = [
@@ -86,18 +90,177 @@ class Signal:
 # Helpers the notebook uses to record runs
 # ---------------------------------------------------------------------------
 
+@dataclass
+class Segment:
+    """One simple command inside a compound shell command."""
+    text: str          # the command itself, e.g. `python -m unittest 2>&1`
+    sep: str           # what follows it: "\n", ";", "&&", "||", "|" or "" (the end)
+    piped: bool        # its output goes into a pipe (`pytest | tail`)
+
+
+HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][\w-]*)\1")
+HERESTRING_START_RE = re.compile(r"@(['\"])\s*$")            # PowerShell: @' ... '@
+ENV_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+REDIRECT_WORD_RE = re.compile(r"^(\d*>>?|&>|\d*>&\d+|<<?-?|<)(.*)$")
+
+# Test and build runners: in a compound command, the run is about this part (`cd x && pytest; git status`).
+CHECK_RE = re.compile(
+    r"^(?:&\s*)?(?:"
+    r"(?:python[\d.]*|py|python3)(?:\.exe)?\s+(?:-\S+\s+)*-m\s+(?:unittest|pytest|py\.test|tox|nox|mypy|doctest)\b"
+    r"|(?:python[\d.]*|py)(?:\.exe)?\s+(?:-\S+\s+)*\S*(?:manage\.py\s+test|setup\.py\s+test|runtests\.py|test\w*\.py)\b"
+    r"|(?:pytest|py\.test|tox|nox|mypy|jest|vitest|mocha|tsc|rspec|phpunit|ctest|gradle|mvn|make)(?:\.exe|\.cmd)?\b"
+    r"|\./gradlew\b|\./mvnw\b"
+    r"|(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:test|t|run|run-script|build)\b"
+    r"|node\s+(?:\S+\s+)*--test\b|npx\s+\S+|deno\s+test\b"
+    r"|cargo\s+(?:test|build|check|run|clippy)\b|go\s+(?:test|build|vet)\b"
+    r"|dotnet\s+(?:test|build)\b|cmake\s+--build\b|bundle\s+exec\s+rspec\b"
+    r"|docker[\s-]+compose\s+(?:up|build|run)\b|docker\s+(?:build|run)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def split_heredocs(cmd: str) -> tuple[str, list[str]]:
+    """(the command without heredoc / here-string bodies, the bodies). `python - <<'EOF' ... EOF` keeps
+    `python - <<'EOF'`; the script inside is returned separately (notebook.py reads it for file writes)."""
+    kept: list[str] = []
+    bodies: list[str] = []
+    lines = (cmd or "").split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        ends = [m.group(2) for m in HEREDOC_RE.finditer(line) if not line[max(0, m.start() - 1):m.start()] == "<"]
+        if HERESTRING_START_RE.search(line):
+            ends.append("'@" if line.rstrip().endswith("'") else '"@')
+        for end in ends:
+            body: list[str] = []
+            while i < len(lines) and lines[i].strip() != end and not (end in ("'@", '"@')
+                                                                       and lines[i].lstrip().startswith(end)):
+                body.append(lines[i])
+                i += 1
+            if i < len(lines):
+                tail = lines[i].lstrip()[len(end):] if end in ("'@", '"@') else ""
+                if tail.strip():
+                    kept.append(tail)   # `'@ | Set-Content x`: the rest of the closing line is still a command
+            i += 1   # the end marker
+            bodies.append("\n".join(body))
+    return "\n".join(kept), bodies
+
+
+def split_command(cmd: str) -> list[Segment]:
+    """The simple commands in a compound one, in order. Splits on newlines, `;`, `&&`, `||` and `|`, outside
+    quotes; heredoc bodies are skipped. Empty parts are dropped."""
+    text, _ = split_heredocs(cmd)
+    segments: list[Segment] = []
+    current: list[str] = []
+    quote = ""
+    i = 0
+
+    def flush(sep: str) -> None:
+        part = "".join(current).strip()
+        current.clear()
+        if part:
+            segments.append(Segment(part, sep, sep == "|"))
+        elif segments and sep:
+            segments[-1].sep = sep if segments[-1].sep in ("", "\n") else segments[-1].sep
+
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+            elif ch == "\\" and quote == '"' and i + 1 < len(text):
+                current.append(ch)
+                i += 1
+                ch = text[i]
+            current.append(ch)
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch == "\\" and i + 1 < len(text) and text[i + 1] == "\n":
+            i += 2   # a continued line
+            current.append(" ")
+            continue
+        elif ch == "\n" or ch == ";":
+            flush(ch)
+            i += 1
+            continue
+        elif text.startswith("&&", i) or text.startswith("||", i):
+            flush(text[i:i + 2])
+            i += 2
+            continue
+        elif ch == "|" and not (i > 0 and text[i - 1] == ">"):
+            flush("|")
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    flush("")
+    return segments
+
+
+def words_of(segment: str) -> list[str]:
+    """The words of a simple command without env assignments, redirections and a leading call operator."""
+    try:
+        raw = shlex.split(segment.replace("\\", "/"), posix=True)   # Windows paths: keep them whole
+    except ValueError:
+        raw = segment.split()
+    words: list[str] = []
+    skip_next = False
+    for w in raw:
+        if skip_next:
+            skip_next = False
+            continue
+        if not words and (ENV_WORD_RE.match(w) or w == "&"):
+            continue
+        redirect = REDIRECT_WORD_RE.match(w)
+        if redirect:
+            skip_next = not redirect.group(2)   # `> file`: the file is the next word
+            continue
+        words.append(w)
+    return words
+
+
+def is_check(segment: str) -> bool:
+    """A test or build runner (`python -m unittest`, `pytest`, `npm test`, `cargo build`, ...)."""
+    return bool(CHECK_RE.match(" ".join(words_of(segment))))
+
+
+def check_index(segments: list[Segment]) -> int | None:
+    """Index of the last check command in a compound command, or None."""
+    found = None
+    for n, seg in enumerate(segments):
+        if is_check(seg.text):
+            found = n
+    return found
+
+
+def _segment_key(segment: str) -> str:
+    words = [w for w in words_of(segment) if not w.startswith("-")]
+    return " ".join(words[:3])
+
+
 def command_key(cmd: str) -> str:
     """Normalize a command so reruns with different flags count as the same command.
 
-    `cd app && NODE_ENV=test npm run build --verbose | tail` -> `npm run build`
+    In a compound command, the key is the check (test/build runner) it contains, so
+    `cd app && NODE_ENV=test npm run build --verbose | tail` -> `npm run build`, and
+    `python - <<'EOF' (patch) EOF` + `python -m unittest 2>&1 | tail -20; git status` -> `python unittest`.
+    Without a check, the last command that is not a probe (git status, ls, cat, ...), else the last one.
     """
-    last = re.split(r"&&|\|\||;", cmd)[-1]      # the part after `cd x &&` is what matters
-    first = last.split("|")[0]                   # `npm test | tail` is about npm test
-    words = [
-        w for w in first.split()
-        if not w.startswith("-") and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)
-    ]
-    return " ".join(words[:3])
+    segments = split_command(cmd)
+    if not segments:
+        return ""
+    idx = check_index(segments)
+    if idx is None:
+        heads = [s for n, s in enumerate(segments) if n == 0 or not segments[n - 1].piped]   # not `| tail`
+        keys = [_segment_key(s.text) for s in heads]
+        real = [k for k in keys if k and not _is_probe(k)]
+        return (real or [k for k in keys if k] or [""])[-1]
+    return _segment_key(segments[idx].text)
 
 
 def _normalize(text: str, keep_numbers: bool = False) -> str:
@@ -139,8 +302,9 @@ def fingerprint(text: str | None, errors_only: bool = True) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _is_probe(key: str) -> bool:
-    words = key.split()
-    return not words or words[0] in PROBE_COMMANDS or " ".join(words[:2]) in PROBE_COMMANDS
+    words = key.lower().split()
+    return (not words or words[0] in PROBE_COMMANDS or " ".join(words[:2]) in PROBE_COMMANDS
+            or words[0].startswith("get-"))
 
 
 def _runs(history: list[dict[str, Any]], key: str | None = None) -> list[tuple[int, dict[str, Any]]]:
@@ -284,6 +448,27 @@ def check_user_message(prompt: str, history: list[dict[str, Any]]) -> list[Signa
 # Signals 4-5: when the agent tries to stop
 # ---------------------------------------------------------------------------
 
+def _is_check_run(run: dict[str, Any]) -> bool:
+    if "check" in run:
+        return bool(run["check"])
+    return check_index(split_command(run.get("cmd", ""))) is not None
+
+
+def _superseded(failed: dict[str, Any], turn_runs: list[dict[str, Any]]) -> bool:
+    """A failed run that a later passing check run answers: the same runner on the same or a wider target
+    (`python unittest` passing covers `python unittest tests.test_store`), or, for a failed command that is not a
+    check at all (a patch script, a debug snippet), any later passing check."""
+    later = turn_runs[turn_runs.index(failed) + 1:] if failed in turn_runs else []
+    key = failed.get("key", "")
+    for run in later:
+        if not run.get("ok") or not _is_check_run(run):
+            continue
+        other = run.get("key", "")
+        if not _is_check_run(failed) or key == other or key.startswith(other + " "):
+            return True
+    return False
+
+
 def check_stop(history: list[dict[str, Any]], last_reply: str = "") -> list[Signal]:
     """Signals 4 and 5, looking only at the current turn (since the last user message)."""
     start = _current_turn_start(history)
@@ -295,7 +480,7 @@ def check_stop(history: list[dict[str, Any]], last_reply: str = "") -> list[Sign
     last_by_key: dict[str, dict[str, Any]] = {}
     for run in turn_runs:
         last_by_key[run["key"]] = run
-    still_failing = [k for k, r in last_by_key.items() if not r.get("ok")]
+    still_failing = [k for k, r in last_by_key.items() if not r.get("ok") and not _superseded(r, turn_runs)]
     if still_failing:
         key = still_failing[-1]
         signals.append(Signal("says_done_isnt", "strong", f"The agent is finishing, but `{key}` still fails.", key))

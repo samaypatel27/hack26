@@ -8,19 +8,24 @@
     ],
     "UserPromptSubmit": [
       {
-        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
+        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 30 }]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "^(Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__(plugin_breakpoint_breakpoint|breakpoint)__.*)$",
-        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
+        "matcher": "^(Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|AskUserQuestion|mcp__(plugin_breakpoint_breakpoint|breakpoint)__.*)$",
+        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 30 }]
       }
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "^(Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__(plugin_breakpoint_breakpoint|breakpoint)__.*)$",
-        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
+        "matcher": "^(Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|AskUserQuestion|mcp__(plugin_breakpoint_breakpoint|breakpoint)__.*)$",
+        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 30 }]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 5 }]
       }
     ],
     "Stop": [

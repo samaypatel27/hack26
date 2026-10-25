@@ -4,8 +4,17 @@ One handler per Claude Code event. Each takes (payload, state, backend) and retu
 print, or None to stay quiet. `state` is the notebook (notebook.py) and is changed in place; main.py
 saves it. `backend` is the backend module, passed in so tests can use a fake one.
 
+The early forum check. A strong model often fixes a bug in 1-2 tries, so it may never count as stuck. So the
+first time a command fails with an error fingerprint this session has not looked up yet (state["looked_up"]),
+the hook searches the forum once, right away. A close solved match -> KNOWN_FIX, a close open question ->
+OPEN_QUESTION_EXISTS: both open the episode (flagged "early") and count as rung 1 done. Nothing, or the server is
+down -> silent, and everything below works as if the check never ran. While an episode is only "early" (the agent
+does not count as stuck yet), a failed KNOWN_FIX gets FIX_FAILED alone: the ladder goes on once it is stuck.
+
 The help ladder. When struggles.py says the agent is struggling, the open episode climbs one rung
-and the agent gets one message (at most once per NUDGE_COOLDOWN actions):
+and the agent gets one message (_cooled_down: after a message, wait NUDGE_COOLDOWN actions or
+NUDGE_COOLDOWN_FAILURES failed runs, whichever comes first; one failure is enough after a REWIND_OFFER, or when it
+shows a new error):
   1 FORUM   search the forum. A solved, close match -> KNOWN_FIX (we then watch the next run of that
             command and report the outcome). An open question -> OPEN_QUESTION_EXISTS. Nothing, or
             the server is down -> go straight to rung 2.
@@ -14,8 +23,24 @@ and the agent gets one message (at most once per NUDGE_COOLDOWN actions):
             (docs/rewind.md). The agent asks the user; rewind.py does the rewind on a yes.
   2 TRIAGE  is the error in the outside world (a library, tool, environment) or the project's own
             code? Own code -> STEP_BACK checklist once. External -> go straight to rung 3.
-  3 TEAM    CALL_TEAM once: ask_for_help (the specialist team runs on our server).
+  3 TEAM    once, by the team_mode setting (backend.team_mode):
+              ask (default) the stuck menu below, instead of REWIND_OFFER now and the team later.
+              auto          the hook starts the team itself (_start_team) and says so (TEAM_CALLED).
+              off           nothing: the team is never started or suggested (REWIND_OFFER stays as before).
   4 OQ      the team really ran (TEAM_STARTED) and gave up: no answer, or no fix passed -> POST_OPEN_QUESTION.
+
+The stuck menu (team_mode ask). Where the ladder would send REWIND_OFFER or the team step, it sends STUCK_MENU once
+per episode instead: call AskUserQuestion now with "Call the specialist team", "Rewind the files to before the problem
+started" (only when _rewind_options finds a rewind) and "Let the agent keep trying". state["pending_menu"] holds it
+until it is answered:
+  - PreToolUse (on_pre_tool_use): any other tool call while it waits ends the session ({"continue": false}) with the
+    menu as text for the user ("Type 1, 2 or 3").
+  - The answer: the AskUserQuestion result (PostToolUse), or the user typing 1 / 2 / 3 or the option's words
+    (UserPromptSubmit). Any other prompt drops the menu.
+  - Team: the hook sends POST /api/help itself (case_builder.py, the same case file as `ask_for_help`), marks the
+    episode as team_ran exactly like a TEAM_STARTED reply, and says TEAM_CALLED (call check_help with the run id).
+    If the request fails: CALL_TEAM, so the agent calls ask_for_help itself. Rewind: REWIND_OFFER, with the user's
+    yes already given. Keep trying: nothing more this episode until the next rung (the open question) is due.
 
 The team's replies (docs/local-tester.md). ask_for_help and check_help return text starting with a tag:
 TEAM_STARTED <run_id> (team_ran, keep working), KNOWN_FIX / TRY_FIRST (no team run), TEAM_WORKING,
@@ -27,7 +52,8 @@ A direct ask_for_help (not suggested by the hook) is tied to the command that is
 
 A command that kept failing and now passes closes the episode: NOTABLE_SOLVE (with the open question's id when
 the forum has one, so the post answers it), or SUSPECT_FIX when the git diff shows the failure was hidden
-(|| true, skipped tests, ...) instead of fixed.
+(|| true, skipped tests, ...) instead of fixed. "Kept failing" means NOTABLE_MIN_FAILURES failures, or any failure
+at all when the episode is about a known open question or a fix the tester proved (those are always worth a post).
 
 Only our own MCP tools count (OUR_TOOL_PREFIXES), and `post` / `post_open_question` only when their reply says the
 post was saved: an error or a REVISE reply leaves the episode as it was.
@@ -53,12 +79,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+import backend as settings   # only for settings (team_mode); calls go through the `backend` passed in, so tests fake it
+import case_builder
 import checkpoints
 import messages
 import notebook
 import struggles
 
-NUDGE_COOLDOWN = 3            # actions between two ladder messages
+NUDGE_COOLDOWN = 3            # actions between two ladder messages ...
+NUDGE_COOLDOWN_FAILURES = 2   # ... or failed runs, whichever comes first (one combined fix-and-test call = 1 action)
 NOTABLE_MIN_FAILURES = 3      # failures before a pass counts as a notable solve
 KNOWN_FIX_MIN_SCORE = 0.5     # a text match must score at least this to count
 JUDGE_MIN_CONFIDENCE = 0.7
@@ -70,6 +99,16 @@ GIT_TIMEOUT = 2
 REWIND_SIGNALS = {"whack_a_mole", "edit_run_same_output", "ai_judge"}   # going in circles, not one hard error
 REWIND_MIN_EDITS = 3          # edits since a checkpoint before a rewind is worth offering
 REPORT_TRIES = 3              # failures after TEAM_REPORT before the ladder asks for an Open Question
+TEAM_FILES = 5                # recently edited files sent in the hook's own case file
+
+# The stuck menu. While it waits, only these tools may run: the question itself, and loading it or the skill.
+ASK_TOOL = "AskUserQuestion"
+MENU_ALLOWED_TOOLS = {ASK_TOOL, "ToolSearch", "Skill"}
+MENU_KEYWORDS = {"team": ("team", "specialist"), "rewind": ("rewind", "roll back", "rollback"),
+                 "keep": ("keep", "trying", "let the agent", "continue")}
+MENU_NUMBER_RE = re.compile(r"^\s*(?:option\s*)?#?\s*([1-9])\s*[.)]?\s*$", re.IGNORECASE)
+MENU_TYPED_CHARS = 60         # a longer prompt is a new request, not a typed menu answer
+ANSWER_PAIR_RE = re.compile(r'"[^"\n]*"\s*=\s*"([^"\n]*)"')   # AskUserQuestion's text result: "question"="answer"
 
 # The first line of an ask_for_help / check_help result (after the community label), and of the tester's output.
 TEAM_TAG_RE = re.compile(r"^(TEAM_STARTED|TEAM_WORKING|TEAM_REPORT|TEAM_NO_ANSWER|TEAM_FAILED|KNOWN_FIX|TRY_FIRST)"
@@ -140,6 +179,15 @@ def on_user_prompt(payload: dict[str, Any], state: dict[str, Any], backend: Any)
     """Signal 6: the user pushes back ("still broken") or pastes an error we already saw."""
     prompt = str(payload.get("prompt") or "")
     notebook.record(state, {"kind": "user", "t": time.time()})
+    menu = state.get("pending_menu")
+    if menu:   # the stuck menu waits: "1" / "2" / "3" (or the option's words) answers it; anything else drops it
+        state["pending_menu"] = None
+        typed = prompt.strip()
+        choice = _menu_choice(typed, menu.get("options") or [], numbers=True) \
+            if len(typed) <= MENU_TYPED_CHARS else None
+        if choice:
+            text = _menu_answer(payload, state, backend, menu, choice, typed=typed)
+            return messages.context("UserPromptSubmit", text) if text else None
     signals = struggles.check_user_message(prompt, state["history"])
     if not struggles.is_struggling(signals):
         return None
@@ -150,18 +198,37 @@ def on_user_prompt(payload: dict[str, Any], state: dict[str, Any], backend: Any)
 def on_tool_use(payload: dict[str, Any], state: dict[str, Any], backend: Any) -> dict[str, Any] | None:
     """PostToolUse and PostToolUseFailure: record the action, then decide after commands."""
     event = payload.get("hook_event_name", "PostToolUse")
-    if str(payload.get("tool_name", "")).startswith("mcp__"):
+    if payload.get("tool_name") == ASK_TOOL:
+        text = _after_menu_question(payload, state, backend)   # the user's answer to the stuck menu
+    elif str(payload.get("tool_name", "")).startswith("mcp__"):
         text = _after_mcp_tool(payload, state)
     else:
-        action, output = notebook.action_from_tool_use(payload)
+        actions, output = notebook.actions_from_tool_use(payload)   # a shell command: its file writes, then its run
+        action = actions[-1] if actions else None
         if action is not None and action["kind"] == "run" and _is_tester_command(action["cmd"]):
             text = _after_tester(state, output)   # our own tester: not work on the problem, never a struggle
             return messages.context(event, text) if text else None
         if action is None or (action["kind"] == "run" and _is_rewind_command(action["cmd"])):
             return None   # tools we don't track, and our own rewind.py (not work on the problem)
-        notebook.record(state, action)
+        for item in actions:
+            notebook.record(state, item)
         text = _after_run(payload, state, backend, action, output) if action["kind"] == "run" else None
     return messages.context(event, text) if text else None
+
+
+def on_pre_tool_use(payload: dict[str, Any], state: dict[str, Any], backend: Any) -> dict[str, Any] | None:
+    """PreToolUse, before every tool call. main.py only gets here when the notes file has a pending_menu (no git, no
+    network). Any tool other than the menu's question ends the session and shows the user the menu as text."""
+    menu = state.get("pending_menu")
+    if not menu:
+        return None
+    if not state.get("episode"):   # the problem is gone (the command passed): nothing to ask any more
+        state["pending_menu"] = None
+        return None
+    if payload.get("tool_name") in MENU_ALLOWED_TOOLS:
+        return None
+    menu["stopped"] = True   # the user answers by typing (on_user_prompt)
+    return messages.stop_session(messages.typed_menu(menu["question"], menu["options"]))
 
 
 def on_stop(payload: dict[str, Any], state: dict[str, Any], backend: Any) -> dict[str, Any] | None:
@@ -169,10 +236,16 @@ def on_stop(payload: dict[str, Any], state: dict[str, Any], backend: Any) -> dic
     if payload.get("stop_hook_active"):
         return None
     episode = state.get("episode")
+    menu = state.get("pending_menu")
+    replies = assistant_replies(payload.get("transcript_path"), 1)
+    if menu and episode:   # the menu waits for the user: never NOT_DONE ("keep fixing") now
+        if menu.get("stop_reminded") or (replies and menu["question"] in replies[-1]):
+            return None   # already reminded, or the reply shows the menu as text: the user answers by typing
+        menu["stop_reminded"] = True
+        return messages.block(messages.menu_reminder(messages.typed_menu(menu["question"], menu["options"])))
     if episode and episode.get("stop_blocked"):
         return None
     history = state["history"]
-    replies = assistant_replies(payload.get("transcript_path"), 1)
     signals = {s.name: s for s in struggles.check_stop(history, replies[-1] if replies else "")}
 
     key, text = "", None
@@ -249,10 +322,10 @@ def _after_run(payload: dict[str, Any], state: dict[str, Any], backend: Any,
         same_key = bool(episode) and episode["key"] == key
         failures = _failures_before(history, key, idx, episode["started_idx"] if same_key else 0)
         team_fix = episode.get("team_fix") if same_key else None
-        if failures >= NOTABLE_MIN_FAILURES or (team_fix and failures):
+        question = episode.get("open_question_id") if same_key else None   # kept before the episode closes
+        if failures >= NOTABLE_MIN_FAILURES or ((team_fix or question) and failures):
             fp = (_last_failed_run(history[:idx], key) or {}).get("err_fp")
             tried = list(episode["tried"]) if same_key else []
-            question = episode.get("open_question_id") if same_key else None   # kept before the episode closes
             if same_key:
                 state["episode"] = None
             findings = suspect_changes(notebook.project_dir(payload))
@@ -262,6 +335,12 @@ def _after_run(payload: dict[str, Any], state: dict[str, Any], backend: Any,
         if same_key and failures:
             state["episode"] = None   # fixed quickly: nothing worth saying
             return None
+
+    # (b2) A failure with an error the forum was not asked about yet: one early lookup, silent unless it matches.
+    if not run["ok"]:
+        text = _early_lookup(state, backend, run, output)
+        if text:
+            return text
 
     # (c) Is the agent struggling?
     signals = struggles.check_after_run(history)
@@ -292,9 +371,12 @@ def _check_fix(payload: dict[str, Any], state: dict[str, Any], backend: Any,
     _add_tried(episode, f"forum fix from post #{fix['post_id']} -> did not work")
     text = messages.fix_failed(fix["post_id"], run["cmd"], run["err_fp"], episode["tried"])
     episode["rung"] = max(episode["rung"], 1)   # forum done; go on to triage now
+    if episode.get("early") and not struggles.is_struggling(struggles.check_after_run(state["history"])):
+        episode["last_nudge_idx"] = len(state["history"])
+        return text   # the fix came from the early check and the agent is not stuck yet: the ladder waits
     problem = (run["cmd"], output, run["err_fp"])
     reason = f"The forum fix from post #{fix['post_id']} did not work."
-    next_step = _climb(state, backend, problem, reason)
+    next_step = _climb(state, backend, problem, reason, payload, [])   # no signals: no rewind here, as before
     episode["last_nudge_idx"] = len(state["history"])
     return text + "\n\n" + next_step if next_step else text
 
@@ -414,8 +496,17 @@ def _failing_key(history: list[dict[str, Any]]) -> str:
 
 
 def _after_team_tool(payload: dict[str, Any], state: dict[str, Any], asked: bool) -> str | None:
-    """ask_for_help / check_help results. Only TEAM_STARTED (or a later team answer) means the team really ran."""
-    tag, rest = _team_reply(notebook.tool_response_text(payload))
+    """ask_for_help / check_help results."""
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    return _team_result(payload, state, notebook.tool_response_text(payload), asked,
+                        str(tool_input.get("run_id") or ""))
+
+
+def _team_result(payload: dict[str, Any], state: dict[str, Any], text: str, asked: bool,
+                 run_id: str = "") -> str | None:
+    """An ask_for_help / check_help result, or the server's answer to the hook's own POST /api/help (_start_team).
+    Only TEAM_STARTED (or a later team answer) means the team really ran."""
+    tag, rest = _team_reply(text)
     episode = state.get("episode")
     if not tag:
         if asked and episode:
@@ -425,9 +516,7 @@ def _after_team_tool(payload: dict[str, Any], state: dict[str, Any], asked: bool
         key = _failing_key(state["history"])
         episode = _open_episode(state, key) if key else notebook.new_episode("", None, len(state["history"]))
         state["episode"] = episode
-    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-    run_id = str(tool_input.get("run_id") or "") or (rest.split() or [""])[0].strip(".,:;") \
-        or str(episode.get("team_run_id") or "")
+    run_id = run_id or (rest.split() or [""])[0].strip(".,:;") or str(episode.get("team_run_id") or "")
     command, _, fp = _problem(state) if episode["key"] else ("", "", None)
     tried = episode["tried"]
 
@@ -530,14 +619,34 @@ def _nudge(payload: dict[str, Any], state: dict[str, Any], backend: Any,
         episode = _open_episode(state, next((s.key for s in signals if s.key), ""))
     elif not episode["key"]:
         episode["key"] = struggles.command_key(problem[0])
+    episode["early"] = False   # the agent counts as stuck now: the full ladder applies
     length = len(state["history"])
-    if episode["last_nudge_idx"] is not None and length - episode["last_nudge_idx"] < NUDGE_COOLDOWN:
+    if not _cooled_down(state, episode):
         return None
     reason = " ".join(s.reason for s in signals if s.strength == "strong")
     text = _climb(state, backend, problem, reason, payload, signals)
     if text:
         episode["last_nudge_idx"] = length
+        episode["nudge_fp"] = [length, problem[2]]   # the error this message was about (for _cooled_down)
     return text
+
+
+def _cooled_down(state: dict[str, Any], episode: dict[str, Any]) -> bool:
+    """May the ladder speak again? Yes after NUDGE_COOLDOWN actions or NUDGE_COOLDOWN_FAILURES failed runs since
+    the last message, whichever comes first. Counting failures keeps the pace for an agent that patches and tests
+    in one shell call (one action per try). One failure is enough when it shows a different error than the last
+    message was about (each fix reveals a new error: the agent is going in circles, not still trying our advice),
+    and after a REWIND_OFFER, which is only a question for the user."""
+    last = episode.get("last_nudge_idx")
+    if last is None:
+        return True
+    since = state["history"][last:]
+    failed = [a for a in since if a.get("kind") == "run" and not a.get("ok")
+              and not struggles._is_probe(a.get("key", ""))]
+    at, fp = episode.get("nudge_fp") or [None, None]
+    moved_on = bool(failed) and at == last and bool(fp) and failed[-1].get("err_fp") not in (None, fp)
+    needed = 1 if episode.get("rewind_offer_idx") == last or moved_on else NUDGE_COOLDOWN_FAILURES
+    return len(since) >= NUDGE_COOLDOWN or len(failed) >= needed
 
 
 def _climb(state: dict[str, Any], backend: Any, problem: tuple[str, str, str | None], reason: str,
@@ -548,21 +657,19 @@ def _climb(state: dict[str, Any], backend: Any, problem: tuple[str, str, str | N
 
     if episode["rung"] < 1:
         episode["rung"] = 1
-        results = backend.search(error, command, fp)
-        top = results[0] if results else None
-        if top and _close_match(top):
-            if top.get("status") == "solved" and top.get("solution"):
-                episode["pending_fix"] = {"post_id": top.get("id"), "key": struggles.command_key(command), "fp": fp}
-                return messages.known_fix(top, command, fp, tried)
-            if top.get("status") == "open":
-                episode["open_question_id"] = top.get("id")
-                return messages.open_question_exists(top, command, fp, tried)
+        _note_looked_up(state, fp)
+        top = _forum_match(backend.search(error, command, fp))
+        if top:
+            return _forum_message(episode, top, command, fp)
         # no match, or the server is down: go on to triage now
 
+    mode = settings.team_mode()
     if episode["rung"] < 3 and payload is not None:   # the rewind sits between the forum and the team
-        text = _rewind_offer(payload, state, signals or [], problem, reason)
-        if text:
-            return text
+        options = _rewind_options(payload, state, signals or [])
+        if options and mode == "ask":
+            return _stuck_menu(state, problem, reason, options)   # one menu for the rewind and the team
+        if options:
+            return _rewind_offer(state, options, problem, reason)
 
     if episode["rung"] < 2:
         episode["rung"] = 2
@@ -572,7 +679,12 @@ def _climb(state: dict[str, Any], backend: Any, problem: tuple[str, str, str | N
 
     if episode["rung"] < 3:
         episode["rung"] = 3
-        return messages.call_team(command, error, fp, tried, reason, episode.get("open_question_id"))
+        if mode == "off":
+            return None   # never start or suggest the team
+        if mode == "auto":
+            return _start_team(payload, state, backend, problem, reason, "team_mode is auto: the hook starts the "
+                                                                         "team by itself when the agent is stuck.")
+        return _stuck_menu(state, problem, reason, None)
 
     if episode["rung"] < 4 and _open_question_due(state, episode):
         episode["rung"] = 4
@@ -580,9 +692,168 @@ def _climb(state: dict[str, Any], backend: Any, problem: tuple[str, str, str | N
     return None
 
 
-def _rewind_offer(payload: dict[str, Any], state: dict[str, Any], signals: list[struggles.Signal],
-                  problem: tuple[str, str, str | None], reason: str) -> str | None:
-    """REWIND_OFFER, once per episode, when the agent goes in circles with 3+ edits since a checkpoint."""
+# ---------------------------------------------------------------------------
+# The stuck menu (team_mode ask) and starting the team from the hook
+# ---------------------------------------------------------------------------
+
+def _stuck_menu(state: dict[str, Any], problem: tuple[str, str, str | None], reason: str,
+                rewind: list[dict[str, Any]] | None) -> str:
+    """STUCK_MENU, once per episode: the team step is reached (and the rewind offered, if there is one)."""
+    episode = state["episode"]
+    command, error, fp = problem
+    episode["rung"] = 3
+    options = ["team"] + (["rewind"] if rewind else []) + ["keep"]
+    note = None
+    if rewind:
+        episode["rewind_offered"] = True
+        chosen = _rewind_choice(rewind)
+        note = f"Back to {chosen['title']} ({chosen['time']}); undoes {chosen['edits']} edits."
+    failures, errors = _failure_counts(state, episode["key"] or struggles.command_key(command))
+    question = messages.menu_question(command, failures, errors)
+    state["pending_menu"] = {"question": question, "options": options, "problem": [command, error, fp],
+                             "reason": reason, "rewind": rewind, "idx": len(state["history"]), "t": time.time()}
+    return messages.stuck_menu(question, options, command, fp, episode["tried"], reason, note)
+
+
+def _rewind_choice(options: list[dict[str, Any]]) -> dict[str, Any]:
+    """The rewind the menu means ("to before the problem started"): episode_start if there is one, else the first."""
+    return next((o for o in options if o["name"] == "episode_start"), options[0])
+
+
+def _failure_counts(state: dict[str, Any], key: str) -> tuple[int, int]:
+    """(failed runs, different errors) of `key` in the open episode (or the whole history)."""
+    episode = state.get("episode") or {}
+    start = episode.get("started_idx", 0) if episode.get("key") == key else 0
+    runs = [a for a in state["history"][start:] if _is_run(a, key) and not a.get("ok")]
+    errors = len({a.get("err_fp") for a in runs if a.get("err_fp")})
+    return len(runs), max(errors, 1 if runs else 0)
+
+
+def _menu_choice(text: str, options: list[str], numbers: bool = False) -> str | None:
+    """Which menu option a text names ("team", "rewind" or "keep"), or None. `numbers`: also "1" / "2" / "3" (the
+    typed menu's numbering). Words must point at exactly one option (a text with every label means nothing)."""
+    if numbers:
+        match = MENU_NUMBER_RE.match(text)
+        if match:
+            n = int(match.group(1))
+            return options[n - 1] if 1 <= n <= len(options) else None
+    lower = text.lower()
+    found = [name for name in options if any(word in lower for word in MENU_KEYWORDS.get(name, ()))]
+    return found[0] if len(found) == 1 else None
+
+
+def _asked_answer(payload: dict[str, Any]) -> str:
+    """The user's answer in an AskUserQuestion result: its `answers` ({question: label}), else the
+    "question"="answer" pairs of its text form, else the whole text (then _menu_choice must find one label only)."""
+    response = payload.get("tool_response")
+    answers = response.get("answers") if isinstance(response, dict) else None
+    if isinstance(answers, dict) and answers:
+        return " | ".join(str(v) for v in answers.values())
+    if isinstance(answers, list) and answers:
+        return " | ".join(str(v) for v in answers)
+    text = notebook.tool_response_text(payload)
+    pairs = ANSWER_PAIR_RE.findall(text)
+    return " | ".join(pairs) if pairs else text.strip()
+
+
+def _after_menu_question(payload: dict[str, Any], state: dict[str, Any], backend: Any) -> str | None:
+    """The AskUserQuestion result while the stuck menu waits."""
+    menu = state.get("pending_menu")
+    if not menu or payload.get("hook_event_name") == "PostToolUseFailure":
+        return None   # no menu, or the question failed: the menu waits (the next other tool call shows it as text)
+    answer = _asked_answer(payload)
+    if not answer:
+        return None
+    choice = _menu_choice(answer, menu.get("options") or [])
+    if choice:
+        return _menu_answer(payload, state, backend, menu, choice)
+    state["pending_menu"] = None   # the user wrote an answer of their own ("Other"), or it can't be read
+    command, _, fp = menu["problem"]
+    return messages.team_status(
+        "Breakpoint could not match the user's answer to one of its menu options.",
+        "do what the user said. If they asked for the specialist team, call `ask_for_help` yourself (see CALL_TEAM "
+        "in the breakpoint skill); otherwise keep working.", command, fp)
+
+
+def _menu_answer(payload: dict[str, Any], state: dict[str, Any], backend: Any, menu: dict[str, Any], choice: str,
+                 typed: str = "") -> str | None:
+    """Act on the user's menu answer in the hook itself. `typed`: what the user typed (the agent did not see the
+    question then, so even "keep trying" gets a line)."""
+    state["pending_menu"] = None
+    episode = state.get("episode")
+    if not episode:
+        return None   # the episode closed meanwhile: nothing left to do
+    command, error, fp = menu["problem"]
+    episode["last_nudge_idx"] = len(state["history"])   # the ladder's cooldown counts from the answer
+    label = messages.MENU_OPTIONS[choice][0]
+    if choice == "team":
+        text = _start_team(payload, state, backend, (command, error, fp), menu.get("reason") or "",
+                           f"the user picked \"{label}\" in the Breakpoint menu.")
+    elif choice == "rewind" and menu.get("rewind"):
+        episode["rewind_offer_idx"] = len(state["history"])   # one failure after it is enough to climb again
+        text = messages.rewind_offer(menu["rewind"], command, fp, episode["tried"], menu.get("reason") or "",
+                                     _rewind_choice(menu["rewind"])["name"])
+    else:
+        text = messages.keep_trying(command, fp, episode["tried"]) if typed else None
+    if text and typed:
+        text += f"\n\n(The user typed \"{typed}\" to answer the Breakpoint menu: \"{label}\".)"
+    return text
+
+
+def _start_team(payload: dict[str, Any] | None, state: dict[str, Any], backend: Any,
+                problem: tuple[str, str, str | None], reason: str, why: str) -> str | None:
+    """Send POST /api/help from the hook (the same case file as `ask_for_help`) and read the answer the same way.
+    TEAM_STARTED -> TEAM_CALLED. A request that fails -> CALL_TEAM, so the agent calls ask_for_help itself."""
+    payload = payload or {}
+    episode = state["episode"]
+    command, error, fp = problem
+    episode["rung"] = max(episode["rung"], 3)
+    ask = getattr(backend, "ask_help", None)
+    reply = None
+    if ask is not None:
+        try:
+            reply = ask(_case_file(payload, state, problem, reason, why))
+        except Exception:
+            reply = None
+    tag, _ = _team_reply(reply or "")
+    if not tag:   # the server is down, said no, or gave an answer without a tag
+        return messages.call_team(command, error, fp, episode["tried"], reason, episode.get("open_question_id"),
+                                  note="Breakpoint tried to start the team itself, but the request failed: call "
+                                       "`ask_for_help` yourself now, as below.")
+    text = _team_result(payload, state, reply or "", asked=True)
+    if tag in ("TEAM_STARTED", "TEAM_WORKING"):
+        return messages.team_called(str(episode.get("team_run_id") or ""), command, fp, episode["tried"], why)
+    if tag in ("KNOWN_FIX", "TRY_FIRST"):
+        return messages.team_answered(reply or "", command, fp, episode["tried"], why)
+    return text   # TEAM_FAILED (TEAM_STATUS: keep working), or a finished run (TEST_FIXES, POST_OPEN_QUESTION)
+
+
+def _case_file(payload: dict[str, Any], state: dict[str, Any], problem: tuple[str, str, str | None], reason: str,
+               why: str) -> dict[str, Any]:
+    """The hook's own case file for POST /api/help: what the hook knows (the command, the error, what was tried, the
+    files edited most recently), plus the environment and `git diff` (case_builder.py, as `ask_for_help` adds)."""
+    episode = state["episode"]
+    command, error, fp = problem
+    failures, errors = _failure_counts(state, episode["key"] or struggles.command_key(command))
+    edited = [a.get("path") for a in reversed(state["history"]) if a.get("kind") == "edit"]
+    files = [p for p in dict.fromkeys(edited) if p and p != "<script>"][:TEAM_FILES]
+    description = (f"`{command}` keeps failing ({failures} failed runs; different errors: {errors}) and the forum has "
+                   f"no fix. Sent by the Breakpoint hook, not written by the agent: {why} Why the hook counts the "
+                   f"agent as stuck: {reason or 'repeated failures.'}")
+    try:
+        return case_builder.build(description, command, error, episode["tried"], fp or "", "", "", "", files,
+                                  project_id=str(state.get("project_id") or ""),
+                                  project=notebook.project_dir(payload))
+    except Exception:   # never lose the request: send what the hook knows
+        return {"goal": description, "symptom": error or description, "check_command": command,
+                "tried": case_builder.parse_tried(episode["tried"]), "fingerprint": fp or "",
+                "project": str(state.get("project_id") or "")}
+
+
+def _rewind_options(payload: dict[str, Any], state: dict[str, Any],
+                    signals: list[struggles.Signal]) -> list[dict[str, Any]] | None:
+    """The rewind options when one is worth offering (once per episode, when the agent goes in circles with 3+ edits
+    since a checkpoint), else None. Changes nothing: REWIND_OFFER or the stuck menu offers them."""
     episode = state["episode"]
     if episode.get("rewind_offered") or not REWIND_SIGNALS & {s.name for s in signals}:
         return None
@@ -610,11 +881,67 @@ def _rewind_offer(payload: dict[str, Any], state: dict[str, Any], signals: list[
         title = f"the last time `{cmd}` passed" if name == "last_good" else "when this problem started"
         options.append({"name": name, "title": title, "cmd": cmd, "time": messages.clock(entry["time"]),
                         "edits": edits, **changes, "command": messages.rewind_command(project, session, name)})
-    if not options:
-        return None
+    return options or None
+
+
+def _rewind_offer(state: dict[str, Any], options: list[dict[str, Any]], problem: tuple[str, str, str | None],
+                  reason: str) -> str:
+    """REWIND_OFFER (team_mode auto or off; in ask mode the stuck menu offers the rewind)."""
+    episode = state["episode"]
     episode["rewind_offered"] = True
+    episode["rewind_offer_idx"] = len(state["history"])   # = last_nudge_idx after this message: next failure may climb
     command, _, fp = problem
     return messages.rewind_offer(options, command, fp, episode["tried"], reason)
+
+
+def _early_lookup(state: dict[str, Any], backend: Any, run: dict[str, Any], output: str) -> str | None:
+    """The early forum check: one search for an error fingerprint this session has not looked up yet, before the
+    agent counts as stuck. KNOWN_FIX / OPEN_QUESTION_EXISTS on a close match (opening the episode, rung 1 done),
+    else None, and the ladder later behaves as it always did."""
+    fp = run["err_fp"]
+    if not fp or fp in (state.get("looked_up") or []):
+        return None
+    episode = state.get("episode")
+    if episode and episode["key"] != run["key"]:
+        return None   # the open episode is about another command: don't mix them up
+    if episode and not _cooled_down(state, episode):
+        return None   # we spoke very recently; this error can still be looked up at its next failure
+    _note_looked_up(state, fp)
+    top = _forum_match(backend.search(output, run["cmd"], fp))
+    if not top:
+        return None   # no close match, or the server is down: say nothing
+    if episode is None:
+        episode = _open_episode(state, run["key"])
+        episode["early"] = True   # opened by this check, not because the agent is stuck
+    episode["rung"] = max(episode["rung"], 1)   # the forum step is done: the ladder won't search again
+    episode["last_nudge_idx"] = len(state["history"])
+    return _forum_message(episode, top, run["cmd"], fp)
+
+
+def _note_looked_up(state: dict[str, Any], fp: str | None) -> None:
+    """Remember that the forum was asked about this fingerprint (at most once per session for the early check)."""
+    looked_up = [f for f in state.get("looked_up") or [] if f != fp]
+    if fp:
+        state["looked_up"] = (looked_up + [fp])[-notebook.LOOKED_UP_LIMIT:]
+
+
+def _forum_match(results: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    """The top search result when it is a close solved post with a fix or a close open question, else None."""
+    top = results[0] if results else None
+    if not top or not _close_match(top):
+        return None
+    if (top.get("status") == "solved" and top.get("solution")) or top.get("status") == "open":
+        return top
+    return None
+
+
+def _forum_message(episode: dict[str, Any], top: dict[str, Any], command: str, fp: str | None) -> str:
+    """KNOWN_FIX (the next run of the command is its test) or OPEN_QUESTION_EXISTS for a _forum_match post."""
+    if top.get("status") == "solved":
+        episode["pending_fix"] = {"post_id": top.get("id"), "key": struggles.command_key(command), "fp": fp}
+        return messages.known_fix(top, command, fp, episode["tried"])
+    episode["open_question_id"] = top.get("id")
+    return messages.open_question_exists(top, command, fp, episode["tried"])
 
 
 def _close_match(post: dict[str, Any]) -> bool:

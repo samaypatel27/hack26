@@ -22,6 +22,11 @@ The state file holds:
                failing, oldest first: {"post_id", "key", "fp"} (key = that failing command). If the command
                then passes, the brain treats it like a confirmed forum fix (outcome + LEAVE_REPLY).
   reply_nudged post ids LEAVE_REPLY was sent for (or the agent already replied to): at most once per post
+  looked_up    error fingerprints the forum was already searched for this session (brain.py's early forum check
+               runs once per fingerprint), oldest first
+  pending_menu the stuck menu waiting for the user's answer (team_mode ask, brain.py), or None:
+               {"question", "options" (names: team, rewind, keep), "problem" [command, error, fp], "reason",
+               "rewind" (the rewind options, or None), "idx", "t", "stopped" (the session was ended to show it)}
 
 This file also turns raw hook payloads into history records (action_from_tool_use).
 """
@@ -30,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import time
@@ -44,6 +50,7 @@ TAIL_CHARS = 500        # output kept per run, for the AI judge and "already tri
 ERROR_CHARS = 2000      # error text kept for forum searches and messages
 GIT_TIMEOUT = 2
 VIEWED_LIMIT = 10      # viewed_posts entries kept
+LOOKED_UP_LIMIT = 50    # looked_up fingerprints kept
 CHECKPOINT_LIMIT = 20   # entries kept in the notes (checkpoints.py keeps the same number of git refs)
 REWIND_KIND = "rewind"  # history record written by rewind.py; struggles.py counts from the last one
 
@@ -58,6 +65,26 @@ PIPED_FAILURE_RE = re.compile(
     r"\b[1-9]\d* failed\b|^FAILED|Traceback \(most recent call last\)|^npm ERR!|^Error:",
     re.MULTILINE,
 )
+
+# A test runner's own summary of the run (unittest, pytest, cargo, go, jest/vitest, npm, tsc).
+CHECK_FAIL_RE = re.compile(
+    r"^FAILED \(|\b[1-9]\d* (?:failed|errors?)\b|^FAIL[: ]|test result: FAILED|^Tests:.*\b[1-9]\d* failed"
+    r"|npm ERR!|\berror TS\d+|^error(?:\[E\d+\])?:|\bERROR collecting\b|\berrors? during collection\b",
+    re.MULTILINE,
+)
+CHECK_PASS_RE = re.compile(r"^OK\b|\b\d+ passed\b|test result: ok|^ok\s|^Tests:\s+\d+ passed|^PASS\b",
+                           re.MULTILINE)
+GENERIC_FAIL_RE = re.compile(r"Traceback \(most recent call last\)|^\w*Error:|^Error:", re.MULTILINE)
+GREP_LIKE = {"grep", "rg", "findstr", "select-string", "sls"}   # exit 1 when nothing matched
+HEAD_LIKE = {"head", "select-object", "select", "more", "less"}   # may cut off the summary at the end
+
+# Shell commands that write files (docs/hook-engine.md, "Edits made through the shell").
+SED_INPLACE_RE = re.compile(r"^(?:sed|gsed)$")
+PS_WRITE_CMDS = {"set-content", "add-content", "out-file", "sc", "ac"}
+SCRIPT_WRITE_RE = re.compile(r"""open\([^)]*?,\s*(?:mode\s*=\s*)?['"][wax]|\.write_(?:text|bytes)\(|writeFileSync\(""")
+SCRIPT_RUNNER_RE = re.compile(r"^(?:python[\d.]*|py|python3|node)(?:\.exe)?$", re.IGNORECASE)
+PATH_LITERAL_RE = re.compile(r"""['"]([\w./\:-]+\.[A-Za-z0-9]{1,6})['"]""")
+NULL_TARGETS = {"/dev/null", "nul", "$null", "nul:"}
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # no console flash on Windows
 
@@ -120,6 +147,8 @@ def new_state(payload: dict[str, Any]) -> dict[str, Any]:
         "checkpoints": [],
         "viewed_posts": [],
         "reply_nudged": [],
+        "looked_up": [],
+        "pending_menu": None,
     }
 
 
@@ -135,6 +164,7 @@ def new_episode(key: str, fp: str | None, started_idx: int) -> dict[str, Any]:
         "oq_posted": False,
         "stop_blocked": False,
         "last_nudge_idx": None,     # history length when we last sent a ladder message
+        "rewind_offer_idx": None,   # history length when REWIND_OFFER was sent (brain._cooled_down)
         "started_idx": started_idx,
         "tried": [],                # short notes of what was already tried
         "rewind_offered": False,    # REWIND_OFFER is sent at most once per episode
@@ -145,6 +175,7 @@ def new_episode(key: str, fp: str | None, started_idx: int) -> dict[str, Any]:
         "team_report_idx": None,    # history length when TEAM_REPORT arrived
         "tester_offered": None,     # run id TEST_FIXES was sent for (once per run)
         "team_fix": None,           # {"hypothesis", "cause", "run_id"}: the tester's WINNER, until the check passes
+        "early": False,             # opened by the early forum check, before the agent counted as stuck
     }
 
 
@@ -156,14 +187,23 @@ def load(payload: dict[str, Any]) -> dict[str, Any]:
         state = None
     if not isinstance(state, dict) or not isinstance(state.get("history"), list):
         return new_state(payload)
-    for key in ("episode", "last_judge", "last_error", "goal_key"):
+    for key in ("episode", "last_judge", "last_error", "goal_key", "pending_menu"):
         state.setdefault(key, None)
-    for key in ("checkpoints", "viewed_posts", "reply_nudged"):   # older notes files lack the last two
+    for key in ("checkpoints", "viewed_posts", "reply_nudged", "looked_up"):   # older notes files lack the last three
         if not isinstance(state.get(key), list):
             state[key] = []
     if not state.get("project_id"):
         state["project_id"] = project_id(project_dir(payload))
     return state
+
+
+def peek(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """The notes file as it is, or None: no defaults and no git (PreToolUse runs before every tool call)."""
+    try:
+        state = json.loads(state_path(payload).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
 
 
 def save(payload: dict[str, Any], state: dict[str, Any]) -> None:
@@ -194,8 +234,9 @@ def record(state: dict[str, Any], action: dict[str, Any]) -> None:
     episode = state.get("episode")
     if episode:
         episode["started_idx"] = max(0, episode["started_idx"] - extra)
-        if episode.get("last_nudge_idx") is not None:
-            episode["last_nudge_idx"] -= extra
+        for name in ("last_nudge_idx", "rewind_offer_idx"):
+            if episode.get(name) is not None:
+                episode[name] -= extra
     for entry in state.get("checkpoints") or []:
         entry["history_idx"] = entry.get("history_idx", 0) - extra   # may go below 0: saved before the oldest action we still have
 
@@ -259,6 +300,7 @@ def run_record(cmd: str, ok: bool, output: str, t: float | None = None) -> dict[
     return {
         "kind": "run", "t": time.time() if t is None else t, "cmd": cmd,
         "key": struggles.command_key(cmd), "ok": ok,
+        "check": struggles.check_index(struggles.split_command(cmd)) is not None,
         "err_fp": None if ok else struggles.fingerprint(output),
         "out_fp": struggles.fingerprint(output, errors_only=False),
         "tail": _tail(output),
@@ -268,6 +310,49 @@ def run_record(cmd: str, ok: bool, output: str, t: float | None = None) -> dict[
 def looks_failed(cmd: str, output: str) -> bool:
     """A piped command can exit 0 while the command before the pipe failed."""
     return "|" in cmd and bool(PIPED_FAILURE_RE.search(output))
+
+
+def output_verdict(output: str) -> bool | None:
+    """Did the test/build run pass, judging only by its printed summary? True, False, or None (can't tell).
+    A runner's own summary line wins over generic signs like a traceback (a patch script in the same
+    command can print one of those)."""
+    if CHECK_FAIL_RE.search(output or ""):
+        return False
+    if CHECK_PASS_RE.search(output or ""):
+        return True
+    if GENERIC_FAIL_RE.search(output or ""):
+        return False
+    return None
+
+
+def check_result(cmd: str, exit_ok: bool, output: str) -> bool | None:
+    """Pass/fail of a shell command, or None when it can't be known.
+
+    A compound command's exit code belongs to its last part. When the check (test/build runner) is not the
+    last part (`python -m unittest; git status`), its result comes from its output; if the output doesn't
+    say, it is unknown, never a pass. `check && other` exiting 0 means the check passed too."""
+    segments = struggles.split_command(cmd)
+    idx = struggles.check_index(segments)
+    if idx is None:   # no test/build runner: the exit code (and the old piped-output check)
+        return exit_ok and not looks_failed(cmd, output)
+    rest = segments[idx:]
+    tail = len(rest) - 1
+    piped_only = all(seg.sep == "|" for seg in rest[:-1])       # `check | tail -20` and nothing after
+    if tail == 0:
+        return exit_ok
+    verdict = output_verdict(output)
+    if verdict is not None:
+        return verdict
+    if piped_only:
+        last = (struggles.words_of(rest[-1].text) or [""])[0].lower()
+        if exit_ok:
+            # `pytest | tail` exited 0 and printed no failure (as before). `pytest | head -5` may have cut the
+            # summary off, and the exit code is head's: unknown, never a pass.
+            return None if last in HEAD_LIKE else True
+        return None if last in GREP_LIKE else False
+    if exit_ok and all(seg.sep in ("&&", "|") for seg in rest[:-1]):
+        return True              # `check && other` only exits 0 when the check passed
+    return None
 
 
 def _text(value: Any) -> str:
@@ -313,7 +398,7 @@ def _exit_code(response: dict[str, Any]) -> int:
 
 
 def bash_result(payload: dict[str, Any]) -> tuple[str, bool, str]:
-    """(command, passed?, output) for a Bash or PowerShell PostToolUse or PostToolUseFailure payload."""
+    """(command, exit code was 0?, output) for a Bash or PowerShell PostToolUse or PostToolUseFailure payload."""
     tool_input = payload.get("tool_input") or {}
     cmd = str(tool_input.get("command", "")) if isinstance(tool_input, dict) else ""
     if payload.get("hook_event_name") == "PostToolUseFailure":
@@ -326,13 +411,84 @@ def bash_result(payload: dict[str, Any]) -> tuple[str, bool, str]:
         ok = not _exit_code(response)
     else:
         output, ok = _text(response), True
-    if ok and looks_failed(cmd, output):
-        ok = False
-    return cmd, ok, output
+    return cmd, ok, output   # the exit code only; check_result() reads the output too
 
 
-def action_from_tool_use(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
-    """The history record for a tool call (or None for tools we don't track), and the run output."""
+def _script_writes(body: str) -> list[str]:
+    """Files a Python/Node script writes (`open(p, 'w')`, `Path(x).write_text(...)`), as best we can tell.
+    Paths come from string literals in the write call or assigned to the name it writes to; a write whose
+    path we can't read counts as one edit of "<script>"."""
+    if not SCRIPT_WRITE_RE.search(body or ""):
+        return []
+    paths: list[str] = []
+    for match in re.finditer(r"""(?:open|Path|writeFileSync)\(\s*([A-Za-z_]\w*|['"][^'"]+['"])""", body):
+        arg = match.group(1)
+        if arg[0] in "'\"":
+            paths.append(arg[1:-1])
+        else:   # a variable: the literals assigned to it (`p = 'recordkit/model.py'`)
+            paths += re.findall(rf"""\b{re.escape(arg)}\s*=\s*['"]([^'"]+)['"]""", body)
+    paths = [p for p in dict.fromkeys(paths) if PATH_LITERAL_RE.fullmatch(f"'{p}'")]
+    return paths or ["<script>"]
+
+
+def shell_edits(cmd: str) -> list[str]:
+    """Files a shell command writes: `python - <<EOF` / `python -c` scripts that open files for writing,
+    `sed -i`, `Set-Content` / `Add-Content` / `Out-File`, `>` / `>>` redirects (also `cat > f <<EOF`) and `tee`.
+    /dev/null and friends don't count. Paths are as written in the command."""
+    text, bodies = struggles.split_heredocs(cmd)
+    paths: list[str] = []
+    segments = struggles.split_command(cmd)
+    body_iter = iter(bodies)
+    for seg in segments:
+        words = struggles.words_of(seg.text)
+        head = (words[0].lower() if words else "")
+        uses_heredoc = bool(struggles.HEREDOC_RE.search(seg.text) or struggles.HERESTRING_START_RE.search(seg.text))
+        body = next(body_iter, "") if uses_heredoc else ""
+        if words and SCRIPT_RUNNER_RE.match(words[0]):
+            script = body
+            if "-c" in words:
+                script = words[words.index("-c") + 1] if words.index("-c") + 1 < len(words) else ""
+            elif "-e" in words:
+                script = words[words.index("-e") + 1] if words.index("-e") + 1 < len(words) else ""
+            paths += _script_writes(script)
+        elif SED_INPLACE_RE.match(head) and any(w == "-i" or w.startswith("-i") or w == "--in-place" for w in words):
+            scripts = {n + 1 for n, w in enumerate(words) if w in ("-e", "--expression")}
+            files = [w for n, w in enumerate(words[1:], 1) if not w.startswith("-") and n not in scripts]
+            if not scripts and files:
+                files = files[1:]   # the first one is the sed script itself
+            paths += files
+        elif head in PS_WRITE_CMDS:
+            rest = words[1:]
+            named = [rest[n + 1] for n, w in enumerate(rest[:-1]) if w.lower() in ("-path", "-filepath", "-literalpath")]
+            positional = [w for w in rest if not w.startswith("-")]
+            paths += named or positional[:1]
+        elif head == "tee":
+            paths += [w for w in words[1:] if not w.startswith("-")]
+        paths += _redirect_targets(seg.text)
+    return [p for p in dict.fromkeys(paths) if p and p.lower() not in NULL_TARGETS]
+
+
+def _redirect_targets(segment: str) -> list[str]:
+    """`> file`, `>> file`, `>file`, `1> file` (not `2>`, `2>&1`, `&>`), outside quotes."""
+    try:
+        raw = shlex.split(segment.replace("\\", "/"), posix=True)
+    except ValueError:
+        raw = segment.split()
+    targets = []
+    for n, w in enumerate(raw):
+        m = re.match(r"^(1?>>?)(.*)$", w)
+        if not m or w.startswith(">&") or "&" in m.group(2)[:1]:
+            continue
+        target = m.group(2) or (raw[n + 1] if n + 1 < len(raw) else "")
+        if target and not target.startswith("&"):
+            targets.append(target)
+    return targets
+
+
+def actions_from_tool_use(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    """The history records for a tool call, oldest first, and the run output. A shell command gives an "edit"
+    record for each file it writes, then its "run" record (left out when its result can't be known). Other
+    tools give one record, or none for tools we don't track."""
     tool = payload.get("tool_name", "")
     tool_input = payload.get("tool_input") or {}
     if not isinstance(tool_input, dict):
@@ -342,16 +498,28 @@ def action_from_tool_use(payload: dict[str, Any]) -> tuple[dict[str, Any] | None
 
     if tool in SHELL_TOOLS:
         if result_unknown(payload):
-            return None, ""   # neither a pass nor a fail
-        cmd, ok, output = bash_result(payload)
-        return (run_record(cmd, ok, output, now), output) if cmd.strip() else (None, "")
+            return [], ""   # neither a pass nor a fail (and we can't know whether it wrote anything yet)
+        cmd, exit_ok, output = bash_result(payload)
+        if not cmd.strip():
+            return [], ""
+        edits = [{"kind": "edit", "t": now, "path": path, "via": "shell"} for path in shell_edits(cmd)]
+        ok = check_result(cmd, exit_ok, output)
+        if ok is None:
+            return edits, output   # the check's result isn't in the output: record no pass and no fail
+        return edits + [run_record(cmd, ok, output, now)], output
     if tool in EDIT_TOOLS and not failed:   # a failed edit changed nothing
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-        return {"kind": "edit", "t": now, "path": str(path)}, ""
+        return [{"kind": "edit", "t": now, "path": str(path)}], ""
     if tool in READ_TOOLS:
         path = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("pattern") or ""
-        return {"kind": "read", "t": now, "path": str(path)}, ""
-    return None, ""
+        return [{"kind": "read", "t": now, "path": str(path)}], ""
+    return [], ""
+
+
+def action_from_tool_use(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """The main history record for a tool call (a shell command's run, else its last edit), or None."""
+    actions, output = actions_from_tool_use(payload)
+    return (actions[-1] if actions else None), output
 
 
 def tool_response_text(payload: dict[str, Any]) -> str:

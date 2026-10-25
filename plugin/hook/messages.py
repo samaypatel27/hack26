@@ -32,6 +32,19 @@ CLEAN_SLATE = "CLEAN_SLATE"     # printed by rewind.py after a rewind, not sent 
 TEST_FIXES = "TEST_FIXES"       # docs/local-tester.md: the team reported; offer to test its fixes in copies
 TEAM_STATUS = "TEAM_STATUS"     # the team or the tester could not finish: keep working (not an Open Question)
 LEAVE_REPLY = "LEAVE_REPLY"     # a forum post's fix was confirmed here: add what you changed as a reply (optional)
+STUCK_MENU = "STUCK_MENU"       # team_mode ask: stuck, no forum fix -> ask the user with AskUserQuestion right away
+TEAM_CALLED = "TEAM_CALLED"     # the hook started the team itself (the user's menu answer, or team_mode auto)
+
+# The stuck menu's options (brain.py offers "rewind" only when a rewind is possible): name -> (label, description).
+# The labels are what the agent must pass to AskUserQuestion, and how the hook reads the answer back.
+MENU_OPTIONS = {
+    "team": ("Call the specialist team",
+             "Breakpoint sends the problem to the specialist team. They research it while the agent keeps working."),
+    "rewind": ("Rewind the files to before the problem started",
+               "Put the project's files back to a saved checkpoint (files only; it can be undone)."),
+    "keep": ("Let the agent keep trying", "No help for now: the agent keeps working on the problem itself."),
+}
+MENU_HEADER = "Stuck"           # AskUserQuestion's short chip label (12 characters at most)
 
 # Keep in sync with COMMUNITY_LABEL in plugin/mcp/server.py (not imported: it needs httpx and mcp).
 COMMUNITY_LABEL = (
@@ -194,7 +207,7 @@ def step_back(command: str, fingerprint: str | None, tried: list[str], reason: s
 
 
 def call_team(command: str, error: str, fingerprint: str | None, tried: list[str],
-              reason: str, open_question_id: Any = None) -> str:
+              reason: str, open_question_id: Any = None, note: str | None = None) -> str:
     how = [
         "Next: call the `ask_for_help` tool with:",
         "  description: what you were doing, and your best guess at the cause",
@@ -217,6 +230,7 @@ def call_team(command: str, error: str, fingerprint: str | None, tried: list[str
         _header(CALL_TEAM, "You are stuck and the forum has no fix: call the specialist team."),
         _facts(command, fingerprint, tried),
         f"why: {reason}",
+        note,
         "",
         how,
         "",
@@ -235,6 +249,93 @@ def post_open_question(command: str, fingerprint: str | None, tried: list[str], 
         "lines, and every attempt (yours and the team's) with why it failed. If the forum already has this open "
         "question, do not post a duplicate.",
     )
+
+
+# ---------------------------------------------------------------------------
+# The stuck menu (team_mode ask) and the team the hook starts itself
+# ---------------------------------------------------------------------------
+
+def menu_question(command: str, failures: int, errors: int) -> str:
+    """The question for AskUserQuestion (and the typed menu): the failing command, how often, how many errors."""
+    return (f"Breakpoint: `{command or 'the check'}` failed {_plural(failures, 'time')} with "
+            f"{_plural(errors, 'different error')}, and the forum has no fix. What should happen next?")
+
+
+def stuck_menu(question: str, options: list[str], command: str, fingerprint: str | None, tried: list[str],
+               reason: str, rewind_note: str | None = None) -> str:
+    """STUCK_MENU: tell the agent to call AskUserQuestion now, with exactly these options (names from MENU_OPTIONS)."""
+    listed = []
+    for n, name in enumerate(options, 1):
+        label, description = MENU_OPTIONS[name]
+        if name == "rewind" and rewind_note:
+            description = f"{description} {rewind_note}"
+        listed += [f'  {n}. label: "{label}"', f'     description: "{description}"']
+    return _join(
+        _header(STUCK_MENU, "You are stuck and the forum has no fix: ask the user what to do, right now."),
+        _facts(command, fingerprint, tried),
+        f"why: {reason}",
+        "",
+        "Next: call the AskUserQuestion tool NOW, as your very next tool call, with one question:",
+        f'  question: "{question}"',
+        f'  header: "{MENU_HEADER}"',
+        "  multiSelect: false",
+        "  options, exactly these labels, in this order:",
+        listed,
+        "Do not run any other tool first, and do not call `ask_for_help` yourself: if you call another tool, "
+        "Breakpoint stops the session and shows the user this menu as text. After the user answers, the hook tells "
+        "you what to do.",
+        "Only if AskUserQuestion is not available in this session: run no tool, and end your reply with this menu, "
+        "word for word (the user answers by typing the number):",
+        "",
+        typed_menu(question, options),
+    )
+
+
+def typed_menu(question: str, options: list[str]) -> str:
+    """The stuck menu as plain text, for the user (the stopReason when the agent skipped AskUserQuestion)."""
+    numbers = [str(n) for n in range(1, len(options) + 1)]
+    choose = ", ".join(numbers[:-1]) + f" or {numbers[-1]}"
+    return _join(question, [f"  {n}. {MENU_OPTIONS[name][0]}" for n, name in zip(numbers, options)],
+                 f"Type {choose}.")
+
+
+def team_called(run_id: str, command: str, fingerprint: str | None, tried: list[str], why: str) -> str:
+    """TEAM_CALLED: the hook already sent the case to the team (POST /api/help) and it started run `run_id`."""
+    return _join(
+        _header(TEAM_CALLED, f"The specialist team is already working on this (run {run_id})."),
+        _facts(command, fingerprint, tried),
+        f"team run: {run_id}",
+        f"why: {why}",
+        "",
+        f"Next: call `check_help` with run_id {run_id} in a few minutes, and before you finish. Do not call "
+        "`ask_for_help`: the hook already sent the case file (the error, what was tried, the recently edited files, "
+        "the environment and `git diff`). Keep working on the problem while the team researches. When the report is "
+        "ready, the hook gives you a command that tests the ranked fixes in throwaway copies (TEST_FIXES).",
+    )
+
+
+def team_answered(reply: str, command: str, fingerprint: str | None, tried: list[str], why: str) -> str:
+    """TEAM_CALLED, when the server answered the hook's help request without starting a run (KNOWN_FIX, TRY_FIRST)."""
+    return _join(
+        _header(TEAM_CALLED, "The hook asked for the specialist team, and the server answered right away without "
+                             "a team run."),
+        _facts(command, fingerprint, tried),
+        f"why: {why}",
+        "",
+        COMMUNITY_LABEL.rstrip(),
+        reply.replace(COMMUNITY_LABEL, "").strip(),
+        "",
+        "Next: follow that answer the way the breakpoint skill says for an `ask_for_help` reply with the same tag "
+        "(KNOWN_FIX: check that it fits, apply it, rerun the command; TRY_FIRST: work through the checklist).",
+    )
+
+
+def keep_trying(command: str, fingerprint: str | None, tried: list[str]) -> str:
+    """The user typed the menu's "keep trying" answer (the agent did not see the question, so it needs a line)."""
+    return team_status("The user answered the Breakpoint menu: let the agent keep trying. The team was not called.",
+                       f"keep working on `{command or 'the problem'}` yourself, with a different approach than the "
+                       "attempts above. Do not call `ask_for_help` unless the user asks for it.",
+                       command, fingerprint, tried)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +405,8 @@ def rewind_option(number: int, option: dict[str, Any]) -> list[str]:
 
 
 def rewind_offer(options: list[dict[str, Any]], command: str, fingerprint: str | None, tried: list[str],
-                 reason: str) -> str:
+                 reason: str, chosen: str | None = None) -> str:
+    """REWIND_OFFER. `chosen`: the option the user already picked in the stuck menu (the agent runs it now)."""
     first = options[0]
     passed = first.get("cmd") or command
     since = "this problem started" if first["name"] == "episode_start" else f"`{passed}` last passed"
@@ -325,7 +427,11 @@ def rewind_offer(options: list[dict[str, Any]], command: str, fingerprint: str |
         "",
         "Next: ask the user first; never rewind without a yes. Show them the options above (what each undoes) and "
         "what was already tried. On yes, run that option's command exactly as written: it saves the current files "
-        "first, so the rewind can be undone. On no, keep working; the hook suggests the next step if you stay stuck.",
+        "first, so the rewind can be undone. On no, keep working; the hook suggests the next step if you stay stuck."
+        if not chosen else
+        f"Next: the user already said yes in the Breakpoint menu (\"{MENU_OPTIONS['rewind'][0]}\"). Run the "
+        f"`{chosen}` option's command now, exactly as written, with Bash: it saves the current files first, so the "
+        "rewind can be undone. Then follow the CLEAN_SLATE note it prints.",
     )
 
 
@@ -372,7 +478,7 @@ def notable_solve(command: str, failures: int, fingerprint: str | None, tried: l
         question = (f"Open question #{open_question_id} is this same problem, so this counts as notable: pass "
                     f"open_question_id {open_question_id} to `post`, so your fix answers that question.")
     return _join(
-        _header(NOTABLE_SOLVE, f"`{command}` passes now, after failing {failures} times."),
+        _header(NOTABLE_SOLVE, f"`{command}` passes now, after failing {_plural(failures, 'time')}."),
         _facts(command, fingerprint, tried),
         credit,
         question,
@@ -392,9 +498,10 @@ def leave_reply(post_id: Any, command: str, fingerprint: str | None, viewed: boo
         _facts(command, fingerprint),
         f"post: #{post_id}",
         "",
-        f"If you used it differently, only part of it helped, or you needed something extra for your setup, leave "
-        f"a short reply with the `reply` tool (post {post_id}): what you used and what you changed. If it worked "
-        "exactly as written, skip this." + (f" If you did not use post #{post_id}, skip this too." if viewed else ""),
+        f"Leave a short reply with the `reply` tool (post {post_id}): confirm it worked here and on what setup (OS, "
+        "language and tool versions), and say what you used differently or had to add, if anything. That tells the "
+        "next agent where this fix is known to work."
+        + (f" If you did not use post #{post_id}, skip this." if viewed else ""),
         "1 to 3 sentences, never just \"thanks\" or \"it worked\", never secrets or personal paths. Do not post a new "
         "solution: this one is already on the forum.",
     )
@@ -449,3 +556,23 @@ def context(event_name: str, text: str) -> dict[str, Any]:
 def block(text: str) -> dict[str, Any]:
     """Stop: refuse to let the agent finish; `reason` is shown to it."""
     return {"decision": "block", "reason": text}
+
+
+def stop_session(text: str) -> dict[str, Any]:
+    """PreToolUse: end the session now; `stopReason` is shown to the user. `continue: false` alone still lets the
+    tool call run before the session ends (seen in a real run), so the call is also denied."""
+    return {"continue": False, "stopReason": text,
+            "hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": "Breakpoint: the stuck menu is waiting for the user."}}
+
+
+def menu_reminder(typed: str) -> str:
+    """Stop while the stuck menu waits (once): ask the user now, with AskUserQuestion or as plain text."""
+    return _join(
+        _header(STUCK_MENU, "You are finishing, but the user has not answered the Breakpoint menu yet."),
+        "",
+        "Next: call AskUserQuestion with the options from the STUCK_MENU message. If that tool is not available, "
+        "end your reply with this menu, word for word, so the user can answer by typing a number:",
+        "",
+        typed,
+    )

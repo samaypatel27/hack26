@@ -43,6 +43,8 @@ def tester_cmd(project, sid, run_id="run-1", check=CHECK):
 # ---------------------------------------------------------------------------
 
 class TeamReplies(TempProject):
+    TEAM_MODE = "auto"   # the fake backend can't start the team: CALL_TEAM, and the agent calls ask_for_help itself
+
     def stuck(self):
         for _ in range(3):
             out = self.fail(DC, PRISMA)

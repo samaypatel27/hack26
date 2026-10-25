@@ -16,6 +16,12 @@ Contract (docs/hook-contracts.md; plugin/hook/dev/mock_backend.py implements it)
                      (the server counts worked=true as a "useful" mark for this agent, from X-Agent-Id)
   POST /api/judge    {session_id, actions, replies}       -> {"stuck", "reason", "confidence"}
   POST /api/agents/register {agent_id, model_name, email} -> {"agent_id", ...}  (accounts, docs/accounts.md)
+  POST /api/help     the case file (case_builder.py), as the MCP `ask_for_help` tool sends it -> {"message", ...}
+                     (only after the user picked "Call the specialist team" in the stuck menu, or in team_mode auto)
+
+The team_mode setting (env BREAKPOINT_TEAM_MODE, else "team_mode" in the config file): what the hook does when the
+agent is stuck and the forum has no fix. "ask" (default): the stuck menu for the user. "auto": start the team
+right away. "off": never start or suggest the team.
 
 Every call also carries the install's identity (identity.py): X-Agent-Id, X-Agent-Model, X-Project-Id.
 There is no "updates" call any more: news about a solved question goes out by email (docs/accounts.md).
@@ -44,6 +50,8 @@ SEARCH_TIMEOUT = 2.0
 OUTCOME_TIMEOUT = 2.0
 JUDGE_TIMEOUT = 5.0
 REGISTER_TIMEOUT = 2.0
+HELP_TIMEOUT = 10.0       # POST /api/help: the server's help checker may search before it starts a run
+TEAM_MODES = ("ask", "auto", "off")
 MAX_ERROR_CHARS = 2000
 DOWN_SECONDS = 60
 
@@ -84,6 +92,12 @@ def api_key() -> str:
     return _setting(["BREAKPOINT_API_KEY", "AGENTOVERFLOW_API_KEY", "API_KEY"], "api_key", "")
 
 
+def team_mode() -> str:
+    """"ask", "auto" or "off". Anything else (an old "local" / "remote" value) counts as the default, "ask"."""
+    value = _setting(["BREAKPOINT_TEAM_MODE"], "team_mode", "ask").strip().lower()
+    return value if value in TEAM_MODES else "ask"
+
+
 # ---------------------------------------------------------------------------
 # Scrubbing and the "server is down" memory
 # ---------------------------------------------------------------------------
@@ -96,6 +110,17 @@ def scrub(text: str) -> str:
     if len(home) > 3:
         text = text.replace(home, "~").replace(home.replace("\\", "/"), "~")
     return text
+
+
+def _scrub_all(value: Any) -> Any:
+    """scrub() every string inside a JSON-like value (the case file's lists and dicts too)."""
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, list):
+        return [_scrub_all(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _scrub_all(v) for k, v in value.items()}
+    return value
 
 
 def _down_marker(url: str) -> Path:
@@ -191,6 +216,14 @@ def judge(session_id: str, actions: list[dict[str, Any]], replies: list[str]) ->
     if not isinstance(data, dict) or "stuck" not in data:
         return None
     return data
+
+
+def ask_help(case: dict[str, Any]) -> str | None:
+    """Start the specialist team the way the MCP `ask_for_help` tool does: POST /api/help with the case file.
+    The server's `message` (it starts with its tag: TEAM_STARTED, KNOWN_FIX, TRY_FIRST, ...), or None."""
+    data = _request("POST", "/api/help", HELP_TIMEOUT, body=_scrub_all(case))
+    message = data.get("message") if isinstance(data, dict) else None
+    return message if isinstance(message, str) and message.strip() else None
 
 
 # ---------------------------------------------------------------------------

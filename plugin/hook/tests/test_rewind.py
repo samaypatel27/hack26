@@ -219,7 +219,8 @@ class NotGit(TempProject):
         for n in range(4):
             self.edit("app.py")
             out = self.fail(PT, "Exit code 1\n" + ERRORS[n])
-        self.assertEqual(tag(out), "CALL_TEAM")
+        self.assertEqual(tag(out), "STUCK_MENU")
+        self.assertNotIn("Rewind the files", text_of(out))   # no checkpoints: no rewind option in the menu
         self.assertEqual(self.state()["checkpoints"], [])
 
 
@@ -271,6 +272,9 @@ class NotesAndSignals(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class Offer(GitProject):
+    # REWIND_OFFER as before (in ask mode the stuck menu offers the rewind: MenuRewind below). The fake backend
+    # can't start the team, so the team step here is the CALL_TEAM fallback.
+    TEAM_MODE = "auto"
     def labels(self):
         return [e["label"] for e in self.state()["checkpoints"]]
 
@@ -360,11 +364,27 @@ class Offer(GitProject):
         self.assertEqual((self.state()["checkpoints"], self.state()["history"]), ([], []))
 
 
+class MenuRewind(GitProject):
+    """team_mode ask: going in circles gives one stuck menu with the rewind in it, instead of REWIND_OFFER."""
+
+    def test_menu_with_rewind_then_the_offer_on_answer_2(self):
+        out = self.struggle()
+        self.assertEqual(tag(out), "STUCK_MENU")
+        self.assertIn('2. label: "Rewind the files to before the problem started"', text_of(out))
+        self.assertEqual(self.state()["pending_menu"]["options"], ["team", "rewind", "keep"])
+        out = self.user("2")
+        self.assertEqual(tag(out), "REWIND_OFFER")
+        self.assertIn("Run the `episode_start` option's command now", text_of(out))
+        self.assertIn("--session test-session episode_start", text_of(out))
+        self.assertIsNone(self.state()["pending_menu"])
+
+
 # ---------------------------------------------------------------------------
 # rewind.py end to end, the way the agent runs it
 # ---------------------------------------------------------------------------
 
 class Cli(GitProject):
+    TEAM_MODE = "auto"   # REWIND_OFFER as before
     def run_command(self, command):
         """Run a command line from a hook message, as the agent's Bash tool would."""
         args = shlex.split(command)

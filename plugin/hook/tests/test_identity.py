@@ -334,7 +334,7 @@ def load_server(routes, calls):
     fastmcp = types.ModuleType("mcp.server.fastmcp")
 
     class FastMCP:
-        def __init__(self, name):
+        def __init__(self, name, **settings):
             pass
 
         def tool(self, *args, **kwargs):

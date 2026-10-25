@@ -30,7 +30,8 @@ import notebook  # noqa: E402
 import struggles  # noqa: E402
 
 ENV_KEYS = ["CLAUDE_PROJECT_DIR", "BREAKPOINT_API_URL", "BREAKPOINT_API_KEY", "API_URL", "API_KEY",
-            "BREAKPOINT_SPECIALIST", "AGENTOVERFLOW_API_URL", "AGENTOVERFLOW_API_KEY", "AGENTOVERFLOW_SPECIALIST"]
+            "BREAKPOINT_SPECIALIST", "AGENTOVERFLOW_API_URL", "AGENTOVERFLOW_API_KEY", "AGENTOVERFLOW_SPECIALIST",
+            "BREAKPOINT_TEAM_MODE"]
 
 PRISMA = ('Exit code 1\nPrismaClientInitializationError: Prisma Client could not locate the Query Engine for runtime '
           '"linux-musl-openssl-3.0.x".\n    at /app/node_modules/@prisma/client/runtime/library.js:111:12')
@@ -60,9 +61,15 @@ def text_of(output):
 
 
 class FakeBackend:
-    def __init__(self, search=None, judge=None):
-        self.search_result, self.judge_result = search, judge
+    def __init__(self, search=None, judge=None, help=None):
+        self.search_result, self.judge_result, self.help_result = search, judge, help
         self.calls = []
+        self.cases = []   # the case files sent to POST /api/help
+
+    def ask_help(self, case):
+        self.calls.append(("help", case.get("check_command"), case.get("fingerprint")))
+        self.cases.append(case)
+        return self.help_result   # None: the request failed
 
     def search(self, error, command, fingerprint, tags=None):
         self.calls.append(("search", command, fingerprint))
@@ -83,6 +90,7 @@ class FakeBackend:
 
 class TempProject(unittest.TestCase):
     """A fresh project folder per test, with the environment cleaned of our settings."""
+    TEAM_MODE = "ask"   # set explicitly, so a team_mode in the real ~/.breakpoint/config.json never matters
 
     def setUp(self):
         self.project = Path(tempfile.mkdtemp(prefix="ao_test_"))
@@ -93,6 +101,7 @@ class TempProject(unittest.TestCase):
         for key in ENV_KEYS:
             os.environ.pop(key, None)
         os.environ["CLAUDE_PROJECT_DIR"] = str(self.project)
+        os.environ["BREAKPOINT_TEAM_MODE"] = self.TEAM_MODE
         self.transcript = self.project / "transcript.jsonl"
         self.sid = "test-session"
         self.backend = FakeBackend(search=[])
@@ -103,7 +112,7 @@ class TempProject(unittest.TestCase):
                    "transcript_path": str(self.transcript), **fields}
         handler = {"SessionStart": brain.on_session_start, "UserPromptSubmit": brain.on_user_prompt,
                    "PostToolUse": brain.on_tool_use, "PostToolUseFailure": brain.on_tool_use,
-                   "Stop": brain.on_stop}[event]
+                   "PreToolUse": brain.on_pre_tool_use, "Stop": brain.on_stop}[event]
         state = notebook.load(payload)
         output = handler(payload, state, self.backend)
         notebook.save(payload, state)
@@ -261,15 +270,22 @@ class Messages(unittest.TestCase):
 # Brain: the help ladder with a fake backend
 # ---------------------------------------------------------------------------
 
+def fail_then_forum(case, result, cmd=DC, err=PRISMA):
+    """Two failures while the forum has nothing (the early check finds no match), then the forum gets `result`
+    before the third failure, where the ladder's own search runs. Returns the third failure's output."""
+    case.backend.search_result = []
+    case.assertIsNone(case.fail(cmd, err))
+    case.edit("Dockerfile")
+    case.assertIsNone(case.fail(cmd, err))
+    case.backend.search_result = result
+    return case.fail(cmd, err)
+
+
 class Ladder(TempProject):
     def test_known_fix_then_outcome_worked(self):
-        self.backend.search_result = [SOLVED]
-        self.assertIsNone(self.fail(DC, PRISMA))
-        self.edit("Dockerfile")
-        self.assertIsNone(self.fail(DC, PRISMA))
-        out = self.fail(DC, PRISMA)
+        out = fail_then_forum(self, [SOLVED])
         self.assertEqual(tag(out), "KNOWN_FIX")
-        self.assertIn(("search", DC, struggles.fingerprint(PRISMA)), self.backend.calls)
+        self.assertEqual(self.backend.calls.count(("search", DC, struggles.fingerprint(PRISMA))), 2)   # early + rung 1
         self.assertEqual(self.state()["episode"]["pending_fix"],
                          {"post_id": 1, "key": "docker compose up", "fp": struggles.fingerprint(PRISMA)})
         self.edit("prisma/schema.prisma")
@@ -286,12 +302,11 @@ class Ladder(TempProject):
 
     def test_leave_reply_at_most_once_per_post_per_session(self):
         self.backend.search_result = [SOLVED]
-        for _ in range(3):
-            self.fail(DC, PRISMA)
+        self.assertEqual(tag(self.fail(DC, PRISMA)), "KNOWN_FIX")   # the early check
         self.assertEqual(tag(self.ok(DC)), "LEAVE_REPLY")
         for _ in range(3):
             out = self.fail(DC, PRISMA)
-        self.assertEqual(tag(out), "KNOWN_FIX")   # the same post again, later in the session
+        self.assertEqual(tag(out), "KNOWN_FIX")   # the same post again, later in the session (the ladder's search)
         self.assertIsNone(self.ok(DC))            # outcome reported, but no second LEAVE_REPLY
         self.assertEqual(self.backend.calls.count(("outcome", 1, True)), 2)
 
@@ -305,8 +320,7 @@ class Ladder(TempProject):
 
     def test_no_leave_reply_when_the_agent_already_replied(self):
         self.backend.search_result = [SOLVED]
-        for _ in range(3):
-            self.fail(DC, PRISMA)
+        self.assertEqual(tag(self.fail(DC, PRISMA)), "KNOWN_FIX")
         self.send("PostToolUse", tool_name="mcp__plugin_breakpoint_breakpoint__reply",
                   tool_input={"post_id": 1, "body": "Also needed openssl on Alpine 3.20."},
                   tool_response=[{"type": "text", "text": "Reply #12 | agent-7f3a (X) | now | Upvotes: 0\n..."}])
@@ -314,47 +328,43 @@ class Ladder(TempProject):
         self.assertIn(("outcome", 1, True), self.backend.calls)
 
     def test_fix_failed_reports_and_moves_on(self):
-        self.backend.search_result = [SOLVED]
-        for _ in range(3):
-            out = self.fail(DC, PRISMA)
+        out = fail_then_forum(self, [SOLVED])
         self.assertEqual(tag(out), "KNOWN_FIX")
         self.edit("Dockerfile")
         out = self.fail(DC, PRISMA)
         self.assertEqual(tag(out), "FIX_FAILED")
         self.assertIn(("outcome", 1, False), self.backend.calls)
-        self.assertIn("[Breakpoint: CALL_TEAM]", text_of(out))   # node_modules in the trace: external
+        self.assertIn("[Breakpoint: STUCK_MENU]", text_of(out))   # node_modules in the trace: external
         self.assertIn("forum fix from post #1 -> did not work", self.state()["episode"]["tried"])
 
     def test_no_match_external_calls_the_team(self):
         for _ in range(3):
             out = self.fail(DC, PRISMA)
-        self.assertEqual(tag(out), "CALL_TEAM")
-        self.assertIn("ask_for_help", text_of(out))
+        self.assertEqual(tag(out), "STUCK_MENU")   # team_mode ask: the user picks (StuckMenu below)
+        self.assertIn("AskUserQuestion", text_of(out))
         self.assertIn("already tried:", text_of(out))
 
     def test_backend_down_still_climbs(self):
         self.backend.search_result = None
         for _ in range(3):
             out = self.fail(DC, PRISMA)
-        self.assertEqual(tag(out), "CALL_TEAM")
-        self.assertIn("ask_for_help", text_of(out))
+        self.assertEqual(tag(out), "STUCK_MENU")
+        self.assertIn("Call the specialist team", text_of(out))
 
     def test_open_question_then_team_next_time(self):
-        self.backend.search_result = [OPEN]
-        for _ in range(3):
-            out = self.fail(DC, PRISMA)
+        out = fail_then_forum(self, [OPEN])
         self.assertEqual(tag(out), "OPEN_QUESTION_EXISTS")
         self.assertIn("#3", text_of(out))
         self.edit()
         self.assertIsNone(self.fail(DC, PRISMA))   # cooldown
         out = self.fail(DC, PRISMA)
-        self.assertEqual(tag(out), "CALL_TEAM")
+        self.assertEqual(tag(out), "STUCK_MENU")
 
     def test_weak_text_match_is_not_a_known_fix(self):
         self.backend.search_result = [{**SOLVED, "match": "text", "score": 0.3}]
         for _ in range(3):
             out = self.fail(DC, PRISMA)
-        self.assertEqual(tag(out), "CALL_TEAM")
+        self.assertEqual(tag(out), "STUCK_MENU")
 
     def test_own_code_steps_back_then_calls_team(self):
         for _ in range(3):
@@ -363,7 +373,7 @@ class Ladder(TempProject):
         self.edit("cart.py")
         self.assertIsNone(self.fail(PT, PYTEST))   # cooldown: only 2 actions since the nudge
         self.edit("cart.py")
-        self.assertEqual(tag(self.fail(PT, PYTEST)), "CALL_TEAM")
+        self.assertEqual(tag(self.fail(PT, PYTEST)), "STUCK_MENU")
 
     def test_team_ran_and_still_stuck_posts_open_question(self):
         for _ in range(3):
@@ -422,7 +432,7 @@ class Ladder(TempProject):
         self.fail("npm test", "Exit code 1\nError: boom")
         out = self.user("it's still broken")
         self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
-        self.assertEqual(tag(out), "CALL_TEAM")
+        self.assertEqual(tag(out), "STUCK_MENU")
         self.assertIn("command: npm test", text_of(out))
 
     def test_ai_judge_counts_as_a_strong_signal(self):
@@ -514,7 +524,7 @@ class ViewedPosts(TempProject):
         self.assertEqual(tag(out), "LEAVE_REPLY")
         self.assertIn("after you read the fix in post #4", text_of(out).splitlines()[0])
         self.assertIn("post: #4", text_of(out))
-        self.assertIn("If you did not use post #4, skip this too.", text_of(out))
+        self.assertIn("If you did not use post #4, skip this.", text_of(out))
         self.assertIn(("outcome", 4, True), self.backend.calls)
         self.assertEqual(self.state()["viewed_posts"], [])
         self.assertIsNone(self.stop())
@@ -536,10 +546,8 @@ class ViewedPosts(TempProject):
 
     def test_known_fix_post_wins_over_viewed_posts(self):
         self.backend.search_result = [SOLVED]
-        self.fail(DC, PRISMA)
-        self.get_post_tool(8)
-        self.fail(DC, PRISMA)
         self.assertEqual(tag(self.fail(DC, PRISMA)), "KNOWN_FIX")
+        self.get_post_tool(8)
         out = self.ok(DC)
         self.assertIn("post: #1", text_of(out))
         self.assertEqual([c for c in self.backend.calls if c[0] == "outcome"], [("outcome", 1, True)])
@@ -547,8 +555,7 @@ class ViewedPosts(TempProject):
 
     def test_a_known_fix_that_failed_is_not_credited_later(self):
         self.backend.search_result = [SOLVED]
-        for _ in range(3):
-            self.fail(DC, PRISMA)
+        self.assertEqual(tag(self.fail(DC, PRISMA)), "KNOWN_FIX")
         self.get_post_tool(1)   # the agent reads the KNOWN_FIX post in full, as the skill says
         self.assertEqual(tag(self.fail(DC, PRISMA)), "FIX_FAILED")
         self.edit()
@@ -627,9 +634,7 @@ class ShellTools(TempProject):
 
     def test_powershell_known_fix_round_trip(self):
         self.backend.search_result = [SOLVED]
-        self.assertIsNone(self.ps_fail(DC, PRISMA))
-        self.assertIsNone(self.ps_fail(DC, PRISMA))
-        self.assertEqual(tag(self.ps_fail(DC, PRISMA)), "KNOWN_FIX")
+        self.assertEqual(tag(self.ps_fail(DC, PRISMA)), "KNOWN_FIX")   # the early check, on the first failure
         self.edit("Dockerfile")
         self.assertEqual(tag(self.ps_ok(DC, "listening")), "LEAVE_REPLY")
         self.assertIn(("outcome", 1, True), self.backend.calls)
@@ -662,8 +667,7 @@ class ShellTools(TempProject):
 
     def test_background_run_does_not_confirm_a_known_fix(self):
         self.backend.search_result = [SOLVED]
-        for _ in range(3):
-            self.fail(DC, PRISMA)
+        self.assertEqual(tag(self.fail(DC, PRISMA)), "KNOWN_FIX")
         self.edit("Dockerfile")
         self.assertIsNone(self.send("PostToolUse", tool_name="Bash",
                                     tool_input={"command": DC, "run_in_background": True},
@@ -722,15 +726,131 @@ class PostResults(TempProject):
         self.assertIsNone(self.state()["episode"])
 
     def test_notable_solve_names_the_open_question(self):
-        self.backend.search_result = [OPEN]
-        for _ in range(3):
-            out = self.fail(DC, PRISMA)
+        out = fail_then_forum(self, [OPEN])
         self.assertEqual(tag(out), "OPEN_QUESTION_EXISTS")
         self.edit("Dockerfile")
         out = self.ok(DC, "listening")
         self.assertEqual(tag(out), "NOTABLE_SOLVE")
         self.assertIn("pass open_question_id 3 to `post`", text_of(out))
         self.assertNotIn("open_question_id", messages.notable_solve(DC, 3, "abc", []))
+
+
+# ---------------------------------------------------------------------------
+# The early forum check: one search on the first failure of each new error fingerprint
+# ---------------------------------------------------------------------------
+
+class EarlyLookup(TempProject):
+    def searches(self):
+        return [c for c in self.backend.calls if c[0] == "search"]
+
+    def test_solved_match_on_the_first_failure(self):
+        self.backend.search_result = [SOLVED]
+        out = self.fail(DC, PRISMA)
+        self.assertEqual(tag(out), "KNOWN_FIX")
+        self.assertIn("post: #1", text_of(out))
+        self.assertEqual(self.searches(), [("search", DC, struggles.fingerprint(PRISMA))])
+        episode = self.state()["episode"]
+        self.assertEqual((episode["rung"], episode["early"], episode["key"]), (1, True, "docker compose up"))
+        self.assertEqual(episode["pending_fix"],
+                         {"post_id": 1, "key": "docker compose up", "fp": struggles.fingerprint(PRISMA)})
+        self.edit("Dockerfile")
+        out = self.ok(DC, "listening on :3000")
+        self.assertIn(("outcome", 1, True), self.backend.calls)
+        self.assertEqual(tag(out), "LEAVE_REPLY")
+        self.assertIn("The fix from post #1 worked.", text_of(out))
+        self.assertIsNone(self.state()["episode"])
+        self.assertIsNone(self.stop())
+
+    def test_open_match_on_the_first_failure_then_notable_solve(self):
+        self.backend.search_result = [OPEN]
+        out = self.fail(DC, PRISMA)
+        self.assertEqual(tag(out), "OPEN_QUESTION_EXISTS")
+        self.assertIn("open question #3", text_of(out))
+        self.assertEqual((self.state()["episode"]["open_question_id"], self.state()["episode"]["rung"]), (3, 1))
+        self.edit("Dockerfile")
+        out = self.ok(DC, "listening")
+        self.assertEqual(tag(out), "NOTABLE_SOLVE")   # even after a single failure: it answers an open question
+        self.assertIn("after failing 1 time.", text_of(out).splitlines()[0])
+        self.assertIn("Open question #3", text_of(out))
+        self.assertIn("pass open_question_id 3 to `post`", text_of(out))
+        self.assertIsNone(self.state()["episode"])
+
+    def test_open_match_then_two_failures_still_names_the_question(self):
+        self.backend.search_result = [OPEN]
+        self.assertEqual(tag(self.fail(DC, PRISMA)), "OPEN_QUESTION_EXISTS")
+        self.edit()
+        self.assertIsNone(self.fail(DC, PRISMA))   # same error: already looked up, and no struggle yet
+        self.edit()
+        out = self.ok(DC)
+        self.assertEqual(tag(out), "NOTABLE_SOLVE")
+        self.assertIn("after failing 2 times", text_of(out))
+        self.assertIn("pass open_question_id 3 to `post`", text_of(out))
+        self.assertEqual(len(self.searches()), 1)
+
+    def test_no_match_stays_silent(self):
+        self.backend.search_result = [{**SOLVED, "match": "text", "score": 0.3}]   # a weak match counts as none
+        self.assertIsNone(self.fail(DC, PRISMA))
+        self.assertEqual(len(self.searches()), 1)
+        self.assertIsNone(self.state()["episode"])
+        self.edit()
+        self.assertIsNone(self.ok(DC))   # fixed quickly: nothing to say, as before
+
+    def test_the_same_fingerprint_is_looked_up_once(self):
+        self.assertIsNone(self.fail(DC, PRISMA))
+        self.edit()
+        self.assertIsNone(self.fail(DC, PRISMA))
+        self.assertEqual(len(self.searches()), 1)
+        self.ok(DC)
+        self.assertIsNone(self.fail(DC, PRISMA))   # later in the session, after a pass: still not again
+        self.assertEqual(len(self.searches()), 1)
+        other = "Exit code 1\nError: Cannot find module 'express'"
+        self.assertIsNone(self.fail(DC, other))    # a new error: looked up once
+        self.assertEqual(len(self.searches()), 2)
+        self.assertEqual(self.state()["looked_up"], [struggles.fingerprint(PRISMA), struggles.fingerprint(other)])
+
+    def test_server_down_stays_silent(self):
+        self.backend.search_result = None
+        self.assertIsNone(self.fail(DC, PRISMA))
+        self.assertIsNone(self.state()["episode"])
+
+    def test_server_down_through_the_real_backend(self):
+        """backend.py's down-skip: the first call finds the port closed, the next ones skip the network."""
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            url = f"http://127.0.0.1:{s.getsockname()[1]}"
+        os.environ["BREAKPOINT_API_URL"] = url
+        self.addCleanup(backend._mark_down, url, False)
+        patcher = mock.patch.object(backend, "CONFIG_PATH", self.project / "no_config.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.backend = backend
+        self.assertIsNone(self.fail(DC, PRISMA))
+        started = time.time()
+        self.assertIsNone(self.fail(DC, "Exit code 1\nError: Cannot find module 'express'"))   # new error, skipped fast
+        self.assertLess(time.time() - started, 1.0)
+        self.assertIsNone(self.state()["episode"])
+
+    def test_a_failed_early_fix_waits_for_the_ladder(self):
+        self.backend.search_result = [SOLVED]
+        self.assertEqual(tag(self.fail(DC, PRISMA)), "KNOWN_FIX")
+        self.edit("Dockerfile")
+        out = self.fail(DC, PRISMA)
+        self.assertEqual(tag(out), "FIX_FAILED")
+        self.assertNotIn("STUCK_MENU", text_of(out))   # 2 failures: not stuck yet, so no next step
+        self.assertIn(("outcome", 1, False), self.backend.calls)
+        self.edit()
+        self.assertIsNone(self.fail(DC, PRISMA))      # cooldown
+        self.edit()
+        self.assertEqual(tag(self.fail(DC, PRISMA)), "STUCK_MENU")   # stuck now; the forum step is already done
+        self.assertEqual(len(self.searches()), 1)
+
+    def test_not_while_an_episode_is_about_another_command(self):
+        for _ in range(3):
+            out = self.fail(PT, PYTEST)
+        self.assertEqual(tag(out), "STEP_BACK")
+        self.backend.search_result = [SOLVED]
+        self.assertIsNone(self.fail(DC, PRISMA))
+        self.assertEqual(self.state()["episode"]["key"], struggles.command_key(PT))
 
 
 class Triage(unittest.TestCase):
@@ -925,9 +1045,7 @@ class EndToEnd(TempProject):
                              ("POST", "/api/outcomes"): (200, {"post_status": "solved"})})
         self.addCleanup(server.close)
         env = {"BREAKPOINT_API_URL": server.url}
-        outputs = [self.run_main(self.bash_fail(DC, PRISMA), env) for _ in range(3)]
-        self.assertEqual(outputs[:2], ["", ""])
-        result = json.loads(outputs[2])
+        result = json.loads(self.run_main(self.bash_fail(DC, PRISMA), env))   # the early check, first failure
         self.assertTrue(result["hookSpecificOutput"]["additionalContext"].startswith("[Breakpoint: KNOWN_FIX]"))
         self.assertIn("café", result["hookSpecificOutput"]["additionalContext"])
         passed = {"hook_event_name": "PostToolUse", "session_id": "e2e", "cwd": str(self.project),
@@ -959,6 +1077,426 @@ class EndToEnd(TempProject):
         (folder / "x.json").write_text(json.dumps({"history": [5], "episode": "not a dict", "project_id": "p"}))
         self.assertEqual(self.run_main(payload, env), "")
         self.assertIn("Traceback", (folder / "_errors.log").read_text())
+
+
+UNITTEST_FAIL = ("E\n======================================================================\n"
+                 "ERROR: test_save (tests.test_store.StoreTests.test_save)\n"
+                 "Traceback (most recent call last):\nTypeError: 'NoneType' object is not subscriptable\n"
+                 "----------------------------------------------------------------------\nRan 11 tests in 0.002s\n\n"
+                 "FAILED (errors=1)\n")
+UNITTEST_OK = "...........\n----------------------------------------------------------------------\nRan 11 tests in 0.001s\n\nOK\n"
+PATCH_AND_TEST = ("cd C:/proj && python - <<'EOF'\np='recordkit/store.py'\ns=open(p).read()\n"
+                  "open(p,'w').write(s.replace('a', 'b'))\nEOF\npython -m unittest 2>&1 | tail -20; git status --short")
+
+
+class CompoundCommands(TempProject):
+    """Agents that chain commands: `cd x && patch <<EOF ... EOF` + `python -m unittest | tail; git status`."""
+
+    def shell(self, cmd, out, exit_ok=True):
+        if exit_ok:
+            return self.send("PostToolUse", tool_name="Bash", tool_input={"command": cmd},
+                             tool_response={"stdout": out, "stderr": "", "interrupted": False})
+        return self.fail(cmd, "Exit code 1\n" + out)
+
+    def runs(self):
+        return [a for a in self.state()["history"] if a["kind"] == "run"]
+
+    def test_the_check_command_is_the_key(self):
+        key = struggles.command_key
+        self.assertEqual(key(PATCH_AND_TEST), "python unittest")
+        self.assertEqual(key("cd C:/x && sed -i 's/a/b/' src/a.py && python -m unittest 2>&1 | tail -5; git status"),
+                         "python unittest")
+        self.assertEqual(key("cat recordkit/*.py; python -m unittest 2>&1 | grep -E \"^(ERROR|FAIL)\""),
+                         "python unittest")
+        self.assertEqual(key("python -m unittest; git status"), key("python -m unittest 2>&1"))
+        self.assertEqual(key("npm test && git diff"), "npm test")
+        self.assertEqual(key("ls; Get-Content a.py; npx tsc --noEmit; echo done"), "npx tsc")
+        self.assertEqual(key(r"cd C:\Users\me\proj; python -m pytest tests -q"), "python pytest tests")
+        self.assertEqual(key("cargo test 2>&1 | tail -3"), "cargo test")
+        self.assertEqual(key("go test ./... ; pwd"), "go test ./...")
+
+    def test_probes_never_become_the_key(self):
+        key = struggles.command_key
+        self.assertEqual(key("python -m unittest; git status"), "python unittest")
+        self.assertEqual(key("pytest -q && git log -1 && ls"), "pytest")
+        self.assertTrue(struggles._is_probe(key("git status --short")))
+        self.assertTrue(struggles._is_probe(key("cd src; ls; cat a.py")))
+        self.assertTrue(struggles._is_probe(key("Get-ChildItem -Recurse | Select-Object -First 5")))
+        self.assertEqual(key("python - <<'EOF'\nimport os\nos.system('git status')\nEOF"), "python")   # the body is skipped
+
+    def test_split_skips_heredoc_bodies(self):
+        parts = [s.text for s in struggles.split_command(PATCH_AND_TEST)]
+        self.assertEqual(parts, ["cd C:/proj", "python - <<'EOF'", "python -m unittest 2>&1", "tail -20",
+                                 "git status --short"])
+        self.assertEqual([s.text for s in struggles.split_command("echo 'a; b' && x || y | z")],
+                         ["echo 'a; b'", "x", "y", "z"])
+
+    def test_result_comes_from_the_output_when_the_check_is_not_last(self):
+        result = notebook.check_result
+        self.assertIs(result("python -m unittest; git status", True, UNITTEST_FAIL), False)
+        self.assertIs(result("python -m unittest; git status", True, UNITTEST_OK), True)
+        self.assertIs(result("pytest -q; git status", True, "1 failed, 3 passed in 0.1s"), False)
+        self.assertIs(result("pytest -q; git status", True, "4 passed in 0.1s"), True)
+        self.assertIs(result("npm test; echo done", True, "npm ERR! Test failed."), False)
+        self.assertIsNone(result("python -m unittest; git status", True, " M src/a.py"))   # can't tell: unknown
+        self.assertIsNone(result("python -m unittest; git status", False, "fatal: not a git repository"))
+        self.assertIs(result("python -m unittest && git status", True, " M a.py"), True)   # && ran on: it passed
+        self.assertIs(result("python -m unittest", False, UNITTEST_OK), False)             # last part: the exit code
+        self.assertIsNone(result("python -m unittest 2>&1 | grep FAIL", False, ""))       # grep found nothing
+        # A patch script's traceback doesn't hide the runner's own "OK".
+        self.assertIs(result("python - <<'EOF'\nx\nEOF\npython -m unittest 2>&1 | tail -3; git status", True,
+                             "Traceback (most recent call last):\nNameError: x\nRan 11 tests\n\nOK"), True)
+
+    def test_unknown_result_records_no_run(self):
+        self.shell("python -m unittest; git status", " M src/a.py")
+        self.assertEqual(self.runs(), [])
+        self.shell("python -m unittest; git status", UNITTEST_FAIL)
+        self.assertEqual([(r["key"], r["ok"]) for r in self.runs()], [("python unittest", False)])
+
+    def test_shell_writes_count_as_edits(self):
+        edits = notebook.shell_edits
+        self.assertEqual(edits(PATCH_AND_TEST), ["recordkit/store.py"])
+        self.assertEqual(edits("sed -i 's/a/b/' src/a.py src/b.py && pytest"), ["src/a.py", "src/b.py"])
+        self.assertEqual(edits("sed -i.bak -e 's/a/b/' src/a.py"), ["src/a.py"])
+        self.assertEqual(edits("(Get-Content a.ps1) -replace 'x','y' | Set-Content -Path a.ps1"), ["a.ps1"])
+        self.assertEqual(edits("'x' | Out-File notes.txt"), ["notes.txt"])
+        self.assertEqual(edits("cat > src/new.py <<'EOF'\nprint(1)\nEOF"), ["src/new.py"])
+        self.assertEqual(edits("echo x >> log.txt; echo y > /dev/null; pytest 2>&1 > $null"), ["log.txt"])
+        self.assertEqual(edits("echo a | tee -a out.txt"), ["out.txt"])
+        self.assertEqual(edits("python -c \"from pathlib import Path; Path('cfg.toml').write_text('x')\""),
+                         ["cfg.toml"])
+        self.assertEqual(edits("python - <<'EOF'\nprint(open('a.py').read())\nEOF"), [])   # reads only
+        self.assertEqual(edits("python -m unittest 2>&1 | tail -5"), [])
+
+    def test_edits_are_recorded_before_the_run(self):
+        self.shell(PATCH_AND_TEST, UNITTEST_FAIL)
+        history = self.state()["history"]
+        self.assertEqual([(a["kind"], a.get("path") or a.get("key")) for a in history],
+                         [("edit", "recordkit/store.py"), ("run", "python unittest")])
+        self.assertEqual(history[0]["via"], "shell")
+
+    def test_one_call_per_try_still_climbs_the_ladder(self):
+        """An agent that patches and tests in one call (1 action per try): STEP_BACK, then the team step (the stuck
+        menu) 2 failures later; no message on the failure in between."""
+        outputs = [self.shell(PATCH_AND_TEST, UNITTEST_FAIL) for _ in range(5)]
+        self.assertEqual([tag(o) for o in outputs], [None, None, "STEP_BACK", None, "STUCK_MENU"])
+        self.assertEqual(self.state()["episode"]["key"], "python unittest")
+
+    def test_a_new_error_after_a_message_climbs_right_away(self):
+        """Whack-a-mole: each fix reveals a new error, so the next rung doesn't wait a second failure."""
+        errors = ["KeyError: 'sku'", "AttributeError: no Num", "ValueError: bad binding", "LookupError: no row",
+                  "IndexError: lines"]
+        outputs = [self.shell(PATCH_AND_TEST, UNITTEST_FAIL.replace(
+            "TypeError: 'NoneType' object is not subscriptable", e)) for e in errors]
+        # 4 failures, 4 different errors: whack-a-mole -> STEP_BACK; the 5th error is new -> the team step at once.
+        self.assertEqual([tag(o) for o in outputs], [None, None, None, "STEP_BACK", "STUCK_MENU"])
+
+    def test_edit_run_same_output_sees_shell_patches(self):
+        for _ in range(4):
+            self.shell(PATCH_AND_TEST, UNITTEST_FAIL)
+        names = [s.name for s in struggles.check_after_run(self.state()["history"])]
+        self.assertIn("edit_run_same_output", names)
+
+    def test_rewind_offer_lets_the_next_failure_climb(self):
+        state = {"history": [{"kind": "run", "key": "pytest", "ok": False}] * 2, "episode": None}
+        episode = notebook.new_episode("pytest", "f", 0)
+        episode.update(last_nudge_idx=2, rewind_offer_idx=2)
+        state["history"].append({"kind": "run", "key": "pytest", "ok": False})
+        self.assertTrue(brain._cooled_down(state, episode))       # 1 failure after a REWIND_OFFER is enough
+        episode["rewind_offer_idx"] = None
+        self.assertFalse(brain._cooled_down(state, episode))      # after other messages: 2 failures or 3 actions
+        state["history"].append({"kind": "run", "key": "git status", "ok": False})
+        self.assertFalse(brain._cooled_down(state, episode))      # a probe is not a failure
+        state["history"].append({"kind": "run", "key": "pytest", "ok": False})
+        self.assertTrue(brain._cooled_down(state, episode))
+
+    def test_no_not_done_after_the_check_really_passed(self):
+        self.shell(PATCH_AND_TEST, UNITTEST_FAIL)
+        self.shell("python -m unittest tests.test_store", UNITTEST_FAIL, exit_ok=False)
+        self.shell("python - <<'EOF'\nraise SystemExit(1)\nEOF", "Traceback (most recent call last):\nSystemExit",
+                   exit_ok=False)
+        self.shell("cd C:/proj && python -m unittest 2>&1 | tail -5", UNITTEST_OK)
+        self.assertIsNone(self.send("Stop", stop_hook_active=False))
+
+    def test_not_done_still_fires_when_the_check_fails_last(self):
+        self.shell("python -m unittest", UNITTEST_OK)
+        self.shell(PATCH_AND_TEST, UNITTEST_FAIL)
+        self.assertEqual(tag(self.send("Stop", stop_hook_active=False)), "NOT_DONE")
+
+
+# ---------------------------------------------------------------------------
+# The stuck menu (team_mode ask) and the team started by the hook (auto)
+# ---------------------------------------------------------------------------
+
+STARTED = messages.COMMUNITY_LABEL + "TEAM_STARTED: run-5\nThe team is researching. Check back in about 60s."
+FAKE_REWIND = [{"name": "episode_start", "title": "when this problem started", "cmd": DC, "time": "7:42 PM, 3 min ago",
+                "edits": 3, "changed": ["Dockerfile"], "added": [], "removed": [], "files": 1,
+                "command": "python rewind.py --session test-session episode_start"}]
+
+
+class StuckMenu(TempProject):
+    def stuck(self, n=3):
+        for _ in range(n):
+            out = self.fail(DC, PRISMA)
+        return out
+
+    def ask(self, label=None, response=None, event="PostToolUse"):
+        """The AskUserQuestion tool's result, in the shape Claude Code gives it (questions + answers)."""
+        question = (self.state().get("pending_menu") or {}).get("question", "q?")
+        tool_input = {"questions": [{"question": question, "header": "Stuck", "multiSelect": False,
+                                     "options": [{"label": messages.MENU_OPTIONS[n][0], "description": "d"}
+                                                 for n in ("team", "keep")]}]}
+        if response is None:
+            response = {"questions": tool_input["questions"], "answers": {question: label}}
+        fields = {"tool_response": response} if event == "PostToolUse" else {"error": "not available"}
+        return self.send(event, tool_name="AskUserQuestion", tool_input=tool_input, **fields)
+
+    def pre(self, tool):
+        return self.send("PreToolUse", tool_name=tool, tool_input={})
+
+    def helps(self):
+        return [c for c in self.backend.calls if c[0] == "help"]
+
+    def test_menu_is_offered_in_ask_mode(self):
+        out = self.stuck()
+        self.assertEqual(tag(out), "STUCK_MENU")
+        text = text_of(out)
+        self.assertIn("call the AskUserQuestion tool NOW", text)
+        self.assertIn('label: "Call the specialist team"', text)
+        self.assertIn('label: "Let the agent keep trying"', text)
+        self.assertNotIn("Rewind the files", text)   # no checkpoint: no rewind option
+        self.assertIn(f"`{DC}` failed 3 times with 1 different error", text)
+        menu = self.state()["pending_menu"]
+        self.assertEqual(menu["options"], ["team", "keep"])
+        self.assertEqual(self.helps(), [])            # nothing is started before the user answers
+        self.assertTrue(self.state()["episode"]["rung"] >= 3)
+        for _ in range(4):                            # never offered twice in one episode
+            self.edit()
+            self.assertIsNone(self.fail(DC, PRISMA))
+
+    def test_menu_offers_the_rewind_when_one_is_possible(self):
+        with mock.patch.object(brain, "_rewind_options", return_value=FAKE_REWIND):
+            out = self.stuck()
+        self.assertEqual(tag(out), "STUCK_MENU")
+        self.assertIn('2. label: "Rewind the files to before the problem started"', text_of(out))
+        self.assertIn("undoes 3 edits", text_of(out))
+        self.assertEqual(self.state()["pending_menu"]["options"], ["team", "rewind", "keep"])
+        self.assertTrue(self.state()["episode"]["rewind_offered"])
+
+    def test_pre_tool_use_stops_any_other_tool(self):
+        self.assertIsNone(self.pre("Bash"))           # no menu: nothing happens
+        self.stuck()
+        for allowed in ("AskUserQuestion", "ToolSearch", "Skill"):
+            self.assertIsNone(self.pre(allowed))
+        out = self.pre("Bash")
+        self.assertEqual(out["continue"], False)
+        self.assertIn("1. Call the specialist team", out["stopReason"])
+        self.assertIn("2. Let the agent keep trying", out["stopReason"])
+        self.assertIn("Type 1 or 2.", out["stopReason"])
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")   # the tool itself never runs
+        self.assertTrue(self.state()["pending_menu"]["stopped"])
+        self.assertEqual(self.pre("mcp__plugin_breakpoint_breakpoint__ask_for_help")["continue"], False)
+
+    def test_stop_while_the_menu_waits_asks_now_once(self):
+        out = self.stuck()
+        self.assertIn("Type 1 or 2.", text_of(out))   # the text fallback is in the menu message too
+        out = self.stop()
+        self.assertEqual(tag(out), "STUCK_MENU")      # not NOT_DONE ("keep fixing") while the user must choose
+        self.assertIn("word for word", text_of(out))
+        self.assertIn("1. Call the specialist team", text_of(out))
+        self.assertIsNone(self.stop(active=True))
+        self.assertIsNone(self.stop())                # reminded once; then quiet while the menu waits
+        self.user("1")                                # answered (the fake backend can't start the team)
+        self.fail(DC, PRISMA)
+        self.assertEqual(tag(self.stop()), "NOT_DONE")   # the usual Stop checks again
+
+    def test_no_stop_reminder_when_the_reply_shows_the_menu(self):
+        self.stuck()
+        self.say("Here is the menu:\n" + messages.typed_menu(self.state()["pending_menu"]["question"], ["team", "keep"]))
+        self.assertIsNone(self.stop())
+        self.assertIsNotNone(self.state()["pending_menu"])
+
+    def test_pre_tool_use_through_main_is_a_quick_no_op(self):
+        import main
+        payload = {"hook_event_name": "PreToolUse", "session_id": "nofile", "cwd": str(self.project),
+                   "tool_name": "Bash", "tool_input": {"command": "ls"}}
+        self.assertIsNone(main.run(json.dumps(payload).encode()))
+        self.assertFalse((self.project / ".claude").exists())   # no notes file made, no git run
+        self.stuck()
+        out = main.run(json.dumps({**payload, "session_id": self.sid}).encode())
+        self.assertEqual(out["continue"], False)
+
+    def test_answer_team_starts_the_team_in_the_hook(self):
+        self.backend.help_result = STARTED
+        self.edit("Dockerfile")
+        self.stuck()
+        out = self.ask("Call the specialist team")
+        self.assertEqual(tag(out), "TEAM_CALLED")
+        self.assertIn("already working on this (run run-5)", text_of(out))
+        self.assertIn("call `check_help` with run_id run-5", text_of(out))
+        self.assertEqual(self.helps(), [("help", DC, struggles.fingerprint(PRISMA))])
+        case = self.backend.cases[0]
+        self.assertIn("PrismaClientInitializationError", case["symptom"])
+        self.assertIn("(3 failed runs; different errors: 1)", case["goal"])
+        self.assertTrue(case["tried"] and case["tried"][0]["attempt"])
+        episode = self.state()["episode"]
+        self.assertEqual((episode["team_ran"], episode["team_run_id"], episode["team_status"]),
+                         (True, "run-5", "working"))
+        self.assertIsNone(self.state()["pending_menu"])
+        self.assertIsNone(self.pre("Bash"))           # answered: tools run again
+        # the existing flow carries on: check_help -> TEAM_REPORT -> TEST_FIXES
+        self.assertEqual(tag(self.mcp("check_help", "TEAM_REPORT: run run-5\n1. cause")), "TEST_FIXES")
+
+    def test_case_file_names_recently_edited_files(self):
+        (self.project / "Dockerfile").write_text("FROM node:20-alpine\n")
+        self.backend.help_result = STARTED
+        self.edit("Dockerfile")
+        self.stuck()
+        self.ask("Call the specialist team")
+        case = self.backend.cases[0]
+        self.assertEqual([f["path"] for f in case.get("files", [])], ["Dockerfile"])
+        self.assertIn("OS:", case["environment"])
+
+    def test_answer_rewind_hands_over_the_rewind_offer(self):
+        with mock.patch.object(brain, "_rewind_options", return_value=FAKE_REWIND):
+            self.stuck()
+        out = self.ask(response="User has answered your questions: \"q?\"=\"Rewind the files to before the problem "
+                                "started\". You can now continue with the user's answers in mind.")
+        self.assertEqual(tag(out), "REWIND_OFFER")
+        self.assertIn("the user already said yes in the Breakpoint menu", text_of(out))
+        self.assertIn("Run the `episode_start` option's command now", text_of(out))
+        self.assertIn("command: python rewind.py --session test-session episode_start", text_of(out))
+        self.assertEqual(self.helps(), [])
+        self.assertIsNone(self.state()["pending_menu"])
+
+    def test_answer_keep_trying_is_quiet(self):
+        self.stuck()
+        self.assertIsNone(self.ask("Let the agent keep trying"))
+        self.assertIsNone(self.state()["pending_menu"])
+        for _ in range(4):   # no repeat menu, no team, nothing until the next rung is due
+            self.edit()
+            self.assertIsNone(self.fail(DC, PRISMA))
+        self.assertEqual(self.helps(), [])
+
+    def test_a_failed_question_keeps_the_menu_waiting(self):
+        self.stuck()
+        self.assertIsNone(self.ask(event="PostToolUseFailure"))
+        self.assertIsNotNone(self.state()["pending_menu"])
+        self.assertEqual(self.pre("Bash")["continue"], False)
+
+    def test_an_answer_of_their_own_drops_the_menu(self):
+        self.stuck()
+        out = self.ask("Look at the Dockerfile first")
+        self.assertEqual(tag(out), "TEAM_STATUS")
+        self.assertIsNone(self.state()["pending_menu"])
+        self.assertEqual(self.helps(), [])
+
+    def test_typed_answer_after_the_stop(self):
+        self.backend.help_result = STARTED
+        self.stuck()
+        self.assertEqual(self.pre("Bash")["continue"], False)
+        out = self.user("1")
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+        self.assertEqual(tag(out), "TEAM_CALLED")
+        self.assertIn('The user typed "1"', text_of(out))
+        self.assertEqual(len(self.helps()), 1)
+        self.assertTrue(self.state()["episode"]["team_ran"])
+
+    def test_typed_words_and_keep_trying(self):
+        self.stuck()
+        out = self.user("keep trying")
+        self.assertEqual(tag(out), "TEAM_STATUS")
+        self.assertIn("let the agent keep trying", text_of(out))
+        self.assertEqual(self.helps(), [])
+        self.assertEqual(brain._menu_choice("2", ["team", "rewind", "keep"], numbers=True), "rewind")
+        self.assertEqual(brain._menu_choice("option 3.", ["team", "rewind", "keep"], numbers=True), "keep")
+        self.assertIsNone(brain._menu_choice("3", ["team", "keep"], numbers=True))
+        self.assertIsNone(brain._menu_choice("Call the specialist team / Let the agent keep trying", ["team", "keep"]))
+
+    def test_a_different_prompt_drops_the_menu(self):
+        self.stuck()
+        self.assertIsNone(self.user("Please also add a README while you are at it, with setup steps for Windows"))
+        self.assertIsNone(self.state()["pending_menu"])
+        self.assertIsNone(self.pre("Bash"))
+        self.assertEqual(self.helps(), [])
+
+    def test_failed_team_start_falls_back_to_ask_for_help(self):
+        self.backend.help_result = None   # server down or an error
+        self.stuck()
+        out = self.ask("Call the specialist team")
+        self.assertEqual(tag(out), "CALL_TEAM")
+        self.assertIn("the request failed: call `ask_for_help` yourself now", text_of(out))
+        self.assertFalse(self.state()["episode"]["team_ran"])
+        self.assertIsNone(self.state()["pending_menu"])
+
+    def test_server_answers_known_fix_instead_of_a_run(self):
+        self.backend.help_result = "KNOWN_FIX: forum post #4 matches this problem (same error fingerprint)."
+        self.stuck()
+        out = self.ask("Call the specialist team")
+        self.assertEqual(tag(out), "TEAM_CALLED")
+        self.assertIn("KNOWN_FIX: forum post #4", text_of(out))
+        self.assertFalse(self.state()["episode"]["team_ran"])
+        self.assertEqual(self.state()["episode"]["pending_fix"]["post_id"], 4)
+
+    def test_auto_starts_the_team_directly(self):
+        os.environ["BREAKPOINT_TEAM_MODE"] = "auto"
+        self.backend.help_result = STARTED
+        out = self.stuck()
+        self.assertEqual(tag(out), "TEAM_CALLED")
+        self.assertIn("team_mode is auto", text_of(out))
+        self.assertEqual(len(self.helps()), 1)
+        self.assertIsNone(self.state()["pending_menu"])
+        self.assertEqual(self.state()["episode"]["team_run_id"], "run-5")
+
+    def test_auto_failed_start_falls_back_to_call_team(self):
+        os.environ["BREAKPOINT_TEAM_MODE"] = "auto"
+        self.assertEqual(tag(self.stuck()), "CALL_TEAM")
+        self.assertEqual(len(self.helps()), 1)
+
+    def test_off_never_calls_the_team(self):
+        os.environ["BREAKPOINT_TEAM_MODE"] = "off"
+        self.backend.help_result = STARTED
+        outs = [self.stuck(3)] + [self.fail(DC, PRISMA) for _ in range(6)]
+        self.assertEqual([tag(o) for o in outs if o], [])
+        self.assertEqual(self.helps(), [])
+        self.assertIsNone(self.state()["pending_menu"])
+
+    def test_off_keeps_the_rewind_offer(self):
+        os.environ["BREAKPOINT_TEAM_MODE"] = "off"
+        with mock.patch.object(brain, "_rewind_options", return_value=FAKE_REWIND):
+            self.assertEqual(tag(self.stuck()), "REWIND_OFFER")
+
+    def test_team_mode_setting(self):
+        config = self.project / "config.json"
+        with mock.patch.object(backend, "CONFIG_PATH", config):
+            del os.environ["BREAKPOINT_TEAM_MODE"]
+            self.assertEqual(backend.team_mode(), "ask")   # no file: the default
+            config.write_text(json.dumps({"team_mode": "auto"}))
+            self.assertEqual(backend.team_mode(), "auto")
+            os.environ["BREAKPOINT_TEAM_MODE"] = " OFF "    # env wins
+            self.assertEqual(backend.team_mode(), "off")
+            os.environ["BREAKPOINT_TEAM_MODE"] = "local"    # an old value: the default
+            self.assertEqual(backend.team_mode(), "ask")
+
+
+class AskHelpContract(TempProject):
+    def test_ask_help_posts_the_case_file(self):
+        self.server = FakeServer({})
+        self.addCleanup(self.server.close)
+        os.environ["BREAKPOINT_API_URL"] = self.server.url
+        os.environ["BREAKPOINT_API_KEY"] = "k1"
+        patcher = mock.patch.object(backend, "CONFIG_PATH", self.project / "no_config.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.server.routes[("POST", "/api/help")] = (200, {"message": "TEAM_STARTED: run-1\n...", "run_id": "run-1"})
+        case = {"goal": "g", "symptom": "token=abc123 failed", "tried": [{"attempt": "a", "result": "r"}]}
+        self.assertEqual(backend.ask_help(case), "TEAM_STARTED: run-1\n...")
+        req = self.server.requests[-1]
+        self.assertEqual((req["method"], req["path"], req["key"]), ("POST", "/api/help", "k1"))
+        self.assertEqual(req["body"]["symptom"], "token=<secret> failed")   # scrubbed
+        self.assertEqual(req["body"]["tried"], [{"attempt": "a", "result": "r"}])
+        self.server.routes[("POST", "/api/help")] = (500, {"detail": "boom"})
+        self.assertIsNone(backend.ask_help(case))
 
 
 if __name__ == "__main__":
