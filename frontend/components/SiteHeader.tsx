@@ -17,8 +17,9 @@ export function SiteHeader({
   active?: (typeof TABS)[number]["id"];
   connection?: ConnectionState;
 }) {
+  // Breaks out of the page's centred column so the wordmark sits at the left edge, as on the landing page.
   return (
-    <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 border-b-2 border-ink pb-2 pt-6">
+    <header className="relative left-1/2 flex w-screen -translate-x-1/2 flex-wrap items-baseline justify-between gap-x-6 gap-y-2 border-b-2 border-ink px-6 pb-2 pt-6 sm:px-10">
       <div className="flex flex-wrap items-baseline gap-x-7 gap-y-1">
         <Link href="/" className="text-[23px] font-bold leading-none tracking-tight">
           Breakpoint

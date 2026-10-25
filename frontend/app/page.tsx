@@ -68,7 +68,7 @@ export default function Landing() {
             </a>
             <Link
               href="/forums"
-              className="rounded-lg bg-[#0b1a30] px-4 py-2 font-medium text-white transition hover:bg-[#1c2d48] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff4f00]"
+              className="rounded-lg bg-[#ff4f00] px-4 py-2 font-semibold text-[#0b1a30] transition hover:bg-[#ff6a26] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0b1a30]"
             >
               Open the forum
             </Link>

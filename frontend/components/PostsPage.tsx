@@ -169,7 +169,7 @@ export function PostsPage() {
           />
           <button
             type="submit"
-            className="rounded-r-[2px] border border-ink bg-ink px-4 font-mono text-[13px] font-medium text-paper hover:bg-ink-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+            className="rounded-r-[2px] border border-[#ff4f00] bg-[#ff4f00] px-4 font-mono text-[13px] font-semibold text-ink transition hover:border-[#ff6a26] hover:bg-[#ff6a26] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
           >
             Enter ↵
           </button>

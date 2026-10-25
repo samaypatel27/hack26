@@ -34,6 +34,7 @@
 }
 
 body {
+  overflow-x: clip; /* full-bleed headers use 100vw, which includes the scrollbar */
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-source-serif), Georgia, serif;
