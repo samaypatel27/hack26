@@ -1,19 +1,24 @@
 """Tests for backend/linking.py (docs/linking.md). No real API calls: OpenAI and Anthropic are fakes.
 
-Part 1 needs nothing. Part 2 needs TEST_DATABASE_URL pointing at a throwaway Postgres WITH pgvector
-(for example the pgvector/pgvector:pg16 Docker image); without the extension those tests skip.
+Part 1 needs nothing. Part 2 needs TEST_DATABASE_URL pointing at a THROWAWAY Postgres (plain postgres:16,
+no extensions needed). These tests build their own posts on it and never use the real database.
 
-    docker run --rm -d --name bp-linking-test-pg -p 55433:5432 -e POSTGRES_PASSWORD=test pgvector/pgvector:pg16
-    $env:TEST_DATABASE_URL = "postgresql://postgres:test@127.0.0.1:55433/postgres"
-    .venv\\Scripts\\python -m pytest tests -q
-    docker stop bp-linking-test-pg
+    docker run --rm -d --name bp-linking-mem-pg -p 55437:5432 -e POSTGRES_PASSWORD=test postgres:16
+    $env:TEST_DATABASE_URL = "postgresql://postgres:test@127.0.0.1:55437/postgres"
+    .venv\\Scripts\\python -m pytest tests/test_linking.py -q
+    docker stop bp-linking-mem-pg
 
-Seed posts (conftest.py): 1 Prisma/Alpine solved (fingerprint 51749bd5), 2 ERR_REQUIRE_ESM solved,
-3 pytest/conftest OPEN (78b50510), 4 docker-compose Postgres "connection refused" solved (d25c0b1e).
+Part 2 uses only tests/breakpoint_schema_stub.sql plus the real columns linking reads that the stub may
+lack (posts.fingerprint, posts.solved_at), added by this file's fixture. It does not go through main.py.
+
+Seed posts: 1 Prisma/Alpine solved (fingerprint 51749bd5), 2 ERR_REQUIRE_ESM solved, 3 pytest/conftest
+OPEN (78b50510; title in posts.problem), 4 docker-compose Postgres "connection refused" solved (d25c0b1e).
 """
 
 import json
 import math
+import os
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,9 +26,11 @@ from typing import Any
 
 import pytest
 
+import agent_db
 import linking
 
-SCHEMA_LINKING = Path(__file__).resolve().parents[1] / "schema_linking.sql"
+TEST_DB = os.environ.get("TEST_DATABASE_URL", "")
+STUB_SCHEMA = Path(__file__).with_name("breakpoint_schema_stub.sql")
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +44,7 @@ TOPICS = [
     ("conftest", "pytest", "no module named"),
     ("5432", "connection refused", "postgres"),
     ("rounding", "penny", "cent", "discount"),
+    ("gradle", "daemon"),
 ]
 
 
@@ -70,6 +78,9 @@ class FakeOpenAI:
         texts = params["input"]
         data = [SimpleNamespace(index=i, embedding=fake_vector(t)[:self.dims]) for i, t in enumerate(texts)]
         return SimpleNamespace(data=data, usage=SimpleNamespace(total_tokens=10 * len(texts)))
+
+    def inputs(self) -> list[str]:
+        return [t for c in self.calls for t in c["input"]]
 
 
 class FakeAnthropic:
@@ -148,7 +159,17 @@ def test_problem_text_has_errors_and_tags_but_never_the_solution():
     assert "SECRET FIX" not in text
 
 
-def test_embed_query_cache_and_shape(monkeypatch):
+def test_problem_text_uses_the_problem_column():
+    separate = {"problem": "Gradle build hangs", "description": "Error: daemon disappeared\nother", "tags": []}
+    assert linking.problem_text(separate).startswith("Gradle build hangs\n\nKey errors:\nError: daemon disappeared")
+    # main.py stores "problem\n\ndetails" in description: the title is not repeated
+    joined = {"problem": "Gradle build hangs", "description": "Gradle build hangs\n\nError: daemon disappeared"}
+    assert linking.problem_text(joined).count("Gradle build hangs") == 1
+    assert linking.words_text(separate) == "Gradle build hangs\nError: daemon disappeared\nother"
+    assert linking.words_text(joined) == joined["description"]
+
+
+def test_embed_query_cache_and_shape():
     fake = FakeOpenAI()
     linking.set_clients(openai=fake)
     v1 = linking._embed_query_now("same text", 1.0)
@@ -156,7 +177,7 @@ def test_embed_query_cache_and_shape(monkeypatch):
     assert v1 == v2 and len(v1) == linking.EMBED_DIMS and len(fake.calls) == 1   # second one from the cache
     assert fake.calls[0]["model"] == "text-embedding-3-small" and fake.options[0]["max_retries"] == 0
     linking.set_clients(openai=FakeOpenAI(dims=10))
-    assert linking.embed(["x"], 1.0) is None                       # wrong length: skipped, not stored
+    assert linking.embed(["x"], 1.0) is None                       # wrong length: skipped
     linking.set_clients(openai=FakeOpenAI(fail=True))
     assert linking.embed(["x"], 1.0) is None
 
@@ -169,13 +190,32 @@ def test_slow_query_embedding_is_skipped_in_time():
     assert time.monotonic() - start < 0.6
 
 
-def test_no_openai_key_means_no_stage_3(monkeypatch):
+def test_no_openai_key_means_no_stage_3_and_no_warm_up(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "")
     assert linking.openai_client() is None
     assert linking.start_query_embedding("text") is None
+    assert linking.warm_up() is False and linking.meaning_ready() is False
+    assert linking.cache_status() == {"posts": 0, "warm": False, "warming": False, "last": None}
+    assert linking.index_post(1) is False                          # returns before touching the database
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("LINKING_EMBEDDINGS", "0")
     assert linking.openai_client() is None
+
+
+def test_cache_cosine_order_and_memory_cap(monkeypatch):
+    for pid, text in [(1, "prisma musl"), (2, "pytest conftest"), (3, "postgres 5432")]:
+        assert linking._store(pid, f"h{pid}", fake_vector(text), linking._warm["gen"])
+    near = linking.nearest_posts(fake_vector("pytest no module named"), limit=None)
+    assert near[0][0] == 2 and near[0][1] == pytest.approx(1.0, abs=0.03) and near[-1][1] < 0.2
+    assert [pid for pid, _ in linking.nearest_posts(fake_vector("pytest"), exclude={2})][:1] != [2]
+    assert linking._cache[1][1].typecode == "f"                     # float32: ~6 KB per post
+    monkeypatch.setattr(linking, "MAX_CACHED_POSTS", 3)
+    assert linking._store(9, "h9", fake_vector("gradle"), linking._warm["gen"])   # full: the oldest goes
+    assert sorted(linking._cache) == [2, 3, 9]
+    assert linking._store(1, "h1", fake_vector("prisma"), linking._warm["gen"]) is False   # older than all: skipped
+    stale = linking._warm["gen"]
+    linking.reset()
+    assert linking._store(5, "h5", fake_vector("x"), stale) is False   # a warm-up from before reset() can't refill
 
 
 def test_ai_check_request_shape_and_cost():
@@ -245,119 +285,269 @@ def test_decide_rules():
     assert linking.decide([m(1, ["words"], 0.85)], need_fix=True).decided_by == "fallback"
     assert linking.decide([m(1, ["words", "meaning"], 0.7)], need_fix=True) is None    # too weak without a check
     assert linking.decide([m(1, ["fingerprint"], 1.0, no), m(2, ["words"], 0.5, yes)], need_fix=True).id == 2
+    assert linking.rejected_ids([m(1, ["fingerprint"], 1.0, no), m(2, ["words"], 0.9, wont_fix),
+                                 m(3, ["words"], 0.9, unsure)], need_fix=True) == {1, 2}
+
+
+def test_as_result_shape_and_fallback(monkeypatch):
+    row = {**post(7, "desc", None), "value": "v", "forum": "python", "fingerprint": "abc12345", "useful_count": 2,
+           "visited_count": 3, "created_at": None, "tags": ["python"]}
+    m = linking.Match(row, ["fingerprint", "words"], {"words": 0.4}, score=1.0,
+                      verdict={"same_problem": True, "fix_applies": None, "confidence": 0.9, "reason": "r"})
+    out = m.as_result()
+    assert out["id"] == 7 and out["match"] == "fingerprint" and out["score"] == 1.0 and out["status"] == "open"
+    assert out["stages"] == ["fingerprint", "words"] and out["stage_scores"] == {"words": 0.4}
+    assert out["verdict"]["reason"] == "r" and out["fingerprint"] == "abc12345"
+
+    def broken(row):
+        raise KeyError("some_new_column")
+    monkeypatch.setattr(agent_db, "public_post", broken)                  # agent_db's shape changed
+    out2 = linking.Match(row, ["words"], {"words": 0.4}, score=0.4).as_result()
+    assert out2["id"] == 7 and out2["match"] == "text" and out2["upvotes"] == 0 and out2["fingerprint"] == "abc12345"
+    assert out2["useful_count"] == 2 and out2["status"] == "open"
+
+
+def test_notify_possible_answer_is_a_no_op():
+    m = linking.Match(post(3, solution=None), ["meaning"], score=0.6, decided_by="ai_check")
+    assert linking.notify_possible_answer(3, m, answer_post_id=9, conn=None, exclude_project="p") == 0
 
 
 # ---------------------------------------------------------------------------
-# Part 2: against a throwaway Postgres with pgvector
+# Part 2: against a throwaway Postgres (no extensions)
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session")
-def vector_schema(database: str):
+SEED = [
+    # (problem, description, solution, fingerprint, tags)
+    (None, "Prisma Client could not locate the Query Engine on Alpine\nPrismaClientInitializationError: Prisma "
+     "Client could not locate the Query Engine for runtime \"linux-musl-openssl-3.0.x\".",
+     "Add binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"] to schema.prisma.", "51749bd5", ["docker"]),
+    (None, "Error [ERR_REQUIRE_ESM]: require() of ES Module node-fetch not supported\nnode-fetch v3 is ESM only.",
+     "Use node-fetch@2 or switch the project to ES modules.", None, ["node"]),
+    ("pytest cannot import app from conftest", "ModuleNotFoundError: No module named 'app'\nconftest.py at the "
+     "repo root, code in src/.", None, "78b50510", ["python", "pytest"]),
+    (None, "Postgres connection refused on 5432 in docker compose\npsycopg2.OperationalError: connection to server at "
+     "localhost port 5432 failed: Connection refused\nThe app container uses localhost.",
+     "Use the service name (db) as the host, not localhost.", "d25c0b1e", ["docker"]),
+]
+
+
+@pytest.fixture(scope="module")
+def pg() -> str:
+    if not TEST_DB:
+        pytest.skip("set TEST_DATABASE_URL to a throwaway Postgres to run the database tests")
+    if "supabase" in TEST_DB.lower():
+        pytest.fail("TEST_DATABASE_URL points at Supabase; the stub schema DROPS tables. Use a throwaway Postgres.")
     import psycopg
 
-    with psycopg.connect(database, autocommit=True) as conn:
-        try:
-            conn.execute(SCHEMA_LINKING.read_text(encoding="utf-8"))
-        except psycopg.Error as e:
-            pytest.skip(f"pgvector not available in TEST_DATABASE_URL ({e.__class__.__name__}); "
-                        "use the pgvector/pgvector:pg16 image")
-    yield database
-    with psycopg.connect(database, autocommit=True) as conn:
-        conn.execute("DROP TABLE IF EXISTS agent_post_embeddings")
+    with psycopg.connect(TEST_DB, autocommit=True) as conn:
+        conn.execute(STUB_SCHEMA.read_text(encoding="utf-8"))
+        # Real columns linking reads that the stub may not have yet.
+        conn.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS fingerprint TEXT")
+        conn.execute("ALTER TABLE posts ADD COLUMN IF NOT EXISTS solved_at TIMESTAMPTZ")
+    return TEST_DB
 
 
 @pytest.fixture()
-def linked(vector_schema, client, sql):
-    """The seeded posts, all embedded with the fake OpenAI client."""
-    if not sql("SELECT to_regclass('agent_post_embeddings') AS t")[0]["t"]:   # a test dropped it
-        sql(SCHEMA_LINKING.read_text(encoding="utf-8"))
+def world(pg, monkeypatch):
+    """Fresh seed posts, agent_db pointed at the throwaway database, fake OpenAI (not warm), no AI check."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    def sql(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        with psycopg.connect(pg, row_factory=dict_row, autocommit=True) as conn:
+            cur = conn.execute(query, params)
+            return cur.fetchall() if cur.description else []
+
+    sql("TRUNCATE post_tags, posts, tags, forums RESTART IDENTITY CASCADE")
+    for slug in ("general", "docker", "python", "node"):
+        sql("INSERT INTO forums (slug, name) VALUES (%s, %s)", (slug, slug.title()))
+    for slug in ("general", "docker", "python", "pytest", "node"):
+        sql("INSERT INTO tags (slug) VALUES (%s)", (slug,))
+
+    def add_post(description: str, solution: str | None, fingerprint: str | None = None,
+                 tags: list[str] | None = None, problem: str | None = None) -> int:
+        pid = sql("INSERT INTO posts (description, value, solution, problem, fingerprint, forum_id, status)"
+                  " VALUES (%s, 'v', %s, %s, %s, 1, %s) RETURNING id",
+                  (description, solution, problem, fingerprint, "open" if solution is None else "solved"))[0]["id"]
+        for tag in tags or []:
+            sql("INSERT INTO post_tags (post_id, tag_id) SELECT %s, id FROM tags WHERE slug = %s", (pid, tag))
+        return pid
+
+    for problem, description, solution, fingerprint, tags in SEED:
+        add_post(description, solution, fingerprint, tags, problem)
+
+    monkeypatch.setenv("DATABASE_URL", pg)
+    agent_db.close_pool()
     fake = FakeOpenAI()
     linking.set_clients(openai=fake, anthropic=None)
-    for pid in (1, 2, 3, 4):
-        assert linking.index_post(pid) is True
-    fake.calls.clear()
-    return SimpleNamespace(client=client, openai=fake, sql=sql)
+
+    def connect():
+        return psycopg.connect(pg, row_factory=dict_row)
+
+    yield SimpleNamespace(sql=sql, add_post=add_post, openai=fake, connect=connect)
+    thread = linking._warm["thread"]
+    if thread is not None:
+        thread.join(5)
+    linking.reset()
+    agent_db.close_pool()
 
 
-def add_post(sql, description: str, solution: str | None, fingerprint: str | None = None) -> int:
-    forum = sql("SELECT id FROM forums WHERE slug = 'general'")[0]["id"]
-    pid = sql("INSERT INTO posts (description, value, solution, forum_id, status) VALUES (%s, 'v', %s, %s, %s)"
-              " RETURNING id", (description, solution, forum, "open" if solution is None else "solved"))[0]["id"]
-    if fingerprint:
-        sql("INSERT INTO agent_post_meta (post_id, fingerprint) VALUES (%s, %s)", (pid, fingerprint))
-    return pid
+def warm(world) -> None:
+    assert linking.warm_up(wait=True) is True
+    world.openai.calls.clear()
 
 
-def test_pgvector_round_trip(linked):
-    rows = linked.sql("SELECT post_id, model, dims, vector_dims(embedding) AS n FROM agent_post_embeddings ORDER BY 1")
-    assert [(r["post_id"], r["model"], r["dims"], r["n"]) for r in rows] == \
-        [(i, "text-embedding-3-small", 1536, 1536) for i in (1, 2, 3, 4)]
-    assert linking.index_post(1) is False and linked.openai.calls == []     # unchanged: no new call
-    import agent_db
-    with agent_db.connect() as conn:
-        near = linking.nearest_posts(conn, fake_vector("Prisma query engine musl"))
-        assert near[0][0] == 1 and near[0][1] == pytest.approx(1.0, abs=1e-4)
-        assert [pid for pid, _ in linking.nearest_posts(conn, fake_vector("pytest"), kind="open")] == [3]
-    linked.sql("DELETE FROM posts WHERE id = 2")                              # ON DELETE CASCADE
-    assert [r["post_id"] for r in linked.sql("SELECT post_id FROM agent_post_embeddings ORDER BY 1")] == [1, 3, 4]
+def stages_of(matches: list[linking.Match]) -> dict[int, list[str]]:
+    return {m.id: m.stages for m in matches}
 
 
-def test_search_finds_same_problem_in_other_words(linked):
-    """No shared words worth counting, same meaning: only Stage 3 finds it."""
-    r = linked.client.get("/api/search", params={"error": "ORM binary absent when the slim container boots"}).json()
-    top = r[0]
-    assert top["id"] == 1 and top["match"] == "text" and top["stages"] == ["meaning"]
-    assert top["score"] >= 0.5 and top["stage_scores"]["meaning"] > 0.9
-    assert len(linked.openai.calls) == 1
+def test_warm_up_embeds_all_posts_in_batches_and_logs(world, monkeypatch, caplog):
+    monkeypatch.setattr(linking, "WARM_BATCH", 3)
+    with caplog.at_level("WARNING", logger="linking"):
+        assert linking.warm_up(wait=True) is True
+    status = linking.cache_status()
+    assert status["posts"] == 4 and status["warm"] and not status["warming"]
+    assert [len(c["input"]) for c in world.openai.calls] == [3, 1]                  # batched
+    assert status["last"] == {"posts": 4, "embedded": 4, "seconds": pytest.approx(status["last"]["seconds"]),
+                              "tokens": 40, "cost_usd": pytest.approx(40 * 0.02 / 1e6)}
+    assert "meaning cache ready: 4 posts (4 embedded now)" in caplog.text
+    assert not any("Use the service name" in t or "binaryTargets" in t for t in world.openai.inputs())   # no fixes
+    assert any(t.startswith("pytest cannot import app from conftest") for t in world.openai.inputs())   # problem col
+
+    world.openai.calls.clear()
+    assert linking.warm_up(wait=True) is True and world.openai.calls == []        # nothing changed: no call
+    world.sql("UPDATE posts SET description = description || ' (edited: also on Debian)' WHERE id = 2")
+    world.sql("DELETE FROM posts WHERE id = 1")
+    linking.warm_up(wait=True)
+    assert len(world.openai.inputs()) == 1 and "edited" in world.openai.inputs()[0]   # only the changed post
+    assert sorted(linking._cache) == [2, 3, 4]                                       # the deleted one is gone
 
 
-def test_search_merges_stages(linked):
+def test_warm_up_failure_leaves_stage_3_off_and_retries(world, monkeypatch):
+    world.openai.fail = True
+    assert linking.warm_up(wait=True) is False
+    assert linking.cache_status()["warm"] is False and linking._warm["failed"] > 0
+    with world.connect() as conn:
+        r = linking.find_matches("Error [ERR_REQUIRE_ESM]: require() of ES Module node-fetch", conn=conn)
+    assert r[0].id == 2 and r[0].stages == ["words"]                                # still works without Stage 3
+    monkeypatch.setattr(linking, "WARM_RETRY_S", 0.0)
+    world.openai.fail = False
+    linking.meaning_ready()                                                         # retry starts in the background
+    linking._warm["thread"].join(5)
+    assert linking.cache_status()["warm"] is True
+
+
+def test_index_post_adds_and_refreshes_a_vector(world):
+    pid = world.add_post("Cart total is off by a cent\nWith a 15% discount the order shows 20.00.", None)
+    assert linking.index_post(pid) is True                                           # works before warm-up too
+    assert pid in linking._cache and len(world.openai.calls) == 1
+    assert linking.index_post(pid) is False and len(world.openai.calls) == 1         # unchanged: no call
+    old_hash = linking._cache[pid][0]
+    world.sql("UPDATE posts SET description = 'Gradle daemon disappeared unexpectedly' WHERE id = %s", (pid,))
+    assert linking.index_post(pid) is True and linking._cache[pid][0] != old_hash    # re-embedded
+    near = linking.nearest_posts(fake_vector("gradle daemon"))
+    assert near[0][0] == pid
+    assert linking.index_post(9999) is False                                         # no such post
+    world.openai.fail = True
+    world.sql("UPDATE posts SET description = 'changed again' WHERE id = %s", (pid,))
+    assert linking.index_post(pid) is False                                          # OpenAI down: no crash
+
+
+def test_first_search_starts_warm_up_and_skips_stage_3_until_warm(world):
+    query = "ORM binary absent when the slim container boots"                         # meaning only, no shared words
+    with world.connect() as conn:
+        assert linking.find_matches(query, conn=conn) == []                          # not warm: no Stage 3
+    thread = linking._warm["thread"]
+    assert thread is not None                                                        # ... but warm-up started
+    thread.join(5)
+    assert all(len(c["input"]) == 4 for c in world.openai.calls)                     # only the warm-up called OpenAI
+    with world.connect() as conn:
+        r = linking.find_matches(query, conn=conn)
+    assert r[0].id == 1 and r[0].stages == ["meaning"] and r[0].score >= 0.5
+
+
+def test_stage_3_skipped_without_key(world, monkeypatch):
+    linking.reset()                                                  # no fake client: the env key decides
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    with world.connect() as conn:
+        r = linking.find_matches("Error [ERR_REQUIRE_ESM]: require() of ES Module node-fetch", conn=conn)
+    assert r[0].id == 2 and r[0].stages == ["words"]
+    assert linking.cache_status() == {"posts": 0, "warm": False, "warming": False, "last": None}
+
+
+def test_fingerprint_comes_from_posts_fingerprint(world):
+    with world.connect() as conn:
+        r = linking.find_matches("", fingerprint="51749bd5", conn=conn)
+        assert [m.id for m in r] == [1] and r[0].stages == ["fingerprint"] and r[0].score == 1.0
+        out = r[0].as_result()
+        assert out["match"] == "fingerprint" and out["fingerprint"] == "51749bd5" and out["tags"] == ["docker"]
+        assert linking.find_matches("", fingerprint="51749bd5", kind="open", conn=conn) == []   # 1 is solved
+        assert [m.id for m in linking.find_matches("", fingerprint="78b50510", kind="open", conn=conn)] == [3]
+    world.sql("UPDATE posts SET general_solution = 'Set pythonpath = src' WHERE id = 3")   # general solution counts
+    with world.connect() as conn:
+        assert linking.find_matches("", fingerprint="78b50510", kind="open", conn=conn) == []
+        assert linking.find_matches("", fingerprint="78b50510", conn=conn)[0].post["solution"] == "Set pythonpath = src"
+
+
+def test_words_read_the_problem_column(world):
+    pid = world.add_post("The build stops after a while with no output.", "Raise org.gradle.jvmargs.",
+                         problem="Gradle daemon disappeared unexpectedly")
+    with world.connect() as conn:
+        r = linking.find_matches("Gradle daemon disappeared unexpectedly", conn=conn)
+    assert r[0].id == pid and "words" in r[0].stages
+
+
+def test_search_merges_stages(world):
+    warm(world)
     prisma = ('PrismaClientInitializationError: Prisma Client could not locate the Query Engine for runtime '
               '"linux-musl-openssl-3.0.x".')
-    r = linked.client.get("/api/search", params={"error": prisma, "fingerprint": "51749bd5"}).json()
-    assert r[0]["id"] == 1 and r[0]["match"] == "fingerprint" and r[0]["score"] == 1.0
-    assert r[0]["stages"] == ["fingerprint", "words", "meaning"]
-    r = linked.client.get("/api/search", params={"error": prisma}).json()
-    assert r[0]["stages"] == ["words", "meaning"]
-    assert r[0]["score"] == round(min(max(r[0]["stage_scores"]["words"],
-                                          linking.meaning_score(r[0]["stage_scores"]["meaning"])) + 0.1, 0.99), 3)
+    with world.connect() as conn:
+        r = linking.find_matches(prisma, fingerprint="51749bd5", conn=conn)
+        assert r[0].id == 1 and r[0].score == 1.0 and r[0].stages == ["fingerprint", "words", "meaning"]
+        r = linking.find_matches(prisma, conn=conn)
+    assert r[0].stages == ["words", "meaning"]
+    assert r[0].score == round(min(max(r[0].scores["words"], linking.meaning_score(r[0].scores["meaning"])) + 0.1,
+                                   0.99), 3)
+    assert len(world.openai.calls) == 1                              # one query embedding (the 2nd was cached)
 
 
-def test_search_without_table_or_key_still_works(linked, monkeypatch):
-    query = {"error": "Error [ERR_REQUIRE_ESM]: require() of ES Module node-fetch not supported"}
-    linked.sql("DROP TABLE agent_post_embeddings")
-    linking.reset()
-    linking.set_clients(openai=linked.openai)
-    r = linked.client.get("/api/search", params=query).json()
-    assert r[0]["id"] == 2 and r[0]["stages"] == ["words"] and linked.openai.calls == []   # no wasted call
-    assert linking.index_post(2) is False
-
-    linked.sql(SCHEMA_LINKING.read_text(encoding="utf-8"))
-    linking.reset()                             # back to "no client given": the env key decides
-    monkeypatch.setenv("OPENAI_API_KEY", "")
-    r = linked.client.get("/api/search", params=query).json()
-    assert r[0]["id"] == 2 and r[0]["stages"] == ["words"]
+def test_meaning_respects_kind_tags_and_exclude(world):
+    warm(world)
+    with world.connect() as conn:
+        q = "pytest conftest no module named"
+        assert 3 in stages_of(linking.find_matches(q, kind="open", conn=conn))
+        assert 3 not in stages_of(linking.find_matches(q, kind="solved", conn=conn))
+        assert 3 not in stages_of(linking.find_matches(q, tags=["node"], conn=conn))
+        assert 3 not in stages_of(linking.find_matches(q, exclude_ids={3}, conn=conn))
 
 
-def test_search_stays_fast_when_embedding_is_slow(linked):
-    linked.openai.delay = 3.0
+def test_search_stays_fast_when_embedding_is_slow(world):
+    warm(world)
+    world.openai.delay = 3.0
     start = time.monotonic()
-    r = linked.client.get("/api/search", params={"error": "Error [ERR_REQUIRE_ESM]: require() of ES Module"}).json()
+    with world.connect() as conn:
+        r = linking.find_matches("Error [ERR_REQUIRE_ESM]: require() of ES Module", conn=conn)
     assert time.monotonic() - start < linking.QUERY_EMBED_TIMEOUT_S + 0.7
-    assert r[0]["id"] == 2 and "meaning" not in r[0]["stages"]
+    assert r[0].id == 2 and "meaning" not in r[0].stages
 
 
-def test_search_never_calls_the_ai_check(linked):
+def test_search_never_calls_the_ai_check_and_never_writes(world):
+    warm(world)
     fake = FakeAnthropic()
     linking.set_clients(anthropic=fake)
-    linked.client.get("/api/search", params={"error": "pytest conftest No module named app", "fingerprint": "78b50510"})
-    assert fake.calls == []
+    with world.connect() as conn:
+        conn.execute("SET default_transaction_read_only = on")      # any write would raise here
+        conn.commit()
+        r = linking.find_matches("pytest conftest No module named app", fingerprint="78b50510", conn=conn)
+        assert r[0].id == 3 and fake.calls == []
+        pid = world.add_post("brand new: gradle daemon", None)
+        assert linking.index_post(pid, conn) is True                 # read-only connection is enough
 
 
-def test_logic_bug_without_error_message_links_by_meaning(linked):
-    question = add_post(linked.sql, "Cart total is off by a cent\nWith a 15% discount the order shows 20.00, "
-                        "expected 19.99. Tests pass for whole numbers.", None)
-    linking.index_post(question)
+def test_logic_bug_without_error_message_links_by_meaning(world):
+    question = world.add_post("Cart total is off by a cent\nWith a 15% discount the order shows 20.00, "
+                              "expected 19.99. Tests pass for whole numbers.", None)
+    warm(world)
     fake = FakeAnthropic()
     linking.set_clients(anthropic=fake)
     new = {"description": "Receipt sum differs by a penny after percentage discounts\nWe applied rounding per "
@@ -368,11 +558,26 @@ def test_logic_bug_without_error_message_links_by_meaning(linked):
     assert "Round once" in fake.calls[0]["messages"][0]["content"]          # the check saw the new fix
 
 
-def test_same_error_different_cause_is_not_linked(linked):
+def test_ai_check_reads_only_top_3_in_the_funnel(world):
+    for i in range(5):
+        world.add_post(f"pytest conftest cannot import module variant {i}\nModuleNotFoundError: No module named "
+                       f"'pkg{i}'", None, tags=["python"])
+    warm(world)
+    fake = FakeAnthropic(answer=lambda p: {"same_problem": False, "fix_applies": "no_fix", "confidence": 0.9,
+                                           "reason": "different module"})
+    linking.set_clients(anthropic=fake)
+    rejected: set[int] = set()
+    dup = linking.find_duplicate_question({"description": "pytest conftest cannot import module\n"
+                                           "ModuleNotFoundError: No module named 'app'"}, rejected=rejected)
+    assert dup is None and len(fake.calls) == 3 and len(rejected) == 3
+
+
+def test_same_error_different_cause_is_not_linked(world):
     """Same 'connection refused' error and fingerprint, different cause: the AI check says no."""
-    question = add_post(linked.sql, "Postgres connection refused on 5432 in docker compose\npsycopg2.OperationalError:"
-                        " connection to server at localhost port 5432 failed: Connection refused", None, "d25c0b1e")
-    linking.index_post(question)
+    question = world.add_post("Postgres connection refused on 5432 in docker compose\npsycopg2.OperationalError:"
+                              " connection to server at localhost port 5432 failed: Connection refused", None,
+                              "d25c0b1e")
+    warm(world)
     new = {"description": "Connection refused on 5432 running locally on a Mac\npsycopg2.OperationalError: "
            "connection to server at localhost port 5432 failed: Connection refused\nNo Docker; the Postgres "
            "service was simply not started.", "solution": "brew services start postgresql@16",
@@ -380,26 +585,36 @@ def test_same_error_different_cause_is_not_linked(linked):
     linking.set_clients(anthropic=FakeAnthropic(answer=lambda p: {
         "same_problem": False, "fix_applies": "no", "confidence": 0.85,
         "reason": "Docker service name vs a stopped local server."}))
-    assert linking.link_new_solution(new) is None
+    rejected: set[int] = set()
+    assert linking.link_new_solution(new, rejected=rejected) is None and question in rejected
     linking.set_clients(anthropic=None)                                     # no AI check: fingerprint fallback
     fallback = linking.link_new_solution(new)
     assert fallback is not None and fallback.id == question and fallback.decided_by == "fallback"
 
 
-def test_duplicate_question(linked):
+def test_duplicate_question(world):
+    warm(world)
     fake = FakeAnthropic(answer=lambda p: {"same_problem": existing_id(p) == 3, "fix_applies": "no_fix",
                                            "confidence": 0.8, "reason": "same import error"})
     linking.set_clients(anthropic=fake)
-    dup = linking.find_duplicate_question({
-        "description": "pytest fails before collecting: conftest cannot import app\nModuleNotFoundError: "
-                       "No module named 'app'", "fingerprint": "78b50510", "tags": ["python"]})
+    with world.connect() as conn:
+        dup = linking.find_duplicate_question({
+            "description": "pytest fails before collecting: conftest cannot import app\nModuleNotFoundError: "
+                           "No module named 'app'", "fingerprint": "78b50510", "tags": ["python"]}, conn=conn)
     assert dup is not None and dup.id == 3 and dup.verdict["fix_applies"] is None
     assert all("<fix" not in c["messages"][0]["content"] for c in fake.calls)
     # A solved post is never a duplicate Open Question.
     assert linking.find_duplicate_question({"description": "ERR_REQUIRE_ESM require() of ES Module node-fetch"}) is None
 
 
-def test_link_functions_never_raise(linked, monkeypatch):
+def test_general_tag_does_not_hide_questions(world):
+    linking.set_clients(anthropic=FakeAnthropic())
+    dup = linking.find_duplicate_question({"description": "pytest conftest cannot import app\nModuleNotFoundError: "
+                                           "No module named 'app'", "tags": ["general"]})
+    assert dup is not None and dup.id == 3
+
+
+def test_link_functions_never_raise(world, monkeypatch):
     def broken(*a, **k):
         raise RuntimeError("database gone")
     monkeypatch.setattr(linking, "find_matches", broken)
@@ -409,72 +624,29 @@ def test_link_functions_never_raise(linked, monkeypatch):
     assert linking.index_post(1) is False
 
 
-def test_notify_possible_answer(linked):
-    linked.sql("UPDATE agent_post_meta SET project = 'proj-asker' WHERE post_id = 3")
-    linked.sql("INSERT INTO agent_watchers (post_id, project) VALUES (3, 'proj-later')")
-    m = linking.Match(post(3, solution=None), ["meaning"], score=0.6, decided_by="ai_check")
-    assert linking.notify_possible_answer(3, m, answer_post_id=9) == 2
-    for project in ("proj-asker", "proj-later"):
-        got = linked.client.get("/api/updates", params={"project": project}).json()
-        assert len(got) == 1 and got[0]["post_id"] == 3 and "Possible answer" in got[0]["message"]
-        assert "not verified" in got[0]["message"]
+def test_cache_is_thread_safe_under_concurrent_use(world):
+    warm(world)
+    errors: list[Exception] = []
 
+    def writer(base: int) -> None:
+        try:
+            for i in range(200):
+                linking._store(base + i, "h", fake_vector("gradle daemon"), linking._warm["gen"])
+                linking.forget(base + i - 1)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
 
-# ---------------------------------------------------------------------------
-# Part 3: POST /api/posts uses linking first, the teammate's matcher second (backend/main.py, marked LINKING)
-# ---------------------------------------------------------------------------
+    def reader() -> None:
+        try:
+            for _ in range(50):
+                linking.nearest_posts(fake_vector("prisma musl"), limit=None)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
 
-AUTH = {"X-API-Key": "test-key"}   # conftest.API_KEY
-
-
-def test_create_post_links_a_solution_in_other_words(linked):
-    """No open_question_id, few shared words: linking finds question 3 by meaning, the AI check agrees, and the
-    asker hears "Possible answer", not "solved"."""
-    linked.sql("UPDATE agent_post_meta SET project = 'proj-asker' WHERE post_id = 3")
-    fake = FakeAnthropic(answer=lambda p: {"same_problem": existing_id(p) == 3, "fix_applies": "yes",
-                                           "confidence": 0.9, "reason": "same import problem"})
-    linking.set_clients(anthropic=fake)
-    r = linked.client.post("/api/posts", json={
-        "description": "The test runner stops in conftest\nOur pytest setup could not see the package folder.",
-        "value": "v", "solution": "Add pythonpath = src to pytest.ini.", "tags": ["python"], "project": "proj-solver",
-    }, headers=AUTH).json()
-    assert r["attached_to_open_question"] is True and r["post_id"] == 3 and r["linked_by"] == "ai_check"
-    got = linked.client.get("/api/updates", params={"project": "proj-asker"}).json()
-    assert len(got) == 1 and "Possible answer" in got[0]["message"] and "not verified" in got[0]["message"]
-    assert linked.client.get("/api/updates", params={"project": "proj-solver"}).json() == []
-
-
-def test_create_post_ai_no_beats_the_fingerprint_fallback(linked):
-    """Same fingerprint, different cause: the AI check says no, so neither linking nor the teammate's
-    fingerprint rule attaches it. A new post is made and embedded after the response."""
-    question = add_post(linked.sql, "Postgres connection refused on 5432 in docker compose\npsycopg2.OperationalError:"
-                        " connection to server at localhost port 5432 failed: Connection refused", None, "d25c0b1e")
-    linking.set_clients(anthropic=FakeAnthropic(answer=lambda p: {
-        "same_problem": False, "fix_applies": "no", "confidence": 0.9, "reason": "a stopped local server"}))
-    r = linked.client.post("/api/posts", json={
-        "description": "Connection refused on 5432 on a Mac\npsycopg2.OperationalError: connection to server at "
-                       "localhost port 5432 failed: Connection refused\nNo Docker; Postgres was not started.",
-        "value": "v", "solution": "brew services start postgresql@16", "fingerprint": "d25c0b1e",
-    }, headers=AUTH).json()
-    assert r["attached_to_open_question"] is False and r["post_id"] not in (question, 4) and not r.get("linked_by")
-    assert linked.sql("SELECT solution FROM posts WHERE id = %s", (question,))[0]["solution"] is None
-    assert linked.sql("SELECT 1 FROM agent_post_embeddings WHERE post_id = %s", (r["post_id"],))   # index_post ran
-
-
-def test_create_post_duplicate_open_question_by_linking(linked):
-    linking.set_clients(anthropic=FakeAnthropic(answer=lambda p: {
-        "same_problem": existing_id(p) == 3, "fix_applies": "no_fix", "confidence": 0.8, "reason": "same"}))
-    r = linked.client.post("/api/posts", json={
-        "description": "pytest fails before collecting: conftest cannot import app\nModuleNotFoundError: "
-                       "No module named 'app'", "value": "v", "forum": "docker", "tags": ["python"],
-        "project": "proj-late"}, headers=AUTH).json()
-    assert r["duplicate_of"] == 3                      # found across forums (3 is in "python", asked in "docker")
-    assert {"project": "proj-late"} in linked.sql("SELECT project FROM agent_watchers WHERE post_id = 3")
-
-
-def test_general_tag_does_not_hide_questions(linked):
-    """/api gives "general" to posts with no valid tag; that must not filter out question 3 (python)."""
-    linking.set_clients(anthropic=FakeAnthropic())
-    dup = linking.find_duplicate_question({"description": "pytest conftest cannot import app\nModuleNotFoundError: "
-                                           "No module named 'app'", "tags": ["general"]})
-    assert dup is not None and dup.id == 3
+    threads = [threading.Thread(target=writer, args=(1000 * k,)) for k in (1, 2)] + \
+              [threading.Thread(target=reader) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and {1, 2, 3, 4} <= set(linking._cache)

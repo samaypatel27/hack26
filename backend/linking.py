@@ -6,23 +6,31 @@ Used in three places:
   3. A new Open Question might repeat an existing one     -> find_duplicate_question(question)
 
 One funnel, cheap to careful:
-  Stage 1  fingerprint   same 8-hex error ID (plugin/hook/struggles.py fingerprint()). Instant.
-  Stage 2  words         word overlap (matching.text_score). Instant.
-  Stage 3  meaning       embedding cosine similarity with pgvector. One small OpenAI call for the query.
+  Stage 1  fingerprint   same 8-hex error ID in posts.fingerprint (plugin/hook/struggles.py). Instant.
+  Stage 2  words         word overlap (matching.text_score) on problem + description. Instant.
+  Stage 3  meaning       embedding cosine similarity against an IN-MEMORY cache of post vectors.
+                         One small OpenAI call for the query. No database table, no pgvector.
   merge                  one score per post (see combined_score), best first
   Stage 4  AI check      Claude Haiku 5.5 reads the top few candidates. Only when confirm=True:
                          attaching solutions and flagging duplicates, never on the hook's 2s search.
 
-Every stage after Stage 1 can be missing and the others still work: no OPENAI_API_KEY, no
-agent_post_embeddings table (schema_linking.sql not applied), a slow or failed embedding call, no
-ANTHROPIC_API_KEY or a failed AI check. Each such skip is logged once per process.
+The meaning cache: {post_id: (content hash, vector)} of each post's problem text, filled by a background
+warm-up (warm_up(), also started by the first search) and kept fresh by index_post(post_id) for each
+new post plus a quiet re-scan every few minutes. It lives only in this process: a restart empties it and
+the next warm-up embeds every post again (about $0.0001 for the demo's ~70 posts).
 
-Nothing here creates or changes tables. schema_linking.sql is applied by hand.
+Every stage after Stage 1 can be missing and the others still work: no OPENAI_API_KEY, the cache not
+warm yet, a slow or failed embedding call, no ANTHROPIC_API_KEY or a failed AI check. Each such skip is
+logged once per process.
+
+Linking only READS the database. It never creates tables and never writes rows.
 """
 
+import array
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -33,6 +41,8 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from operator import mul
 from typing import Any
 
 import psycopg
@@ -49,7 +59,7 @@ log = logging.getLogger("linking")
 
 # https://developers.openai.com/api/docs/guides/embeddings and .../docs/pricing
 EMBED_MODEL = "text-embedding-3-small"
-EMBED_DIMS = 1536                    # the model's default length; schema_linking.sql uses vector(1536)
+EMBED_DIMS = 1536                    # the model's default length
 EMBED_PRICE_PER_MTOK = 0.02          # US$ per 1M input tokens
 
 CHECK_MODEL = "claude-haiku-5-5"
@@ -63,7 +73,8 @@ MEANING_SHOW_COSINE = 0.55   # below this cosine similarity a post is not a mean
 MEANING_SAME_COSINE = 0.75   # this cosine maps to score 0.5, the hook's "same problem" line
 AGREE_BONUS = 0.10           # words and meaning both found it: two independent signals agree
 MAX_TEXT_SCORE = 0.99        # 1.0 is kept for an exact fingerprint
-MEANING_CANDIDATES = 20      # nearest posts fetched from pgvector
+MEANING_CANDIDATES = 20      # at most this many posts are added by Stage 3 alone
+MEANING_POOL = 60            # nearest posts looked up in the database before the kind/tag filter
 
 CHECK_TOP_K = 3              # Stage 4 reads at most this many candidates
 CHECK_MIN_SCORE = 0.3        # ... and only those scoring at least this
@@ -72,12 +83,17 @@ FALLBACK_MIN_SCORE = 0.8     # AI check unavailable: link only on a fingerprint 
 
 QUERY_EMBED_TIMEOUT_S = float(os.environ.get("LINKING_QUERY_EMBED_TIMEOUT_S", "0.8"))
 INDEX_EMBED_TIMEOUT_S = 10.0
+WARM_EMBED_TIMEOUT_S = 30.0  # per warm-up batch
+WARM_BATCH = 100             # texts per warm-up embedding call (OpenAI allows up to 2048)
+WARM_RETRY_S = 60.0          # a failed warm-up is tried again after this long
+REFRESH_S = float(os.environ.get("LINKING_REFRESH_S", "600"))   # re-scan posts for new/changed text
+MAX_CACHED_POSTS = int(os.environ.get("LINKING_MAX_CACHED_POSTS", "10000"))   # ~6 KB each: ~60 MB max
 CHECK_TIMEOUT_S = float(os.environ.get("LINKING_CHECK_TIMEOUT_S", "6.0"))
 CHECK_MAX_TOKENS = 1024
 MAX_EMBED_CHARS = 6000       # ~1,500 tokens: a long write-up's start says what the problem is
 MAX_CHECK_CHARS = 3000       # per report sent to the AI check
 QUERY_CACHE_SIZE = 256
-TABLE_RECHECK_S = 60.0       # how often to look again for the table after it was missing
+CANDIDATE_LIMIT = 500        # Stage 2 looks at most at this many recent posts
 
 # Same idea as plugin/hook/struggles.py ERROR_LINE_RE: lines that look like an error.
 ERROR_LINE_RE = re.compile(
@@ -95,7 +111,7 @@ KINDS = ("any", "solved", "open")
 
 @dataclass
 class Match:
-    post: dict[str, Any]                                  # an agent_db POST_SELECT row
+    post: dict[str, Any]                                  # a POST_SELECT row (post_cards + fingerprint)
     stages: list[str] = field(default_factory=list)       # "fingerprint" | "words" | "meaning", in that order
     scores: dict[str, float] = field(default_factory=dict)  # raw: words = word overlap, meaning = cosine
     score: float = 0.0                                    # combined, 0 to 1 (combined_score)
@@ -109,11 +125,83 @@ class Match:
     def as_result(self) -> dict[str, Any]:
         """The GET /api/search shape (docs/hook-contracts.md) plus `stages` and `stage_scores`.
         `match` stays "fingerprint" or "text" ("text" = found by words and/or meaning)."""
-        out = {**db.public_post(self.post), "match": "fingerprint" if "fingerprint" in self.stages else "text",
+        out = {**_public(self.post), "match": "fingerprint" if "fingerprint" in self.stages else "text",
                "score": self.score, "stages": list(self.stages), "stage_scores": dict(self.scores)}
         if self.verdict is not None:
             out["verdict"] = dict(self.verdict)
         return out
+
+
+def _public(row: dict[str, Any]) -> dict[str, Any]:
+    """agent_db.public_post when it can read this row; a minimal copy of that shape if not."""
+    try:
+        return db.public_post(row)
+    except Exception:  # noqa: BLE001 - agent_db's shape changed: still answer the search
+        created = row.get("created_at")
+        if isinstance(created, datetime):
+            created = created.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return {
+            "id": row["id"], "description": row.get("description"), "value": row.get("value"),
+            "solution": row.get("solution"), "tags": list(row.get("tags") or []),
+            "status": "open" if row.get("solution") is None else "solved",
+            "upvotes": row.get("post_votes") or 0, "useful_count": row.get("useful_count") or 0,
+            "visited_count": row.get("visited_count") or 0, "fingerprint": row.get("fingerprint"),
+            "command": None, "forum": row.get("forum"), "created_at": created,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Reading posts (the real tables: post_cards view + posts.fingerprint). Read-only.
+# ---------------------------------------------------------------------------
+
+# post_cards has the card columns (tags, problem, description, solution, useful_count, ...) but not the
+# fingerprint, so it is joined from posts. `solution` is the general solution when there is one: the same
+# columns and rule as agent_db.POST_SELECT / agent_db.OPEN, so agent_db.public_post reads these rows.
+POST_SELECT = (
+    "SELECT c.id, c.description, c.value, COALESCE(c.general_solution, c.solution) AS solution, c.problem,"
+    " c.forum, c.tags, c.author, c.post_votes, c.created_at, c.useful_count, c.visited_count, p.fingerprint"
+    " FROM post_cards c JOIN posts p ON p.id = c.id"
+)
+OPEN = "COALESCE(c.general_solution, c.solution) IS NULL"
+WARM_SELECT = "SELECT c.id, c.problem, c.description, c.tags FROM post_cards c ORDER BY c.id DESC LIMIT %s"
+
+
+def posts_with_fingerprint(conn: psycopg.Connection, fingerprint: str, open_only: bool = False) -> list[dict[str, Any]]:
+    """Oldest first, so the original Open Question wins over later ones."""
+    sql = POST_SELECT + " WHERE p.fingerprint = %s" + (" AND " + OPEN if open_only else "")
+    return conn.execute(sql + " ORDER BY c.created_at, c.id", (fingerprint,)).fetchall()
+
+
+def candidate_posts(conn: psycopg.Connection, open_only: bool = False,
+                    tags: list[str] | None = None) -> list[dict[str, Any]]:
+    """The most recent CANDIDATE_LIMIT posts (optionally only open / sharing a tag) for Stage 2."""
+    where: list[str] = []
+    params: list[Any] = []
+    if open_only:
+        where.append(OPEN)
+    if tags:
+        where.append("c.tags && %s::text[]")
+        params.append(tags)
+    sql = POST_SELECT + (" WHERE " + " AND ".join(where) if where else "")
+    params.append(CANDIDATE_LIMIT)
+    return conn.execute(sql + " ORDER BY c.created_at DESC, c.id DESC LIMIT %s", params).fetchall()
+
+
+def posts_by_ids(conn: psycopg.Connection, ids: list[int]) -> list[dict[str, Any]]:
+    """These posts (any age), in no set order."""
+    if not ids:
+        return []
+    return conn.execute(POST_SELECT + " WHERE c.id = ANY(%s)", (list(ids),)).fetchall()
+
+
+def words_text(post: dict[str, Any]) -> str:
+    """The text Stage 2 compares: the problem title (if it is not already the description's first line)
+    and the description."""
+    description = post.get("description") or ""
+    problem = (post.get("problem") or "").strip()
+    if problem and not description.lstrip().startswith(problem):
+        return f"{problem}\n{description}"
+    return description
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +225,14 @@ def set_clients(openai: Any = _UNSET, anthropic: Any = _UNSET) -> None:
 
 
 def reset() -> None:
-    """Forget clients, caches and 'logged once' notes (tests)."""
+    """Forget clients, caches, the meaning cache and 'logged once' notes (tests)."""
     _overrides.update(openai=_UNSET, anthropic=_UNSET)
     _built.clear()
     _logged.clear()
     _query_cache.clear()
-    _table_state.update(ok=None, checked=0.0)
+    with _cache_lock:
+        _cache.clear()
+        _warm.update(gen=_warm["gen"] + 1, warm=False, thread=None, started=0.0, done=0.0, failed=0.0, last=None)
 
 
 def _note(key: str, message: str, *args: Any) -> None:
@@ -201,12 +291,16 @@ def anthropic_client() -> Any | None:
 def problem_text(post: dict[str, Any]) -> str:
     """Headline + key error lines + description + tags. Never the solution: we match problems.
 
-    The error lines are repeated near the top so a long write-up still "means" its error.
+    The headline is posts.problem, or the description's first line. The error lines are repeated near
+    the top so a long write-up still "means" its error.
     """
     description = (post.get("description") or "").strip()
+    problem = (post.get("problem") or "").strip()
+    if problem and description.startswith(problem):
+        description = description[len(problem):].strip()   # main.py stores "problem\n\ndescription"
     lines = description.splitlines()
-    headline = (post.get("problem") or (lines[0] if lines else "")).strip()
-    errors = [ln.strip() for ln in lines[1:] if ERROR_LINE_RE.search(ln)][:8]
+    headline = problem or (lines[0].strip() if lines else "")
+    errors = [ln.strip() for ln in (lines if problem else lines[1:]) if ERROR_LINE_RE.search(ln)][:8]
     parts = [headline]
     if errors:
         parts.append("Key errors:\n" + "\n".join(errors))
@@ -221,20 +315,15 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(f"{EMBED_MODEL}\n{text}".encode()).hexdigest()[:32]
 
 
-def to_pgvector(vector: list[float]) -> str:
-    """pgvector's text form, e.g. '[0.1,0.2]' (no extra Python package needed)."""
-    return "[" + ",".join(f"{x:.7g}" for x in vector) + "]"
-
-
 # ---------------------------------------------------------------------------
-# Embeddings (Stage 3)
+# Embedding calls (Stage 3)
 # ---------------------------------------------------------------------------
 
 _query_cache: "OrderedDict[str, list[float]]" = OrderedDict()
 
 
-def embed(texts: list[str], timeout: float) -> list[list[float]] | None:
-    """One OpenAI call for all texts, or None (no key, error, timeout). Logs the cost."""
+def _embed_call(texts: list[str], timeout: float) -> tuple[list[list[float]], int] | None:
+    """One OpenAI call for all texts: (vectors, tokens used), or None (no key, error, timeout)."""
     client = openai_client()
     if client is None or not texts:
         return None
@@ -249,6 +338,15 @@ def embed(texts: list[str], timeout: float) -> list[list[float]] | None:
         _note("embed-shape", "embedding call returned an unexpected shape; Stage 3 skipped")
         return None
     tokens = getattr(getattr(response, "usage", None), "total_tokens", 0) or 0
+    return vectors, tokens
+
+
+def embed(texts: list[str], timeout: float) -> list[list[float]] | None:
+    """One OpenAI call for all texts, or None (no key, error, timeout). Logs the cost."""
+    out = _embed_call(texts, timeout)
+    if out is None:
+        return None
+    vectors, tokens = out
     log.info("linking: embedded %d text(s), %d tokens, ~$%.6f", len(texts), tokens,
              tokens * EMBED_PRICE_PER_MTOK / 1e6)
     return vectors
@@ -256,9 +354,10 @@ def embed(texts: list[str], timeout: float) -> list[list[float]] | None:
 
 def _embed_query_now(text: str, timeout: float) -> list[float] | None:
     key = content_hash(text)
-    if key in _query_cache:
-        _query_cache.move_to_end(key)
-        return _query_cache[key]
+    with _lock:
+        if key in _query_cache:
+            _query_cache.move_to_end(key)
+            return _query_cache[key]
     vectors = embed([text], timeout)
     if not vectors:
         return None
@@ -291,77 +390,154 @@ def wait_for(future: Any | None, deadline: float) -> list[float] | None:
 
 
 # ---------------------------------------------------------------------------
-# The embeddings table (schema_linking.sql)
+# The in-memory meaning cache
 # ---------------------------------------------------------------------------
 
-_table_state: dict[str, Any] = {"ok": None, "checked": 0.0}
+# post_id -> (content_hash of its problem text, unit-length float32 vector). Vectors are never changed
+# in place: an update replaces the whole entry, so readers can use a snapshot without the lock.
+_cache: dict[int, tuple[str, array.array]] = {}
+_cache_lock = threading.Lock()
+# gen: bumped by reset() so a warm-up started before it doesn't refill the cache afterwards.
+_warm: dict[str, Any] = {"gen": 0, "warm": False, "thread": None, "started": 0.0, "done": 0.0, "failed": 0.0,
+                         "last": None}
+
+_sumprod = getattr(math, "sumprod", None)   # Python 3.12+: about 2x faster than sum(map(mul, ...))
 
 
-@contextmanager
-def _savepoint(conn: psycopg.Connection) -> Iterator[None]:
-    """A failed linking query must not break the caller's transaction."""
-    with conn.transaction():
-        yield
+def _dot(a: Any, b: Any) -> float:
+    return _sumprod(a, b) if _sumprod else sum(map(mul, a, b))
 
 
-def embeddings_ready(conn: psycopg.Connection) -> bool:
-    """True once agent_post_embeddings exists. A 'missing' answer is re-checked every minute, so
-    applying schema_linking.sql starts Stage 3 without a restart."""
-    if _table_state["ok"] or time.monotonic() - _table_state["checked"] < TABLE_RECHECK_S:
-        return bool(_table_state["ok"])
+def _unit(vector: list[float]) -> array.array:
+    norm = math.sqrt(sum(x * x for x in vector)) or 1.0
+    return array.array("f", (x / norm for x in vector))
+
+
+def _store(post_id: int, digest: str, vector: list[float], gen: int) -> bool:
+    """Put one vector in the cache. Over MAX_CACHED_POSTS the oldest post (lowest id) makes room."""
+    unit = _unit(vector)
+    with _cache_lock:
+        if gen != _warm["gen"]:
+            return False
+        if post_id not in _cache and len(_cache) >= MAX_CACHED_POSTS:
+            oldest = min(_cache)
+            if oldest > post_id:
+                return False
+            del _cache[oldest]
+        _cache[post_id] = (digest, unit)
+    return True
+
+
+def forget(post_id: int) -> None:
+    """Drop a post's vector (e.g. the post was deleted)."""
+    with _cache_lock:
+        _cache.pop(post_id, None)
+
+
+def cache_status() -> dict[str, Any]:
+    """{posts, warm, warming, last} for logs, the benchmark script and tests. last = the latest finished
+    warm-up: {posts, embedded, seconds, tokens, cost_usd}, or None."""
+    with _cache_lock:
+        thread = _warm["thread"]
+        return {"posts": len(_cache), "warm": _warm["warm"], "warming": bool(thread and thread.is_alive()),
+                "last": _warm.get("last")}
+
+
+def nearest_posts(vector: list[float], limit: int | None = MEANING_CANDIDATES,
+                  exclude: set[int] | None = None) -> list[tuple[int, float]]:
+    """[(post_id, cosine similarity)] for the cached posts, closest first. Pure Python: about 20 us per
+    post (2,000 posts ~ 40 ms)."""
+    query = _unit(vector)
+    with _cache_lock:
+        items = list(_cache.items())
+    skip = exclude or set()
+    scored = [(pid, round(_dot(query, vec), 4)) for pid, (_, vec) in items if pid not in skip]
+    scored.sort(key=lambda pc: (-pc[1], -pc[0]))
+    return scored if limit is None else scored[:limit]
+
+
+def _warm_run(gen: int) -> None:
+    """Embed every post whose problem text is new or changed since it was cached. Read-only on the DB."""
+    start = time.monotonic()
     try:
-        with _savepoint(conn):
-            row = conn.execute("SELECT to_regclass('agent_post_embeddings') IS NOT NULL AS ok").fetchone()
-        ok = bool(row and row["ok"])
-    except Exception as e:  # noqa: BLE001
-        log.info("linking: could not look for agent_post_embeddings: %s", e)
-        ok = False
-    _table_state.update(ok=ok, checked=time.monotonic())
-    if not ok:
-        _note("table", "Stage 3 (meaning) skipped: table agent_post_embeddings is missing "
-                       "(apply backend/schema_linking.sql)")
-    return ok
+        with db.connect() as conn:
+            rows = conn.execute(WARM_SELECT, (MAX_CACHED_POSTS,)).fetchall()
+        seen: set[int] = set()
+        todo: list[tuple[int, str, str]] = []
+        with _cache_lock:
+            current = {pid: digest for pid, (digest, _) in _cache.items()}
+        for row in rows:
+            seen.add(row["id"])
+            text = problem_text(row)
+            digest = content_hash(text)
+            if text and current.get(row["id"]) != digest:
+                todo.append((row["id"], text, digest))
+        tokens = 0
+        for i in range(0, len(todo), WARM_BATCH):
+            batch = todo[i:i + WARM_BATCH]
+            out = _embed_call([text for _, text, _ in batch], WARM_EMBED_TIMEOUT_S)
+            if out is None:
+                raise RuntimeError(f"embedding call failed after {i} of {len(todo)} post(s)")
+            vectors, used = out
+            tokens += used
+            for (pid, _, digest), vector in zip(batch, vectors):
+                _store(pid, digest, vector, gen)
+        newest = max(seen, default=0)
+        with _cache_lock:
+            if gen != _warm["gen"]:
+                return
+            for pid in [p for p in _cache if p not in seen and p < newest]:   # deleted posts
+                del _cache[pid]
+            first = not _warm["warm"]
+            stats = {"posts": len(_cache), "embedded": len(todo), "seconds": round(time.monotonic() - start, 2),
+                     "tokens": tokens, "cost_usd": round(tokens * EMBED_PRICE_PER_MTOK / 1e6, 8)}
+            _warm.update(warm=True, done=time.monotonic(), failed=0.0, last=stats)
+        if first or todo:
+            log.warning("linking: meaning cache %s: %d posts (%d embedded now) in %.1fs, %d tokens, ~$%.6f",
+                        "ready" if first else "refreshed", stats["posts"], stats["embedded"], stats["seconds"],
+                        tokens, stats["cost_usd"])
+    except Exception as e:  # noqa: BLE001 - no database or no OpenAI: Stage 3 waits for the next try
+        with _cache_lock:
+            if gen == _warm["gen"]:
+                _warm["failed"] = time.monotonic()
+        _note(f"warm-fail-{type(e).__name__}", "meaning cache warm-up failed (Stage 3 skipped until it "
+              "works; retried in %ds): %s", int(WARM_RETRY_S), e)
 
 
-def nearest_posts(conn: psycopg.Connection, vector: list[float], kind: str = "any",
-                  limit: int = MEANING_CANDIDATES) -> list[tuple[int, float]]:
-    """[(post_id, cosine similarity)] closest first. [] if the query fails."""
-    where = {"any": "", "solved": " AND p.solution IS NOT NULL", "open": " AND p.solution IS NULL"}[kind]
-    sql = ("SELECT e.post_id, 1 - (e.embedding <=> %(v)s::vector) AS cosine FROM agent_post_embeddings e"
-           " JOIN posts p ON p.id = e.post_id WHERE e.model = %(m)s" + where +
-           " ORDER BY e.embedding <=> %(v)s::vector LIMIT %(n)s")
-    try:
-        with _savepoint(conn):
-            rows = conn.execute(sql, {"v": to_pgvector(vector), "m": EMBED_MODEL, "n": limit}).fetchall()
-    except Exception as e:  # noqa: BLE001 - e.g. the table was dropped: skip Stage 3
-        _table_state.update(ok=False, checked=time.monotonic())
-        _note("nearest", "Stage 3 (meaning) query failed, skipping it: %s", e)
-        return []
-    return [(r["post_id"], float(r["cosine"])) for r in rows]
+def warm_up(wait: bool = False) -> bool:
+    """Fill the meaning cache in a background thread (call once when the app starts; the first search
+    also starts it). Safe to call often: only one warm-up runs at a time. Returns whether the cache is
+    warm (with wait=True, after this warm-up finished). Without an OpenAI key it does nothing."""
+    if openai_client() is None:
+        return False
+    with _cache_lock:
+        thread = _warm["thread"]
+        if thread is None or not thread.is_alive():
+            thread = threading.Thread(target=_warm_run, args=(_warm["gen"],), name="linking-warm-up", daemon=True)
+            _warm.update(thread=thread, started=time.monotonic())
+            thread.start()
+    if wait:
+        thread.join()
+    return bool(_warm["warm"])
 
 
-def posts_by_ids(conn: psycopg.Connection, ids: list[int]) -> list[dict[str, Any]]:
-    return db.posts_by_ids(conn, ids)
-
-
-def store_embedding(conn: psycopg.Connection, post_id: int, vector: list[float], digest: str) -> None:
-    conn.execute(
-        "INSERT INTO agent_post_embeddings (post_id, model, dims, embedding, content_hash, updated_at)"
-        " VALUES (%s, %s, %s, %s::vector, %s, now())"
-        " ON CONFLICT (post_id) DO UPDATE SET model = EXCLUDED.model, dims = EXCLUDED.dims,"
-        " embedding = EXCLUDED.embedding, content_hash = EXCLUDED.content_hash, updated_at = now()",
-        (post_id, EMBED_MODEL, len(vector), to_pgvector(vector), digest),
-    )
-
-
-def stored_hashes(conn: psycopg.Connection, ids: list[int] | None = None) -> dict[int, str]:
-    """{post_id: content_hash} for vectors made with EMBED_MODEL."""
-    sql = "SELECT post_id, content_hash FROM agent_post_embeddings WHERE model = %s"
-    params: list[Any] = [EMBED_MODEL]
-    if ids is not None:
-        sql += " AND post_id = ANY(%s)"
-        params.append(ids)
-    return {r["post_id"]: r["content_hash"] for r in conn.execute(sql, params).fetchall()}
+def meaning_ready() -> bool:
+    """True when Stage 3 can run now: an OpenAI client and a warm cache. Starts the warm-up if it never
+    ran, retries a failed one after WARM_RETRY_S, and re-scans for new/changed posts every REFRESH_S."""
+    if openai_client() is None:
+        return False
+    now = time.monotonic()
+    with _cache_lock:
+        thread, warm = _warm["thread"], _warm["warm"]
+        running = bool(thread and thread.is_alive())
+        due = (thread is None
+               or (_warm["failed"] and now - _warm["failed"] >= WARM_RETRY_S)
+               or (warm and now - _warm["done"] >= REFRESH_S))
+    if not running and due:
+        warm_up()
+    if not warm:
+        _note("warming", "Stage 3 (meaning) skipped until the meaning cache is warm")
+    return warm
 
 
 # ---------------------------------------------------------------------------
@@ -430,23 +606,23 @@ def find_matches(text: str, fingerprint: str | None = None, kind: str = "any", t
             return find_matches(text, fingerprint, kind, tags, top_k, confirm, exclude_ids, new_solution, own)
 
     deadline = time.monotonic() + QUERY_EMBED_TIMEOUT_S
-    future = start_query_embedding(text) if text.strip() and embeddings_ready(conn) else None
+    future = start_query_embedding(text) if text.strip() and meaning_ready() else None
     exclude = set(exclude_ids or ())
     found: dict[int, Match] = {}
 
-    # Stage 1: same fingerprint.
+    # Stage 1: same fingerprint (posts.fingerprint).
     if fingerprint:
-        for post in db.posts_with_fingerprint(conn, fingerprint, open_only=(kind == "open")):
+        for post in posts_with_fingerprint(conn, fingerprint, open_only=(kind == "open")):
             if _wanted(post, kind, exclude):
                 found[post["id"]] = Match(post, ["fingerprint"])
 
     # Stage 2: same words (scored for fingerprint matches too, for the AI check and the website).
     query = matching.words(text)
     if query:
-        for post in db.candidate_posts(conn, open_only=(kind == "open"), tags=tags or None):
+        for post in candidate_posts(conn, open_only=(kind == "open"), tags=tags or None):
             if not _wanted(post, kind, exclude):
                 continue
-            score = matching.text_score(query, post["description"])
+            score = matching.text_score(query, words_text(post))
             if post["id"] in found:
                 found[post["id"]].scores["words"] = score
             elif score >= matching.SEARCH_MIN_SCORE:
@@ -455,22 +631,28 @@ def find_matches(text: str, fingerprint: str | None = None, kind: str = "any", t
             if m.scores.get("words", 0.0) >= matching.SEARCH_MIN_SCORE and "words" not in m.stages:
                 m.stages.append("words")
 
-    # Stage 3: same meaning.
+    # Stage 3: same meaning (in-memory cache).
     vector = wait_for(future, deadline)
     if vector is not None:
-        near = [(pid, cos) for pid, cos in nearest_posts(conn, vector, kind) if pid not in exclude]
-        missing = [pid for pid, cos in near if pid not in found and cos >= MEANING_SHOW_COSINE]
-        rows = {p["id"]: p for p in posts_by_ids(conn, missing)}
-        for pid, cos in near:
-            m = found.get(pid)
-            if m is None:
-                post = rows.get(pid)
-                if post is None or cos < MEANING_SHOW_COSINE or not _shares_tag(post, tags):
-                    continue
-                m = found[pid] = Match(post)
-            m.scores["meaning"] = round(cos, 3)
-            if cos >= MEANING_SHOW_COSINE:
-                m.stages.append("meaning")
+        near = nearest_posts(vector, limit=None, exclude=exclude)
+        cosine = dict(near)
+        for pid, m in found.items():              # posts Stages 1-2 found: add their meaning score
+            if pid in cosine:
+                m.scores["meaning"] = cosine[pid]
+                if cosine[pid] >= MEANING_SHOW_COSINE:
+                    m.stages.append("meaning")
+        pool = [(pid, cos) for pid, cos in near if cos >= MEANING_SHOW_COSINE and pid not in found][:MEANING_POOL]
+        rows = {p["id"]: p for p in posts_by_ids(conn, [pid for pid, _ in pool])}
+        added = 0
+        for pid, cos in pool:
+            post = rows.get(pid)
+            if post is None:
+                forget(pid)                       # deleted since it was cached
+                continue
+            if added >= MEANING_CANDIDATES or not _wanted(post, kind, exclude) or not _shares_tag(post, tags):
+                continue
+            found[pid] = Match(post, ["meaning"], {"meaning": cos})
+            added += 1
 
     # Merge.
     for m in found.values():
@@ -515,7 +697,7 @@ FIX_APPLIES = {"yes": True, "no": False, "unsure": None, "no_fix": None}
 
 def _check_prompt(new_text: str, post: dict[str, Any], fix: str | None, fix_for: str) -> str:
     parts = [f"<new_report>\n{(scrub(new_text) or '')[:MAX_CHECK_CHARS]}\n</new_report>",
-             f"<existing_report id=\"{post['id']}\">\n{(post.get('description') or '')[:MAX_CHECK_CHARS]}\n"
+             f"<existing_report id=\"{post['id']}\">\n{words_text(post)[:MAX_CHECK_CHARS]}\n"
              "</existing_report>"]
     if fix:
         parts.append(f"<fix meant_for=\"{fix_for}_report\">\n{(scrub(fix) or '')[:MAX_CHECK_CHARS]}\n</fix>\n"
@@ -617,6 +799,13 @@ def decide(matches: list[Match], need_fix: bool) -> Match | None:
 # ---------------------------------------------------------------------------
 
 @contextmanager
+def _savepoint(conn: psycopg.Connection) -> Iterator[None]:
+    """A failed linking query must not break the caller's transaction."""
+    with conn.transaction():
+        yield
+
+
+@contextmanager
 def _maybe_savepoint(conn: psycopg.Connection | None) -> Iterator[None]:
     """With the caller's connection, keep a failed lookup from breaking the caller's transaction."""
     if conn is None:
@@ -687,29 +876,29 @@ def find_duplicate_question(question: dict[str, Any], conn: psycopg.Connection |
 
 
 def index_post(post_id: int, conn: psycopg.Connection | None = None) -> bool:
-    """Embed a saved post's problem text and store it. True if a vector was written.
-    Skips posts whose stored vector is up to date. Never raises (Stage 3 just won't find it)."""
+    """Embed a saved post's problem text into the in-memory cache. True if a vector was added or
+    replaced. Skips posts whose cached vector is up to date (same content hash). Reads the database,
+    never writes it. Never raises (Stage 3 just won't find the post until the next re-scan)."""
     try:
         if openai_client() is None:   # checked first: no key means no database connection at all
             return False
         if conn is None:
             with db.connect() as own:
                 return index_post(post_id, own)
-        if not embeddings_ready(conn):
-            return False
-        posts = posts_by_ids(conn, [post_id])
+        gen = _warm["gen"]
+        with _savepoint(conn):
+            posts = posts_by_ids(conn, [post_id])
         if not posts:
+            forget(post_id)
             return False
         text = problem_text(posts[0])
         digest = content_hash(text)
-        if stored_hashes(conn, [post_id]).get(post_id) == digest:
+        with _cache_lock:
+            cached = _cache.get(post_id)
+        if not text or (cached is not None and cached[0] == digest):
             return False
         vectors = embed([text], INDEX_EMBED_TIMEOUT_S)
-        if not vectors:
-            return False
-        with _savepoint(conn):
-            store_embedding(conn, post_id, vectors[0], digest)
-        return True
+        return bool(vectors) and _store(post_id, digest, vectors[0], gen)
     except Exception:  # noqa: BLE001
         log.exception("linking: index_post(%s) failed", post_id)
         return False
@@ -717,25 +906,8 @@ def index_post(post_id: int, conn: psycopg.Connection | None = None) -> bool:
 
 def notify_possible_answer(question_id: int, match: Match | None = None, answer_post_id: int | None = None,
                            conn: psycopg.Connection | None = None, exclude_project: str | None = None) -> int:
-    """Tell the Open Question's asker and watchers (GET /api/updates) that a fix was linked by
-    similarity and is a "Possible answer" until their check command passes. answer_post_id: the
-    separate post holding the fix, if any (None when the fix was written into the question).
-    exclude_project: the solver's own project, which needs no news. Returns how many projects were
-    told. Never raises (needs the schema_agent.sql tables; uses agent_db.watchers / add_update)."""
-    how = f" (linked by {match.decided_by})" if match is not None and match.decided_by else ""
-    where = (f"post #{answer_post_id} looks like the same problem" if answer_post_id and answer_post_id != question_id
-             else "a fix from a similar problem was attached to it")
-    message = (f"Possible answer for your Open Question #{question_id}: {where}{how}. It is not verified yet: "
-               "try it and run your check command; the hook reports whether it worked.")
-    try:
-        if conn is None:
-            with db.connect() as own:
-                return notify_possible_answer(question_id, match, answer_post_id, own, exclude_project)
-        with _savepoint(conn):
-            projects = [p for p in db.watchers(conn, question_id) if p != exclude_project]
-            for project in projects:
-                db.add_update(conn, project, message, question_id)
-        return len(projects)
-    except Exception:  # noqa: BLE001
-        log.exception("linking: could not queue the possible-answer update for #%s", question_id)
-        return 0
+    """No-op, kept so existing callers don't break. It used to queue agent_updates rows for the
+    question's watchers; those tables are gone and "Possible answer" news is now email-only (main.py
+    email_waiting_humans(..., possible=True) -> accounts.notify_possible_answer). Returns 0 (projects told)."""
+    log.debug("linking: notify_possible_answer(#%s) is a no-op; the email path tells the asker", question_id)
+    return 0
