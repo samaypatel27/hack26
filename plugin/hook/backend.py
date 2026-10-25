@@ -6,7 +6,7 @@ as "no answer" and carry on.
 
 Where the server is (first match wins):
   1. env AGENTOVERFLOW_API_URL / AGENTOVERFLOW_API_KEY (also API_URL / API_KEY, like the MCP server)
-  2. ~/.agentoverflow/config.json  {"api_url": ..., "api_key": ..., "team_mode": "server" | "local"}
+  2. ~/.agentoverflow/config.json  {"api_url": ..., "api_key": ...}
   3. http://localhost:8000 with no key
 
 Contract (docs/hook-contracts.md; plugin/hook/dev/mock_backend.py implements it):
@@ -85,12 +85,6 @@ def api_url() -> str:
 
 def api_key() -> str:
     return _setting(["AGENTOVERFLOW_API_KEY", "API_KEY"], "api_key", "")
-
-
-def team_mode() -> str:
-    """"server": the team runs on our API (ask_for_help); "local": run_specialists on this laptop."""
-    mode = _setting(["AGENTOVERFLOW_TEAM_MODE"], "team_mode", "server").strip().lower()
-    return mode if mode in ("server", "local") else "server"
 
 
 # ---------------------------------------------------------------------------

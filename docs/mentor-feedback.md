@@ -66,6 +66,7 @@ members catch different things.
 - In the server-side design, each team member uses a different model (Claude, GPT, Gemini) **and** a different source
   (docs, GitHub issues, Stack Overflow), and a chair combines their findings. Andrej Karpathy's "LLM Council"
   popularized this pattern.
-- In the local `run_specialists` design, specialists differ by strategy (environment, config, docs,
-  assumption-challenger) and can run on different Claude models (`--model`).
-- Which team design ships in the demo is still an open decision in [../PROJECT_PLAN.md](../PROJECT_PLAN.md).
+- In the local design (since removed), specialists differed by strategy (environment, config, docs,
+  assumption-challenger) and could run on different Claude models (`--model`).
+- Decided: the server-side team ships. The local tool was removed on 2026-10-25 (see the decisions log in
+  [../PROJECT_PLAN.md](../PROJECT_PLAN.md)).

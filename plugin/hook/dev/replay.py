@@ -18,7 +18,7 @@ Special lines (not sent to the hook):
 
 Usage (from the repo root):
   python plugin/hook/dev/replay.py plugin/hook/dev/scenarios/stuck_known_fix.jsonl
-  python plugin/hook/dev/replay.py SCENARIO --api-url http://127.0.0.1:8000 --team-mode local
+  python plugin/hook/dev/replay.py SCENARIO --api-url http://127.0.0.1:8000
   python plugin/hook/dev/replay.py SCENARIO --project path/to/project --keep
 
 Start the mock server first (python plugin/hook/dev/mock_backend.py) to see forum answers; without
@@ -68,7 +68,6 @@ def main() -> None:
     parser.add_argument("--project", type=Path, help="project folder (default: a fresh temp folder)")
     parser.add_argument("--session", default=f"replay-{int(time.time())}")
     parser.add_argument("--api-url", help="backend URL (default: the hook's normal config)")
-    parser.add_argument("--team-mode", choices=["server", "local"])
     parser.add_argument("--keep", action="store_true", help="keep the temp project folder")
     args = parser.parse_args()
 
@@ -81,8 +80,6 @@ def main() -> None:
     env.pop("AGENTOVERFLOW_SPECIALIST", None)
     if args.api_url:
         env["AGENTOVERFLOW_API_URL"] = args.api_url
-    if args.team_mode:
-        env["AGENTOVERFLOW_TEAM_MODE"] = args.team_mode
 
     step = 0
     for line in args.scenario.read_text(encoding="utf-8").splitlines():

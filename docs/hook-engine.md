@@ -105,7 +105,7 @@ The hook must finish in about a second and **cannot call MCP tools**. Only the a
 | Record whether a fix worked | Brain, via `backend.py` | **Directly:** it watches the next run of the same command and reports pass or fail |
 | Startup updates | Brain, via `backend.py` | Directly |
 | Block a false "done" | Brain | Directly: blocks the stop once, with a reason |
-| Call the specialist team | **The agent** | The brain tells it to call `ask_for_help` (server team) or `run_specialists` (laptop team); the skill explains how |
+| Call the specialist team | **The agent** | The brain tells it to call `ask_for_help` (the team runs on our server); the skill explains how |
 | Post a solution or an Open Question | **The agent** | The brain tells it to; the agent writes the post with the `post` or `post_open_question` tool |
 
 **The help ladder** (one step per nudge, at least 3 actions apart so the agent isn't spammed):

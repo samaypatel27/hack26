@@ -29,7 +29,7 @@ import notebook  # noqa: E402
 import struggles  # noqa: E402
 
 ENV_KEYS = ["CLAUDE_PROJECT_DIR", "AGENTOVERFLOW_API_URL", "AGENTOVERFLOW_API_KEY", "API_URL", "API_KEY",
-            "AGENTOVERFLOW_TEAM_MODE", "AGENTOVERFLOW_SPECIALIST"]
+            "AGENTOVERFLOW_SPECIALIST"]
 
 PRISMA = ('Exit code 1\nPrismaClientInitializationError: Prisma Client could not locate the Query Engine for runtime '
           '"linux-musl-openssl-3.0.x".\n    at /app/node_modules/@prisma/client/runtime/library.js:111:12')
@@ -59,8 +59,8 @@ def text_of(output):
 
 
 class FakeBackend:
-    def __init__(self, search=None, judge=None, updates=None, mode="server"):
-        self.search_result, self.judge_result, self.updates_result, self.mode = search, judge, updates, mode
+    def __init__(self, search=None, judge=None, updates=None):
+        self.search_result, self.judge_result, self.updates_result = search, judge, updates
         self.calls = []
 
     def search(self, error, command, fingerprint, tags=None):
@@ -78,9 +78,6 @@ class FakeBackend:
     def judge(self, session_id, actions, replies):
         self.calls.append(("judge", len(actions), replies))
         return self.judge_result
-
-    def team_mode(self):
-        return self.mode
 
 
 class TempProject(unittest.TestCase):
@@ -233,8 +230,8 @@ class Messages(unittest.TestCase):
             messages.open_question_exists(OPEN, PT, "abc", []),
             messages.fix_failed(1, DC, "abc", ["x"]),
             messages.step_back(PT, "abc", [], "why"),
-            messages.call_team("server", DC, PRISMA, "abc", ["x"], "why"),
-            messages.call_team("local", DC, PRISMA, "abc", ["x"], "why", 3),
+            messages.call_team(DC, PRISMA, "abc", ["x"], "why"),
+            messages.call_team(DC, PRISMA, "abc", ["x"], "why", 3),
             messages.post_open_question(DC, "abc", ["x"], "why"),
             messages.notable_solve(DC, 3, "abc", []),
             messages.suspect_fix(DC, 3, "abc", ["added `|| true`"]),
@@ -246,8 +243,9 @@ class Messages(unittest.TestCase):
             self.assertIn("fingerprint: abc", text)
         self.assertIn("ask_for_help", texts[4])
         self.assertIn("check_help", texts[4])
-        self.assertIn("run_specialists", texts[5])
-        self.assertNotIn("ask_for_help", texts[5])
+        self.assertIn("  fingerprint: abc", texts[4])   # passed on to ask_for_help
+        self.assertIn("files:", texts[4])
+        self.assertIn("Open question #3", texts[5])
         self.assertIn(messages.COMMUNITY_LABEL.rstrip(), texts[0])
         self.assertIn(messages.COMMUNITY_LABEL.rstrip(), texts[1])
         self.assertIn("already tried: x", texts[0])
@@ -299,11 +297,10 @@ class Ladder(TempProject):
 
     def test_backend_down_still_climbs(self):
         self.backend.search_result = None
-        self.backend.mode = "local"
         for _ in range(3):
             out = self.fail(DC, PRISMA)
         self.assertEqual(tag(out), "CALL_TEAM")
-        self.assertIn("run_specialists", text_of(out))
+        self.assertIn("ask_for_help", text_of(out))
 
     def test_open_question_then_team_next_time(self):
         self.backend.search_result = [OPEN]
@@ -343,19 +340,6 @@ class Ladder(TempProject):
         self.assertEqual(tag(self.mcp("check_help", "TEAM_NO_ANSWER: r1\nNothing found.")), "POST_OPEN_QUESTION")
         self.mcp("post_open_question", "Posted as new open question #9.")
         self.assertTrue(self.state()["episode"]["oq_posted"])
-
-    def test_no_winner_asks_for_open_question_right_away(self):
-        self.backend.mode = "local"
-        for _ in range(3):
-            self.fail(DC, PRISMA)
-        self.assertEqual(tag(self.mcp("run_specialists", "NO_WINNER: attempts ...")), "POST_OPEN_QUESTION")
-
-    def test_winner_closes_the_episode(self):
-        self.backend.mode = "local"
-        for _ in range(3):
-            self.fail(DC, PRISMA)
-        self.assertIsNone(self.mcp("run_specialists", "WINNER: env specialist, diff ..."))
-        self.assertIsNone(self.state()["episode"])
 
     def test_judge_actions_carry_both_shapes(self):
         self.fail("npm test", "Exit code 1\nError: boom")
@@ -599,15 +583,13 @@ class Backend(TempProject):
 
     def test_config_order(self):
         config = self.project / "config.json"
-        config.write_text(json.dumps({"api_url": "http://example.test:1", "api_key": "file", "team_mode": "local"}))
+        config.write_text(json.dumps({"api_url": "http://example.test:1", "api_key": "file"}))
         with mock.patch.object(backend, "CONFIG_PATH", config):
             self.assertEqual(backend.api_url(), self.server.url)    # env wins
             del os.environ["AGENTOVERFLOW_API_URL"], os.environ["AGENTOVERFLOW_API_KEY"]
             os.environ["API_KEY"] = "plain"
             self.assertEqual((backend.api_url(), backend.api_key()), ("http://example.test:1", "plain"))
-            self.assertEqual(backend.team_mode(), "local")
         self.assertEqual(backend.api_url(), "http://127.0.0.1:8000")   # default, localhost -> 127.0.0.1
-        self.assertEqual(backend.team_mode(), "server")
 
 
 # ---------------------------------------------------------------------------

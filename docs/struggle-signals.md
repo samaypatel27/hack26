@@ -101,7 +101,7 @@ The hook moves the stuck episode up the help ladder one step at a time:
 2. **Rewind + fresh approach (built):** if the signal was whack-a-mole, edit-run-same-output or the judge, and there
    are 3+ edits to undo, offer to roll the files back to a clean checkpoint, once per episode. See
    [rewind.md](rewind.md).
-3. **Specialist team:** run `run_specialists`.
+3. **Specialist team:** call `ask_for_help` (the team runs on our server).
 4. **Open Question:** post it so a future agent or model can solve it.
 
 ---

@@ -14,7 +14,7 @@ and the agent gets one message (at most once per NUDGE_COOLDOWN actions):
             (docs/rewind.md). The agent asks the user; rewind.py does the rewind on a yes.
   2 TRIAGE  is the error in the outside world (a library, tool, environment) or the project's own
             code? Own code -> STEP_BACK checklist once. External -> go straight to rung 3.
-  3 TEAM    CALL_TEAM once: ask_for_help (server mode) or run_specialists (local mode).
+  3 TEAM    CALL_TEAM once: ask_for_help (the specialist team runs on our server).
   4 OQ      the team really ran (TEAM_STARTED) and gave up: no answer, or no fix passed -> POST_OPEN_QUESTION.
 
 The team's replies (docs/local-tester.md). ask_for_help and check_help return text starting with a tag:
@@ -290,25 +290,7 @@ def _after_mcp_tool(payload: dict[str, Any], state: dict[str, Any]) -> str | Non
     episode = state.get("episode")
     if "ask_for_help" in name or "check_help" in name:
         return _after_team_tool(payload, state, "ask_for_help" in name)
-    if "run_specialists" in name:
-        if not episode and _last_failed_run(state["history"]):
-            episode = _open_episode(state, "")
-        if not episode:
-            return None
-        episode["team_ran"] = True
-        episode["rung"] = max(episode["rung"], 3)
-        result = notebook.tool_response_text(payload).lstrip()   # "WINNER: ..." or "NO_WINNER: ..."
-        if "run_specialists" in name and result.startswith("WINNER"):
-            state["episode"] = None   # the tool already confirmed the fix in this project
-            return None
-        if "run_specialists" in name and result.startswith("NO_WINNER") and not episode["oq_posted"]:
-            episode["rung"] = 4
-            episode["team_status"] = "no_winner"
-            command, _, fp = _problem(state)
-            episode["last_nudge_idx"] = len(state["history"])
-            return messages.post_open_question(command, fp, episode["tried"],
-                                               "The specialist team found no verified fix.")
-    elif "post_open_question" in name and episode:
+    if "post_open_question" in name and episode:
         episode["oq_posted"] = True
     elif name.endswith("__post") and episode:
         state["episode"] = None   # solved and shared
@@ -431,7 +413,7 @@ def _open_question_due(state: dict[str, Any], episode: dict[str, Any], at_stop: 
         return False
     since = (episode.get("team_report_idx") or 0) if status == "report" and not at_stop else 0
     runs = [a for a in state["history"][since:] if _is_run(a, episode["key"])]
-    if status is None or at_stop:   # status None: run_specialists with an unrecognized result (the old rule)
+    if status is None or at_stop:   # status None: the team ran but gave no known status (safe fallback)
         return bool(runs) and not runs[-1].get("ok")
     return sum(1 for a in runs if not a.get("ok")) >= REPORT_TRIES
 
@@ -490,8 +472,7 @@ def _climb(state: dict[str, Any], backend: Any, problem: tuple[str, str, str | N
 
     if episode["rung"] < 3:
         episode["rung"] = 3
-        return messages.call_team(backend.team_mode(), command, error, fp, tried, reason,
-                                  episode.get("open_question_id"))
+        return messages.call_team(command, error, fp, tried, reason, episode.get("open_question_id"))
 
     if episode["rung"] < 4 and _open_question_due(state, episode):
         episode["rung"] = 4

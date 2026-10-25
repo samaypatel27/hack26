@@ -130,11 +130,11 @@ A `REWIND_OFFER` section:
 - After rewinding, read the clean slate note and do not repeat the listed attempts.
 - If the user says no, continue to the next rung of the help ladder.
 
-### 5. Bonus: specialists start from the checkpoint
+### 5. Bonus: test copies start from the checkpoint
 
-`run_specialists` currently creates its worktrees from the last commit, so it misses uncommitted work. It can create
-them from the `episode_start` checkpoint instead (`git worktree add <path> <checkpoint commit>`), so every specialist
-starts from the real, relevant state.
+The local tester ([local-tester.md](local-tester.md)) makes its copies from the "when this problem started"
+checkpoint, so every test starts from the real, relevant state, uncommitted work included. (The old
+`run_specialists` tool, which worked from the last commit, was removed on 2026-10-25.)
 
 ---
 

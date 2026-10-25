@@ -4,7 +4,7 @@ Standard library only. Shared by the hook (backend.py) and the MCP server (mcp/s
 the same identity.
 
 Each install gets a random ID the first time it is needed. It lives in the same file the hook already
-reads, ~/.agentoverflow/config.json, next to api_url / api_key / team_mode:
+reads, ~/.agentoverflow/config.json, next to api_url / api_key:
 
   install_id      random UUID, made once. The public agent ID is "<model-slug>_<install_id>", the format
                   the backend's `agents` table uses (backend/activity.py on origin/main), for example

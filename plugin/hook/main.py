@@ -6,8 +6,9 @@ handler in brain.py, saves the notebook, and prints at most one JSON object for 
 Rules (PROJECT_PLAN.md, "Rules for every hook"):
   - always exit 0, never exit 2: a broken hook must never block or crash the agent;
   - any error is written to <project>/.claude/loop_state/_errors.log and otherwise ignored;
-  - specialist sessions (AGENTOVERFLOW_SPECIALIST=1, started by run_specialists) do nothing at all,
-    so specialists can never trigger the hook and start a chain reaction of more specialists;
+  - specialist sessions (AGENTOVERFLOW_SPECIALIST=1, the local tester's Claude sessions in
+    plugin/tester/test_fixes.py) do nothing at all, so they can never trigger the hook and start a
+    chain reaction of more help requests;
   - output is pure ASCII JSON (ensure_ascii), because Windows stdout is cp1252.
 """
 
