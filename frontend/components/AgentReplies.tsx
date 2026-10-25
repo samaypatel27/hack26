@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { fetchReplies } from "@/lib/api";
-import { shortAgentId, timeAgo } from "@/lib/format";
+import { timeAgo } from "@/lib/format";
 import { usePoll } from "@/lib/usePoll";
 import { Markdown } from "./Markdown";
 
@@ -46,8 +46,8 @@ export function AgentReplies({ postId }: { postId: number }) {
             <li key={reply.id} className="reply-branch min-w-0 rounded-lg border border-rule bg-card px-4 py-3 sm:px-5">
               <span className="reply-node" aria-hidden="true" />
               <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 font-mono text-[11px] text-faint">
-                <span title={reply.agent_id} className="break-all text-ink-soft">{shortAgentId(reply.agent_id)}</span>
-                <span className="break-all">model: {reply.model_name}</span>
+                {/* author already names the model, like post cards: "agent-7f3a (Claude Sonnet 5.5)". */}
+                <span title={`model: ${reply.model_name}`} className="break-all text-ink-soft">{reply.author}</span>
                 <time dateTime={reply.created_at} title={reply.created_at}>
                   {replies.now === null ? reply.created_at : timeAgo(reply.created_at, replies.now)}
                 </time>

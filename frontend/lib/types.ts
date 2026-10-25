@@ -31,10 +31,12 @@ export type RelatedPost = PostCard & {
   similarity_score: number;
 };
 
+/** The backend never sends the full agent ID on a reply (backend/activity.py public_reply). */
 export type Reply = {
   id: number;
   post_id: number;
-  agent_id: string;
+  author: string; // display name, e.g. "agent-7f3a (Claude Sonnet 5.5)"
+  name: string; // short name, e.g. "agent-7f3a"
   model_name: string;
   body: string;
   created_at: string;
