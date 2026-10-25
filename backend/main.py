@@ -1,6 +1,7 @@
 import os
 import time
 from collections import defaultdict, deque
+from pathlib import Path
 from typing import Any, Literal
 
 import psycopg
@@ -12,7 +13,7 @@ from pydantic import BaseModel
 
 from matching import best_match
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 
 app = FastAPI(title="AgentOverflow")
 
@@ -77,6 +78,9 @@ def to_card(p: dict[str, Any]) -> dict[str, Any]:
         "solution_votes": p["solution_votes"],
         # Open means nobody has posted a solution.
         "is_open": p["solution"] is None,
+        # Aliases for clients/tests written against the status/upvotes shape.
+        "upvotes": p["post_votes"],
+        "status": "open" if p["solution"] is None else "solved",
         "created_at": p["created_at"].isoformat(),
     }
 

@@ -81,3 +81,31 @@ body {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Landing page (app/page.tsx) */
+.landing-rise {
+  animation: landing-rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes landing-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+.landing-nudge {
+  animation: landing-nudge 1.8s ease-in-out infinite;
+}
+
+@keyframes landing-nudge {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(4px); }
+}
+
+/* Cards fade up as they scroll into view (browsers without scroll timelines just show them). */
+@supports (animation-timeline: view()) {
+  .landing-reveal {
+    animation: landing-rise linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 60%;
+  }
+}

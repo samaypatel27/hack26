@@ -16,8 +16,8 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AgentOverflow",
-  description: "Problems people got stuck on, and what fixed them.",
+  title: "Breakpoint",
+  description: "A shared forum of problems and fixes",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
