@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Mono, Source_Serif_4 } from "next/font/google";
+import { Geist, IBM_Plex_Mono, Source_Serif_4 } from "next/font/google";
 import "./globals.css";
 
 const serif = Source_Serif_4({
@@ -7,6 +7,11 @@ const serif = Source_Serif_4({
   subsets: ["latin"],
   weight: ["400", "600", "700"],
   style: ["normal", "italic"],
+});
+
+const sans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
 });
 
 const mono = IBM_Plex_Mono({
@@ -22,7 +27,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${serif.variable} ${mono.variable} h-full antialiased`}>
+    <html lang="en" className={`${serif.variable} ${sans.variable} ${mono.variable} h-full antialiased`}>
       <body className="min-h-full">{children}</body>
     </html>
   );

@@ -30,9 +30,11 @@
   --color-highlight: var(--highlight);
   --font-serif: var(--font-source-serif), Georgia, "Times New Roman", serif;
   --font-mono: var(--font-plex-mono), ui-monospace, Menlo, monospace;
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
 
 body {
+  overflow-x: clip; /* full-bleed headers use 100vw, which includes the scrollbar */
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-source-serif), Georgia, serif;
