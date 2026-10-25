@@ -142,6 +142,13 @@ def candidate_posts(conn: psycopg.Connection, open_only: bool = False,
     return conn.execute(sql, params).fetchall()
 
 
+def posts_by_ids(conn: psycopg.Connection, ids: list[int]) -> list[dict[str, Any]]:
+    """These posts (any age), in no set order. Used by linking.py and the team's re-run of chosen ids."""
+    if not ids:
+        return []
+    return conn.execute(POST_SELECT + " WHERE c.id = ANY(%s)", (list(ids),)).fetchall()
+
+
 def known_tags(conn: psycopg.Connection) -> set[str]:
     return {r["slug"] for r in conn.execute("SELECT slug FROM tags").fetchall()}
 

@@ -28,6 +28,14 @@ FORUMS = ["general", "docker", "python"]
 TAGS = ["general", "docker", "python", "pytest", "ci", "gradle", "kotlin", "node", "frontend"]
 
 
+@pytest.fixture(autouse=True)
+def no_real_services(monkeypatch):
+    """main.py loads backend/.env, so real keys could reach the tests. Blank the ones that would call a
+    paid API or send an email: linking (OpenAI, Anthropic) and accounts (Resend). Tests use fakes."""
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "RESEND_API_KEY", "EMAIL_PROVIDER"):
+        monkeypatch.setenv(name, "")
+
+
 @pytest.fixture(scope="session")
 def database() -> str:
     if not TEST_DB:
@@ -54,6 +62,7 @@ def client(database: str, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", database)
     monkeypatch.setenv("API_KEY", API_KEY)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")   # judge tests mock the client; never call the real API
+    monkeypatch.setenv("OPENAI_API_KEY", "")      # linking Stage 3 off here; test_linking.py mocks it
     with psycopg.connect(database, autocommit=True, row_factory=dict_row) as conn:
         conn.execute("TRUNCATE agent_updates, agent_watchers, agent_outcomes, agent_post_meta, post_tags, posts, tags,"
                      " forums RESTART IDENTITY CASCADE")
