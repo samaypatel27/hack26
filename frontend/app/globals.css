@@ -14,6 +14,8 @@
   --accent: #e04400; /* #ff4f00 darkened just enough to read as small text */
   --accent-soft: #ffe1d1;
   --highlight: #ffd8c2;
+  --rescue: #ff4f00; /* full-strength orange: filled buttons and marks only */
+  --rescue-hover: #ff6a26;
 }
 
 @theme inline {
@@ -28,9 +30,9 @@
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
   --color-highlight: var(--highlight);
+  --color-rescue: var(--rescue);
   --font-serif: var(--font-source-serif), Georgia, "Times New Roman", serif;
   --font-mono: var(--font-plex-mono), ui-monospace, Menlo, monospace;
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
 
 html { scroll-behavior: smooth; }
@@ -42,6 +44,35 @@ body {
   font-family: var(--font-source-serif), Georgia, serif;
   font-size: 15px;
   line-height: 1.5;
+}
+
+/* Buttons: one shape everywhere. Mono label, 2px corners, 1px border, like the forum's search button. */
+@layer components {
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border: 1px solid var(--rule-strong);
+    border-radius: 2px;
+    padding: 0.6rem 1.1rem;
+    font-family: var(--font-plex-mono), ui-monospace, monospace;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--ink);
+    background: var(--card);
+    transition: background-color 150ms, border-color 150ms;
+  }
+  .btn:hover { border-color: var(--ink); }
+  .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .btn:disabled { cursor: default; opacity: 0.4; }
+  .btn:disabled:hover { border-color: var(--rule-strong); }
+  .btn-primary { border-color: var(--rescue); background: var(--rescue); }
+  .btn-primary:hover { border-color: var(--rescue-hover); background: var(--rescue-hover); }
+  .btn-sm { padding: 0.25rem 0.75rem; font-size: 12px; font-weight: 500; }
+  .btn-arrow { transition: transform 150ms; }
+  .btn:hover .btn-arrow { transform: translateX(3px); }
 }
 
 ::selection {
@@ -152,6 +183,35 @@ body {
   animation: landing-rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) 0.35s both;
 }
 
+/* Leaving the landing page: starting from the middle line, everything slides off to one side.
+   --d is how far an item sits from the middle, so the middle goes first. */
+.exit-item { --d: 0; }
+[data-leaving] .exit-item {
+  animation: exit-left 0.5s cubic-bezier(0.55, 0, 0.75, 0.2) forwards;
+  animation-delay: calc(var(--d) * 55ms);
+}
+[data-leaving="right"] .exit-item { animation-name: exit-right; }
+@keyframes exit-left { to { opacity: 0; transform: translateX(-45vw); } }
+@keyframes exit-right { to { opacity: 0; transform: translateX(45vw); } }
+
+/* Arriving on /forums: the sentence and search bar zoom in from a distance. */
+.enter-zoom {
+  animation: enter-zoom 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes enter-zoom {
+  from { opacity: 0; transform: scale(0.86); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+/* Arriving on /docs: the page slides in from the side the landing page left by. */
+.enter-from-left {
+  animation: enter-from-left 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes enter-from-left {
+  from { opacity: 0; transform: translateX(-6vw); }
+  to { opacity: 1; transform: none; }
+}
+
 /* Landing page (app/page.tsx) */
 .landing-rise {
   animation: landing-rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both;
@@ -160,22 +220,4 @@ body {
 @keyframes landing-rise {
   from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: none; }
-}
-
-.landing-nudge {
-  animation: landing-nudge 1.8s ease-in-out infinite;
-}
-
-@keyframes landing-nudge {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(4px); }
-}
-
-/* Cards fade up as they scroll into view (browsers without scroll timelines just show them). */
-@supports (animation-timeline: view()) {
-  .landing-reveal {
-    animation: landing-rise linear both;
-    animation-timeline: view();
-    animation-range: entry 0% entry 60%;
-  }
 }

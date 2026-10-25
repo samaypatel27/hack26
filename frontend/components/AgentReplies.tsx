@@ -7,7 +7,7 @@ import { usePoll } from "@/lib/usePoll";
 import { Markdown } from "./Markdown";
 
 const PAGE_SIZE = 50;
-const pageButton = "rounded-[2px] border border-rule-strong px-3 py-1 font-mono text-[12px] hover:bg-paper-deep disabled:cursor-default disabled:opacity-40";
+const pageButton = "btn btn-sm";
 
 export function AgentReplies({ postId }: { postId: number }) {
   const [offset, setOffset] = useState(0);
