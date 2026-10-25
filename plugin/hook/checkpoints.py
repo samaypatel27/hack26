@@ -11,7 +11,7 @@ How a snapshot is taken without touching the user's git state:
   2. `git add -A` into the temp index: picks up edits, deletions and new untracked files, and skips
      ignored files (.env, node_modules) because it respects .gitignore;
   3. `git write-tree`, then `git commit-tree` (a commit on no branch), then `git update-ref` under a
-     hidden ref: refs/agentoverflow/checkpoints/<session_id>/<n>.
+     hidden ref: refs/breakpoint/checkpoints/<session_id>/<n>.
 The user's branch, index (staging area) and history never change. `.claude/` (the hook's notes, Claude
 Code's settings) is left out of snapshots and restores, so a rewind never rolls those back.
 
@@ -27,18 +27,20 @@ import time
 from pathlib import Path
 from typing import Any
 
-REF_ROOT = "refs/agentoverflow/checkpoints"
+REF_ROOT = "refs/breakpoint/checkpoints"
+OLD_REF_ROOT = "refs/agentoverflow/checkpoints"   # before the rename to Breakpoint: still listed, so old ones can be rewound
 MAX_PER_SESSION = 20          # older checkpoints of the session are deleted
 GIT_TIMEOUT = 2.0             # seconds per git call from the hook; slower means a huge repo: skip
 RESTORE_TIMEOUT = 60.0        # seconds per git call when the user asked for a rewind
-MESSAGE_PREFIX = "agentoverflow checkpoint: "
+MESSAGE_PREFIX = "breakpoint checkpoint: "
+OLD_MESSAGE_PREFIX = "agentoverflow checkpoint: "   # snapshots made before the rename
 EXCLUDED = [".claude"]        # never snapshotted or restored (pathspec, relative to the repo root)
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"   # git's id for a tree with no files
 
 # Our snapshot commits get a fixed identity, so they work even where user.name is not set.
 IDENTITY = {
-    "GIT_AUTHOR_NAME": "AgentOverflow", "GIT_AUTHOR_EMAIL": "agentoverflow@localhost",
-    "GIT_COMMITTER_NAME": "AgentOverflow", "GIT_COMMITTER_EMAIL": "agentoverflow@localhost",
+    "GIT_AUTHOR_NAME": "Breakpoint", "GIT_AUTHOR_EMAIL": "breakpoint@localhost",
+    "GIT_COMMITTER_NAME": "Breakpoint", "GIT_COMMITTER_EMAIL": "breakpoint@localhost",
 }
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # no console flash on Windows
@@ -107,10 +109,15 @@ def _pathspec() -> list[str]:
     return ["--", "."] + [f":(exclude){p}" for p in EXCLUDED]
 
 
-def session_prefix(session_id: str) -> str:
+def session_prefix(session_id: str, root: str | None = None) -> str:
     """The hidden ref folder for one session. Only safe characters go into a ref name."""
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(session_id or "")) or "unknown"
-    return f"{REF_ROOT}/{safe}/"
+    return f"{root or REF_ROOT}/{safe}/"
+
+
+def session_prefixes(session_id: str) -> tuple[str, str]:
+    """Where this session's checkpoints can be: the current folder, then the one from before the rename."""
+    return session_prefix(session_id), session_prefix(session_id, OLD_REF_ROOT)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +127,7 @@ def session_prefix(session_id: str) -> str:
 def _snapshot_tree(top: Path, real: Path, timeout: float) -> str:
     """A git tree of the working folder as it is right now, built in a throwaway index.
     `real` is the user's index file: it is only ever read (copied), never written."""
-    tmp = Path(tempfile.mkdtemp(prefix="agentoverflow_index_"))
+    tmp = Path(tempfile.mkdtemp(prefix="breakpoint_index_"))
     index = str(tmp / "index")
     try:
         if real.is_file():
@@ -135,20 +142,25 @@ def _snapshot_tree(top: Path, real: Path, timeout: float) -> str:
 
 
 def _list_refs(top: Path, session_id: str, timeout: float) -> list[dict[str, Any]]:
-    """This session's checkpoints, oldest first."""
-    prefix = session_prefix(session_id)
+    """This session's checkpoints, oldest first. Also lists ones saved under the old ref folder."""
+    prefixes = session_prefixes(session_id)
     fmt = "%(refname)%00%(objectname)%00%(tree)%00%(committerdate:unix)%00%(subject)"
-    out = _git(top, ["for-each-ref", f"--format={fmt}", prefix], timeout)
+    out = _git(top, ["for-each-ref", f"--format={fmt}", *prefixes], timeout)
     items = []
     for line in out.splitlines():
         parts = line.split("\0")
-        if len(parts) != 5 or not parts[0].startswith(prefix):
+        prefix = next((p for p in prefixes if parts[0].startswith(p)), None)
+        if len(parts) != 5 or prefix is None:
             continue
         ref, commit, tree, when, subject = parts
         number = ref[len(prefix):]
         if not number.isdigit():
             continue
-        label = subject[len(MESSAGE_PREFIX):] if subject.startswith(MESSAGE_PREFIX) else subject
+        label = subject
+        for start in (MESSAGE_PREFIX, OLD_MESSAGE_PREFIX):
+            if subject.startswith(start):
+                label = subject[len(start):]
+                break
         items.append({"id": int(number), "ref": ref, "commit": commit, "tree": tree,
                       "time": float(when or 0), "label": label})
     return sorted(items, key=lambda c: c["id"])

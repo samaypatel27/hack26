@@ -1,5 +1,5 @@
 {
-  "description": "AgentOverflow hook engine: one entry point (hook/main.py) for every event; it routes on hook_event_name.",
+  "description": "Breakpoint hook engine: one entry point (hook/main.py) for every event; it routes on hook_event_name.",
   "hooks": {
     "SessionStart": [
       {

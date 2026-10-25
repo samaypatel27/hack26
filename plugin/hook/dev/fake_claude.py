@@ -1,16 +1,17 @@
 """A stand-in for `claude -p`, so the local tester can be tested and demoed without real Claude sessions.
 
-The tester runs it when env AGENTOVERFLOW_TESTER_CLAUDE points at it, e.g.
-    AGENTOVERFLOW_TESTER_CLAUDE='["python", "plugin/hook/dev/fake_claude.py"]'
+The tester runs it when env BREAKPOINT_TESTER_CLAUDE points at it, e.g.
+    BREAKPOINT_TESTER_CLAUDE='["python", "plugin/hook/dev/fake_claude.py"]'
 
 It reads the prompt on stdin (like `claude -p`), finds which job it is ("Hypothesis <n>" or the reproduce-it
-test), and does what the plan file says. The plan file is env AGENTOVERFLOW_FAKE_PLAN, a JSON object:
+test), and does what the plan file says. The plan file is env BREAKPOINT_FAKE_PLAN, a JSON object:
     {"1": {"files": {"cart.py": "new text"}, "reply": "changed cart.py", "sleep": 0},
      "repro": {"files": {"tests/test_repro.py": "..."}, "reply": "wrote it\nCHECK: python -m pytest tests/test_repro.py"}}
-Files are written relative to the working directory (the copy). If env AGENTOVERFLOW_FAKE_LOG is set, one JSON
+Files are written relative to the working directory (the copy). If env BREAKPOINT_FAKE_LOG is set, one JSON
 line per call is appended to it: argv, cwd, the specialist flag, the prompt, and (plan key "peek": [paths])
 what those files held in the copy before any change, plus which folders in the copy are links.
 It prints a result shaped like `claude -p --output-format json`.
+The old AGENTOVERFLOW_* names of these settings still work.
 """
 
 import json
@@ -21,14 +22,18 @@ import time
 from pathlib import Path
 
 
+def env(name: str) -> str | None:
+    return os.environ.get(f"BREAKPOINT_{name}") or os.environ.get(f"AGENTOVERFLOW_{name}")
+
+
 def main() -> int:
     prompt = sys.stdin.read()
     match = re.search(r"^Hypothesis (\d+)", prompt, re.MULTILINE)
     job = match.group(1) if match else ("repro" if "reproduces the problem" in prompt else "?")
-    plan_path = os.environ.get("AGENTOVERFLOW_FAKE_PLAN")
+    plan_path = env("FAKE_PLAN")
     plan = json.loads(Path(plan_path).read_text(encoding="utf-8")) if plan_path else {}
     step = plan.get(job, {})
-    log = os.environ.get("AGENTOVERFLOW_FAKE_LOG")
+    log = env("FAKE_LOG")
     peek = {}
     for rel in plan.get("peek") or []:
         try:
@@ -39,7 +44,7 @@ def main() -> int:
     if log:
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps({"job": job, "argv": sys.argv[1:], "cwd": os.getcwd(), "peek": peek, "links": links,
-                                "specialist": os.environ.get("AGENTOVERFLOW_SPECIALIST"),
+                                "specialist": env("SPECIALIST"),
                                 "project_dir_env": os.environ.get("CLAUDE_PROJECT_DIR"), "prompt": prompt}) + "\n")
     time.sleep(float(step.get("sleep", 0)))
     for rel, text in (step.get("files") or {}).items():

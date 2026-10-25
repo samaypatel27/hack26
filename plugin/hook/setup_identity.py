@@ -1,12 +1,12 @@
 """setup_identity.py: show this install's identity, or save / remove the optional email (docs/accounts.md).
 
-Run by the /agentoverflow:setup command (plugin/commands/setup.md), or by hand:
+Run by the /breakpoint:setup command (plugin/commands/setup.md), or by hand:
 
     python plugin/hook/setup_identity.py --show
     python plugin/hook/setup_identity.py --email you@example.com
     python plugin/hook/setup_identity.py --remove-email
 
-The email is saved in ~/.agentoverflow/config.json and sent to our server, which uses it only to tell
+The email is saved in ~/.breakpoint/config.json and sent to our server, which uses it only to tell
 you "your question got answered". It is never shown on the website. After saving, the script tries to
 register with the server right away; if the server is down, the next session start does it instead.
 

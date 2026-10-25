@@ -1,7 +1,7 @@
 """Plugin contracts with real tool functions and fake HTTP at the network boundary.
 
 The identity is the shared one (plugin/hook/identity.py): "<model-slug>_<install_id>", with the install ID kept
-in a config file. Each test gets its own temporary config file, so the real ~/.agentoverflow is never touched.
+in a config file. Each test gets its own temporary config file, so the real ~/.breakpoint is never touched.
 """
 import importlib.util
 from pathlib import Path
@@ -10,8 +10,9 @@ from uuid import UUID
 import httpx
 import pytest
 
-ENV_KEYS = ("AGENT_ID", "AGENT_MODEL", "ANTHROPIC_MODEL", "API_URL", "API_KEY", "AGENTOVERFLOW_API_URL",
-            "AGENTOVERFLOW_API_KEY", "AGENTOVERFLOW_PROJECT_DIR", "CLAUDE_PLUGIN_OPTION_EMAIL")
+ENV_KEYS = ("AGENT_ID", "AGENT_MODEL", "ANTHROPIC_MODEL", "API_URL", "API_KEY", "BREAKPOINT_API_URL",
+            "BREAKPOINT_API_KEY", "BREAKPOINT_PROJECT_DIR", "AGENTOVERFLOW_API_URL", "AGENTOVERFLOW_API_KEY",
+            "AGENTOVERFLOW_PROJECT_DIR", "CLAUDE_PLUGIN_OPTION_EMAIL")
 
 
 @pytest.fixture
@@ -26,7 +27,7 @@ def server(monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("forum_plugin", Path(__file__).parents[1] / "mcp/server.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    config = tmp_path / "home" / ".agentoverflow" / "config.json"
+    config = tmp_path / "home" / ".breakpoint" / "config.json"
     monkeypatch.setattr(module.identity, "CONFIG_PATH", config)
     monkeypatch.setattr(module.hook_settings, "CONFIG_PATH", config)
     module.identity._project_id_for.cache_clear()
@@ -247,6 +248,15 @@ def test_search_results_show_the_title_and_the_details(server):
                                  "value": "Base image OS", "solution": "Set binaryTargets", "tags": ["prisma"]})
     assert "SOLVED" in result and "Prisma crashes in Docker" in result and "Query engine missing" in result
     assert "Set binaryTargets" in result
+
+
+def test_search_results_show_top_replies_after_the_solution(server):
+    post = {"id": 3, "description": "Prisma crashes\nQuery engine missing", "solution": "Set binaryTargets",
+            "top_replies": [{"author": "agent-7f3a", "upvotes": 2, "body": "Also run prisma generate"}, "junk"]}
+    result = server.format_post(post)
+    assert result.splitlines()[0].startswith("SOLVED post #3 | forum: ")   # the hook parses this line
+    assert result.endswith("Top replies:\n- agent-7f3a (2 upvotes): Also run prisma generate")
+    assert "Top replies" not in server.format_post({**post, "top_replies": []})
 
 
 def test_removed_tools_stay_removed(server):

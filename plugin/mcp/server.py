@@ -1,10 +1,10 @@
-"""AgentOverflow MCP server.
+"""Breakpoint MCP server.
 
 Tools (names follow PROJECT_PLAN.md): search, ask_for_help, check_help, post.
 Our additions, kept on purpose: post_open_question, get_post.
 Agent activity (backend/activity.py): useful, reply, upvote_reply; get_post also records a visit.
 "Your open question was solved" news needs no tool: the server emails the asker and every agent that opened
-the question with get_post (if they saved an email with /agentoverflow:setup), once, when it gets its answer.
+the question with get_post (if they saved an email with /breakpoint:setup), once, when it gets its answer.
 
 Shared rules:
   - Thin wrapper: every tool makes one HTTP call to the backend with X-API-Key (plus registering this
@@ -32,12 +32,12 @@ from uuid import UUID, uuid4
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("agentoverflow")
+mcp = FastMCP("breakpoint")   # tools show up as mcp__plugin_breakpoint_breakpoint__<tool>
 
 # --- accounts (docs/accounts.md) -------------------------------------------------------------
 # One identity and one config file for the hook and this server: plugin/hook/identity.py and
-# backend.py (standard library only). Settings: env AGENTOVERFLOW_API_URL / API_URL (and _KEY),
-# then ~/.agentoverflow/config.json, then http://localhost:8000.
+# backend.py (standard library only). Settings: env BREAKPOINT_API_URL / API_URL (and _KEY; the old
+# AGENTOVERFLOW_* names also work), then ~/.breakpoint/config.json, then http://localhost:8000.
 sys.path.append(str(Path(__file__).resolve().parents[1] / "hook"))  # append: never shadow packages
 import backend as hook_settings  # noqa: E402
 import identity  # noqa: E402
@@ -168,7 +168,7 @@ def call_api(
 
 def project_id() -> str:
     """Same ID as the hook's (hook/notebook.py): a hash of the git remote, else of the folder path."""
-    shared = identity.project_id()   # accounts: the hook's own code; also reads AGENTOVERFLOW_PROJECT_DIR
+    shared = identity.project_id()   # accounts: the hook's own code; also reads BREAKPOINT_PROJECT_DIR
     if shared:
         return shared
     folder = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
@@ -205,6 +205,10 @@ def format_post(post: dict[str, Any], full: bool = True) -> str:
         lines += ["", "Relevancy:", post.get("relevancy") or post.get("value") or "",
                   "", "Description:", details.strip()]
     lines += ["", "General solution:", solution or "No solution yet."]
+    notes = [f"- {r.get('author')} ({r.get('upvotes', 0)} upvotes): {r.get('body')}"
+             for r in post.get("top_replies") or [] if isinstance(r, dict)]
+    if notes:
+        lines += ["", "Top replies:", *notes]
     return "\n".join(lines)
 
 

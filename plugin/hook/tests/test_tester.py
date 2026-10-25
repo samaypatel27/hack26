@@ -75,7 +75,7 @@ class TeamReplies(TempProject):
 
     def test_mcp_result_object_shape(self):
         self.stuck()
-        self.send("PostToolUse", tool_name="mcp__plugin_agentoverflow_agentoverflow__ask_for_help", tool_input={},
+        self.send("PostToolUse", tool_name="mcp__plugin_breakpoint_breakpoint__ask_for_help", tool_input={},
                   tool_response={"content": [{"type": "text", "text": LABEL + "TEAM_STARTED: run-9"}]})
         self.assertEqual(self.state()["episode"]["team_run_id"], "run-9")
 
@@ -94,7 +94,7 @@ class TeamReplies(TempProject):
     def test_report_sends_test_fixes_with_the_exact_command_once(self):
         self.stuck()
         self.mcp("ask_for_help", LABEL + "TEAM_STARTED: run-1")
-        out = self.send("PostToolUse", tool_name="mcp__plugin_agentoverflow_agentoverflow__check_help",
+        out = self.send("PostToolUse", tool_name="mcp__plugin_breakpoint_breakpoint__check_help",
                         tool_input={"run_id": "run-1"}, tool_response=[{"type": "text", "text": LABEL +
                                                                          "TEAM_REPORT: run-1\n1. musl engine ..."}])
         self.assertEqual(tag(out), "TEST_FIXES")
@@ -291,13 +291,13 @@ class TesterScript(GitProject):
         self.addCleanup(lambda: __import__("shutil").rmtree(self.scratch, True))
         self.log = self.scratch / "fake.log"
         os.environ[test_fixes.CLAUDE_ENV] = json.dumps([sys.executable, str(FAKE)])
-        os.environ["AGENTOVERFLOW_FAKE_LOG"] = str(self.log)
+        os.environ["BREAKPOINT_FAKE_LOG"] = str(self.log)
         self.temp_before = our_temp_dirs()
 
     def plan(self, plan):
         path = self.scratch / "plan.json"
         path.write_text(json.dumps({"peek": ["app.py", "helper.py"], **plan}), encoding="utf-8")
-        os.environ["AGENTOVERFLOW_FAKE_PLAN"] = str(path)
+        os.environ["BREAKPOINT_FAKE_PLAN"] = str(path)
 
     def report(self, hypotheses, **extra):
         path = self.scratch / "report.json"

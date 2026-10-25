@@ -62,7 +62,7 @@ def resolve(project: Path, session: str, state: dict[str, Any], name: str) -> di
     items = listed.get("checkpoints") or []
     if name.isdigit():
         return next((c for c in items if c["id"] == int(name)), None)
-    if name.startswith(checkpoints.session_prefix(session)):
+    if name.startswith(checkpoints.session_prefixes(session)):
         return next((c for c in items if c["ref"] == name), None)
     if state.get("checkpoints"):
         return None
@@ -105,7 +105,7 @@ def show_list(project: Path, session: str, state: dict[str, Any]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Roll the project's files back to an AgentOverflow checkpoint.")
+    parser = argparse.ArgumentParser(description="Roll the project's files back to a Breakpoint checkpoint.")
     parser.add_argument("--project", required=True, help="the project folder (the hook's message gives it)")
     parser.add_argument("--session", required=True, help="the Claude Code session id")
     parser.add_argument("checkpoint", nargs="?", help="last_good | episode_start | before_rewind | <id>")

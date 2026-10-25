@@ -4,7 +4,9 @@ Standard library only. Shared by the hook (backend.py) and the MCP server (mcp/s
 the same identity.
 
 Each install gets a random ID the first time it is needed. It lives in the same file the hook already
-reads, ~/.agentoverflow/config.json, next to api_url / api_key:
+reads, ~/.breakpoint/config.json, next to api_url / api_key. (Before the rename to Breakpoint it was
+~/.agentoverflow/config.json; if only that old file exists, it is copied to the new place once, so an old
+install keeps its ID and settings.)
 
   install_id      random UUID, made once. The public agent ID is "<model-slug>_<install_id>", the format
                   the backend's `agents` table uses (backend/activity.py on origin/main), for example
@@ -27,13 +29,16 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-CONFIG_PATH = Path.home() / ".agentoverflow" / "config.json"
+CONFIG_PATH = Path.home() / ".breakpoint" / "config.json"
+OLD_CONFIG_PATH = Path.home() / ".agentoverflow" / "config.json"   # the file from before the rename
+HOME_CONFIG_PATH = CONFIG_PATH   # the real file: only it gets the one-time copy (tests point CONFIG_PATH elsewhere)
 UNKNOWN_MODEL = "unknown"
 MAX_MODEL_CHARS = 100
 EMAIL_RE = re.compile(r"^[^@\s<>()\[\],;:\"]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
@@ -41,16 +46,44 @@ MAX_EMAIL_CHARS = 254
 
 
 # ---------------------------------------------------------------------------
+# Settings from the environment
+# ---------------------------------------------------------------------------
+
+def env(name: str) -> str:
+    """The env setting BREAKPOINT_<name>, else the old AGENTOVERFLOW_<name> (still accepted for now), else ""."""
+    return os.environ.get(f"BREAKPOINT_{name}") or os.environ.get(f"AGENTOVERFLOW_{name}") or ""
+
+
+# ---------------------------------------------------------------------------
 # The config file
 # ---------------------------------------------------------------------------
 
 def _path(path: Path | None) -> Path:
-    return Path(path) if path is not None else CONFIG_PATH
+    target = Path(path) if path is not None else CONFIG_PATH
+    if target == HOME_CONFIG_PATH:
+        copy_old_config(target, OLD_CONFIG_PATH)
+    return target
+
+
+def copy_old_config(new: Path, old: Path) -> bool:
+    """One time, after the rename: if the new config file is missing and the old one exists, copy it over
+    (the old file stays where it is). True if it copied. Never raises."""
+    try:
+        if new.exists() or not old.is_file():
+            return False
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old, new)
+        return True
+    except OSError:
+        return False
 
 
 def read_config(path: Path | None = None) -> dict[str, Any]:
+    target = _path(path)
+    if target == HOME_CONFIG_PATH and not target.exists():
+        target = OLD_CONFIG_PATH   # the copy failed (e.g. no write access): still read the old file
     try:
-        data = json.loads(_path(path).read_text(encoding="utf-8"))
+        data = json.loads(target.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -154,10 +187,9 @@ def public_name(model: str | None = None, path: Path | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 def project_folder() -> Path:
-    """CLAUDE_PROJECT_DIR (hooks get it), AGENTOVERFLOW_PROJECT_DIR (set for the MCP server in .mcp.json),
-    else the current folder."""
-    for name in ("CLAUDE_PROJECT_DIR", "AGENTOVERFLOW_PROJECT_DIR"):
-        value = os.environ.get(name, "")
+    """CLAUDE_PROJECT_DIR (hooks get it), BREAKPOINT_PROJECT_DIR (set for the MCP server in .mcp.json; the old
+    AGENTOVERFLOW_PROJECT_DIR also works), else the current folder."""
+    for value in (os.environ.get("CLAUDE_PROJECT_DIR", ""), env("PROJECT_DIR")):
         if value and "${" not in value:   # an unexpanded ${...} from .mcp.json means "not set"
             return Path(value)
     return Path.cwd()

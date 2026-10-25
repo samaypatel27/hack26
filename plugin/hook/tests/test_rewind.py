@@ -96,7 +96,7 @@ class Checkpoints(GitProject):
     def test_save_skips_duplicates_and_numbers_refs(self):
         first = checkpoints.save(self.project, self.sid, "last_good")
         self.assertTrue(first["ok"] and first["saved"])
-        self.assertEqual(first["ref"], f"refs/agentoverflow/checkpoints/{self.sid}/1")
+        self.assertEqual(first["ref"], f"refs/breakpoint/checkpoints/{self.sid}/1")
         again = checkpoints.save(self.project, self.sid, "episode_start")
         self.assertEqual((again["saved"], again["ref"], again["same_as"]), (False, first["ref"], "last_good"))
         self.write("app.py", "changed\n")
@@ -104,8 +104,8 @@ class Checkpoints(GitProject):
         self.assertEqual((second["saved"], second["id"]), (True, 2))
         listed = checkpoints.list_checkpoints(self.project, self.sid)["checkpoints"]
         self.assertEqual([(c["id"], c["label"]) for c in listed], [(1, "last_good"), (2, "episode_start")])
-        self.assertIn("agentoverflow checkpoint: last_good", self.git("log", "--format=%s", "-1", first["ref"]))
-        self.assertNotIn("agentoverflow", self.git("log", "--oneline", "main"))   # never on the branch
+        self.assertIn("breakpoint checkpoint: last_good", self.git("log", "--format=%s", "-1", first["ref"]))
+        self.assertNotIn("breakpoint", self.git("log", "--oneline", "main"))   # never on the branch
 
     def test_prune_keeps_the_newest(self):
         with mock.patch.object(checkpoints, "MAX_PER_SESSION", 3):
@@ -113,9 +113,24 @@ class Checkpoints(GitProject):
             for n in range(5):
                 self.write("app.py", f"v{n}\n")
                 results.append(checkpoints.save(self.project, self.sid, "last_good"))
-        self.assertEqual(results[3]["pruned"], [f"refs/agentoverflow/checkpoints/{self.sid}/1"])
+        self.assertEqual(results[3]["pruned"], [f"refs/breakpoint/checkpoints/{self.sid}/1"])
         listed = checkpoints.list_checkpoints(self.project, self.sid)["checkpoints"]
         self.assertEqual([c["id"] for c in listed], [3, 4, 5])
+
+    def test_checkpoints_from_before_the_rename_still_work(self):
+        """Old installs saved under refs/agentoverflow/checkpoints: still listed, restorable, numbered on from."""
+        with mock.patch.object(checkpoints, "REF_ROOT", checkpoints.OLD_REF_ROOT), \
+                mock.patch.object(checkpoints, "MESSAGE_PREFIX", checkpoints.OLD_MESSAGE_PREFIX):
+            old = checkpoints.save(self.project, self.sid, "last_good")
+        self.assertEqual(old["ref"], f"refs/agentoverflow/checkpoints/{self.sid}/1")
+        self.write("app.py", "broken\n")
+        new = checkpoints.save(self.project, self.sid, "episode_start")
+        self.assertEqual(new["ref"], f"refs/breakpoint/checkpoints/{self.sid}/2")
+        listed = checkpoints.list_checkpoints(self.project, self.sid)["checkpoints"]
+        self.assertEqual([(c["id"], c["label"]) for c in listed], [(1, "last_good"), (2, "episode_start")])
+        self.assertTrue(old["ref"].startswith(checkpoints.session_prefixes(self.sid)))
+        self.assertTrue(checkpoints.restore(self.project, self.sid, old["ref"])["ok"])
+        self.assertEqual(self.read("app.py"), "def total(xs):\n    return sum(xs)\n")
 
     def test_restore_rewinds_files_only(self):
         self.write("staged.py", "staged = True\n")
@@ -172,7 +187,7 @@ class Checkpoints(GitProject):
                          (["app.py"], ["extra.py"], ["util.py"], 3))
 
     def test_unknown_checkpoint_and_slow_git(self):
-        self.assertFalse(checkpoints.restore(self.project, self.sid, "refs/agentoverflow/nope")["ok"])
+        self.assertFalse(checkpoints.restore(self.project, self.sid, "refs/breakpoint/nope")["ok"])
         slow = checkpoints.save(self.project, self.sid, "last_good", timeout=0.0001)
         self.assertFalse(slow["ok"])
         self.assertIn("took longer", slow["reason"])
@@ -339,7 +354,7 @@ class Offer(GitProject):
 
     def test_own_rewind_command_is_ignored(self):
         cmd = messages.rewind_command(self.project, self.sid, "last_good")
-        self.assertIsNone(self.ok(cmd, "[AgentOverflow: CLEAN_SLATE] ..."))
+        self.assertIsNone(self.ok(cmd, "[Breakpoint: CLEAN_SLATE] ..."))
         self.assertIsNone(self.send("PostToolUseFailure", tool_name="Bash", tool_input={"command": cmd},
                                     error="Exit code 1\nNo checkpoint"))
         self.assertEqual((self.state()["checkpoints"], self.state()["history"]), ([], []))
@@ -371,7 +386,7 @@ class Cli(GitProject):
         result = self.run_command(self.offered_command(out, "last_good"))
         self.assertEqual(result.returncode, 0, result.stderr)
         note = result.stdout
-        self.assertTrue(note.startswith("[AgentOverflow: CLEAN_SLATE] Files rewound to last_good: the last time "
+        self.assertTrue(note.startswith("[Breakpoint: CLEAN_SLATE] Files rewound to last_good: the last time "
                                         "`python -m pytest tests -q` passed"), note)
         self.assertIn("restored: 1 file (app.py)", note)
         self.assertIn("deleted (created after that point): scratch_1.py", note)

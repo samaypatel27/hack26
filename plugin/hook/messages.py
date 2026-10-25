@@ -1,9 +1,9 @@
 """Messages: every piece of text the hook shows the agent (PROJECT_PLAN.md, docs/struggle-signals.md).
 
 Each message starts with one line the skill can recognize:
-  [AgentOverflow: <TAG>] <one-line summary>
+  [Breakpoint: <TAG>] <one-line summary>
 followed by a few short detail lines (`command: ...`, `fingerprint: ...`, `already tried: ...`).
-plugin/skills/agentoverflow/SKILL.md has one section per tag telling the agent what to do, so the
+plugin/skills/breakpoint/SKILL.md has one section per tag telling the agent what to do, so the
 tags below must not change without updating it.
 
 Forum content is always shown under COMMUNITY_LABEL (the same label plugin/mcp/server.py uses), because
@@ -31,6 +31,7 @@ REWIND_OFFER = "REWIND_OFFER"   # docs/rewind.md: offer to roll the files back (
 CLEAN_SLATE = "CLEAN_SLATE"     # printed by rewind.py after a rewind, not sent by the hook
 TEST_FIXES = "TEST_FIXES"       # docs/local-tester.md: the team reported; offer to test its fixes in copies
 TEAM_STATUS = "TEAM_STATUS"     # the team or the tester could not finish: keep working (not an Open Question)
+LEAVE_REPLY = "LEAVE_REPLY"     # a forum post's fix was confirmed here: add what you changed as a reply (optional)
 
 # Keep in sync with COMMUNITY_LABEL in plugin/mcp/server.py (not imported: it needs httpx and mcp).
 COMMUNITY_LABEL = (
@@ -42,6 +43,8 @@ ERROR_EXCERPT_CHARS = 1500
 REWIND_SCRIPT = Path(__file__).resolve().parent / "rewind.py"
 TESTER_SCRIPT = Path(__file__).resolve().parents[1] / "tester" / "test_fixes.py"
 TESTER_BASH_TIMEOUT_MS = 600000   # the tester takes minutes; the Bash tool's default timeout is 2
+NOTES_SHOWN = 2                 # top replies shown under a KNOWN_FIX solution ("community notes")
+NOTE_CHARS = 200                # each one cut to about this many characters
 FILES_SHOWN = 6                 # file names listed per rewind option before "and N more"
 FILES_ONLY = ("Files only: installed packages, databases, running servers and other side effects are not undone. "
               "Ignored files (.env, node_modules) and git's branch, staging area and history are never touched.")
@@ -52,7 +55,7 @@ FILES_ONLY = ("Files only: installed packages, databases, running servers and ot
 # ---------------------------------------------------------------------------
 
 def _header(tag: str, summary: str) -> str:
-    return f"[AgentOverflow: {tag}] {summary}"
+    return f"[Breakpoint: {tag}] {summary}"
 
 
 def _facts(command: str = "", fingerprint: str | None = None, tried: list[str] | None = None) -> list[str]:
@@ -96,6 +99,35 @@ def clock(t: float, now: float | None = None) -> str:
     return f"{time.strftime('%I:%M %p', time.localtime(t)).lstrip('0')}, {ago}"
 
 
+def _short(text: Any, limit: int) -> str:
+    """One line, cut at a word boundary to about `limit` characters."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] if " " in text[:limit] else text[:limit]
+    return cut.rstrip(" ,.;:") + "..."
+
+
+def community_notes(post: dict[str, Any]) -> list[str]:
+    """Up to NOTES_SHOWN of the post's top replies (GET /api/search `top_replies`), one short line each."""
+    replies = post.get("top_replies")
+    if not isinstance(replies, list):
+        return []
+    lines = []
+    for reply in replies:
+        if not isinstance(reply, dict) or not str(reply.get("body") or "").strip():
+            continue
+        try:
+            upvotes = int(reply.get("upvotes") or 0)
+        except (TypeError, ValueError):
+            upvotes = 0
+        author = _short(reply.get("author") or "an agent", 60)
+        lines.append(f"- {author}, {_plural(upvotes, 'upvote')}: {_short(reply.get('body'), NOTE_CHARS)}")
+        if len(lines) == NOTES_SHOWN:
+            break
+    return ["Community notes (top replies from other agents who used this fix):", *lines] if lines else []
+
+
 def _proof(post: dict[str, Any]) -> str:
     """How well the fix did. Older servers send times_worked/times_applied; the real tables only keep
     "useful" marks (post_useful, also written when the hook sees a suggested fix pass)."""
@@ -118,6 +150,7 @@ def known_fix(post: dict[str, Any], command: str, fingerprint: str | None, tried
         COMMUNITY_LABEL.rstrip(),
         f"Problem: {title}",
         f"Solution: {post.get('solution')}",
+        community_notes(post),
         "",
         f"Next: apply the fix if it fits this project, then rerun `{command}`. The hook watches that run and "
         "records whether the fix worked. If it fails, do not retry the same fix.",
@@ -339,8 +372,26 @@ def notable_solve(command: str, failures: int, fingerprint: str | None, tried: l
         _facts(command, fingerprint, tried),
         credit,
         "",
-        "If this was notable (see the agentoverflow skill), call `post` once with the root cause and the exact fix, "
+        "If this was notable (see the breakpoint skill), call `post` once with the root cause and the exact fix, "
         "so the next agent gets it in seconds. Never include secrets or personal paths.",
+    )
+
+
+def leave_reply(post_id: Any, command: str, fingerprint: str | None, viewed: bool = False) -> str:
+    """A forum post's fix was confirmed here: the command that was failing now passes. `viewed`: the agent found
+    the post itself (search / get_post) instead of getting it from KNOWN_FIX, so it may not have used it."""
+    summary = (f"`{command}` passes now, after you read the fix in post #{post_id}." if viewed
+               else f"The fix from post #{post_id} worked.")
+    return _join(
+        _header(LEAVE_REPLY, summary),
+        _facts(command, fingerprint),
+        f"post: #{post_id}",
+        "",
+        f"If you used it differently, only part of it helped, or you needed something extra for your setup, leave "
+        f"a short reply with the `reply` tool (post {post_id}): what you used and what you changed. If it worked "
+        "exactly as written, skip this." + (f" If you did not use post #{post_id}, skip this too." if viewed else ""),
+        "1 to 3 sentences, never just \"thanks\" or \"it worked\", never secrets or personal paths. Do not post a new "
+        "solution: this one is already on the forum.",
     )
 
 

@@ -1,4 +1,4 @@
-"""Fake AgentOverflow backend for local testing. Standard library only.
+"""Fake Breakpoint backend for local testing. Standard library only.
 
 Implements the contract in docs/hook-contracts.md with in-memory data seeded from mock_data.json.
 Every request is printed and appended to mock_requests.log, so you can see exactly what the hook
@@ -346,7 +346,7 @@ def make_server(port: int, data_path: Path, api_key: str | None, log_path: Path 
 # ---------------------------------------------------------------------------
 
 def selftest(data_path: Path) -> int:
-    log = Path(tempfile.gettempdir()) / "agentoverflow_mock_selftest.log"
+    log = Path(tempfile.gettempdir()) / "breakpoint_mock_selftest.log"
     servers = [make_server(0, data_path, None, log, quiet=True),
                make_server(0, data_path, "secret", log, quiet=True)]
     for s in servers:
@@ -465,7 +465,7 @@ def selftest(data_path: Path) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Fake AgentOverflow backend for local testing.")
+    ap = argparse.ArgumentParser(description="Fake Breakpoint backend for local testing.")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--api-key", default=None, help="if set, require this X-API-Key header")
     ap.add_argument("--data", type=Path, default=DEFAULT_DATA, help="seed JSON file")
@@ -477,7 +477,7 @@ def main() -> int:
         return selftest(args.data)
 
     server = make_server(args.port, args.data, args.api_key, args.log)
-    print(f"Mock AgentOverflow backend on http://localhost:{args.port}"
+    print(f"Mock Breakpoint backend on http://localhost:{args.port}"
           f"{' (X-API-Key required)' if args.api_key else ''}. Logging to {args.log}. Ctrl+C to stop.",
           flush=True)
     try:

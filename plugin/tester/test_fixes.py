@@ -12,7 +12,7 @@ For each hypothesis (top --max-hypotheses, in parallel):
      checkpoint, else HEAD. Heavy ignored folders (node_modules, .venv, venv) are linked in (a Windows
      junction or a symlink), or copied when the hypothesis has to install something, or skipped (--deps);
   2. session: headless Claude Code (`claude -p`, Sonnet, a turn limit, acceptEdits, no permission prompts,
-     no MCP servers) applies ONLY that hypothesis's steps in the copy, with AGENTOVERFLOW_SPECIALIST=1 so our
+     no MCP servers) applies ONLY that hypothesis's steps in the copy, with BREAKPOINT_SPECIALIST=1 so our
      hook stays silent there and can never start a chain reaction;
   3. check: this script reruns the check command in the copy itself (the session's claim is never trusted)
      and captures `git diff` of the copy against the starting commit (new files included);
@@ -32,7 +32,8 @@ Usage:
   options: --max-hypotheses 3  --timeout 180  --check-timeout 120  --parallel 3 | --no-parallel
            --deps link|copy|none  --setup "CMD"  --max-turns 30  --model sonnet  --keep
 
-Tests (and demos) replace `claude` with a fake: env AGENTOVERFLOW_TESTER_CLAUDE = a JSON list or a command line.
+Tests (and demos) replace `claude` with a fake: env BREAKPOINT_TESTER_CLAUDE = a JSON list or a command line
+(the old name AGENTOVERFLOW_TESTER_CLAUDE also works).
 Standard library only.
 """
 
@@ -61,7 +62,8 @@ import brain  # noqa: E402
 import checkpoints  # noqa: E402
 import notebook  # noqa: E402
 
-CLAUDE_ENV = "AGENTOVERFLOW_TESTER_CLAUDE"   # override the claude command (tests use a fake)
+CLAUDE_ENV = "BREAKPOINT_TESTER_CLAUDE"   # override the claude command (tests use a fake)
+OLD_CLAUDE_ENV = "AGENTOVERFLOW_TESTER_CLAUDE"   # the name from before the rename, still read
 MODEL = "sonnet"
 MAX_TURNS = 30
 SESSION_TIMEOUT = 180       # seconds per hypothesis session
@@ -75,7 +77,7 @@ TAIL_LINES = 25
 TAIL_CHARS = 3000
 DIFF_CHARS = 60_000         # diff kept per hypothesis in the result file
 SESSION_TEXT_CHARS = 1500
-COPY_PREFIX = "agentoverflow_tester_"
+COPY_PREFIX = "breakpoint_tester_"
 REPRO_LABEL = "tester_start"
 STEPS_SHOWN = 12
 LINK_DIRS = ("node_modules", ".venv", "venv")
@@ -202,7 +204,7 @@ def run_shell(command: str, cwd: Path, env: dict[str, str], timeout: float) -> d
 
 def claude_command() -> list[str]:
     """The claude CLI (the native exe behind npm's claude.cmd when we can find it), or the test override."""
-    override = os.environ.get(CLAUDE_ENV, "").strip()
+    override = (os.environ.get(CLAUDE_ENV) or os.environ.get(OLD_CLAUDE_ENV) or "").strip()
     if override:
         if override.startswith("["):
             return [str(p) for p in json.loads(override)]
@@ -222,7 +224,7 @@ def claude_command() -> list[str]:
 
 def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in PARENT_SESSION_VARS}
-    env["AGENTOVERFLOW_SPECIALIST"] = "1"   # our hook stays silent in tester sessions (main.py)
+    env["BREAKPOINT_SPECIALIST"] = "1"   # our hook stays silent in tester sessions (main.py)
     env.update(extra or {})
     return env
 

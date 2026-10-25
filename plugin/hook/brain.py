@@ -27,6 +27,14 @@ A direct ask_for_help (not suggested by the hook) is tied to the command that is
 
 A command that kept failing and now passes closes the episode: NOTABLE_SOLVE, or SUSPECT_FIX when
 the git diff shows the failure was hidden (|| true, skipped tests, ...) instead of fixed.
+
+LEAVE_REPLY: only for a solution that was ALREADY POSTED on the forum, never for the team's or the tester's fixes
+(those get NOTABLE_SOLVE: a new post). It is sent when the command that was failing passes after either
+  - a KNOWN_FIX handoff (the hook's own search, or ask_for_help answering KNOWN_FIX), or
+  - the agent's own `search` / `get_post` call that showed a SOLVED post while that command was failing
+    (state["viewed_posts"]; the most recent one counts, and a KNOWN_FIX post wins over it).
+The outcome is reported for that post first. At most once per post per session (state["reply_nudged"], which also
+holds posts the agent already replied to), and never at Stop.
 The backend is called only at these decision points, never on every event.
 
 Checkpoints (checkpoints.py, git snapshots of the files): "last_good" when the goal command passes,
@@ -64,6 +72,8 @@ TEAM_TAG_RE = re.compile(r"^(TEAM_STARTED|TEAM_WORKING|TEAM_REPORT|TEAM_NO_ANSWE
                          r"\b:?[ \t]*(.*)$", re.MULTILINE)
 LABEL_RE = re.compile(r"^\s*\[Community-posted[^\]]*\]\s*")
 TESTER_RESULT_RE = re.compile(r"^(WINNER|NO_WINNER|INCONCLUSIVE):[ \t]*(.*)$", re.MULTILINE)
+# A post's first line in the MCP `search` / `get_post` output (plugin/mcp/server.py format_post).
+POST_HEADER_RE = re.compile(r"^(SOLVED|OPEN QUESTION) post #(\d+) \|", re.MULTILINE)
 
 # Test and build commands: their pass is a "last_good" point even before anything failed.
 GOAL_COMMAND_RE = re.compile(r"\b(py\.?test|unittest|test|tests|jest|vitest|mocha|tsc|build|compile|cargo|mvn|"
@@ -214,6 +224,16 @@ def _after_run(payload: dict[str, Any], state: dict[str, Any], backend: Any,
     if episode and episode.get("pending_fix") and key == episode["pending_fix"]["key"]:
         return _check_fix(payload, state, backend, run, output)
 
+    # (a2) The agent read a solved post itself (search / get_post) while this command failed: the pass confirms it.
+    # Not when the tester's winning team fix is what made it pass: that is a new solution (NOTABLE_SOLVE).
+    viewed = _take_viewed(state, key) if run["ok"] else None
+    if viewed and not (episode and episode["key"] == key and episode.get("team_fix")):
+        if episode and episode["key"] == key:
+            state["episode"] = None   # solved with a posted fix: nothing new to post
+        backend.report_outcome(viewed["post_id"], True, viewed.get("fp"), run["cmd"],
+                               str(payload.get("session_id", "")))
+        return _leave_reply(state, viewed["post_id"], run["cmd"], viewed.get("fp"), viewed=True)
+
     # (b) The command passes after failing.
     if run["ok"]:
         same_key = bool(episode) and episode["key"] == key
@@ -254,7 +274,10 @@ def _check_fix(payload: dict[str, Any], state: dict[str, Any], backend: Any,
                            str(payload.get("session_id", "")))
     if run["ok"]:
         state["episode"] = None
-        return None
+        _take_viewed(state, run["key"])   # the KNOWN_FIX post wins over posts the agent opened itself
+        return _leave_reply(state, fix["post_id"], run["cmd"], fix.get("fp") or episode["fp"])
+    # It did not work: a later pass is not that post's doing, even if the agent opened it with get_post.
+    state["viewed_posts"] = [v for v in state.get("viewed_posts") or [] if v.get("post_id") != fix["post_id"]]
     _add_tried(episode, f"forum fix from post #{fix['post_id']} -> did not work")
     text = messages.fix_failed(fix["post_id"], run["cmd"], run["err_fp"], episode["tried"])
     episode["rung"] = max(episode["rung"], 1)   # forum done; go on to triage now
@@ -263,6 +286,45 @@ def _check_fix(payload: dict[str, Any], state: dict[str, Any], backend: Any,
     next_step = _climb(state, backend, problem, reason)
     episode["last_nudge_idx"] = len(state["history"])
     return text + "\n\n" + next_step if next_step else text
+
+
+def _leave_reply(state: dict[str, Any], post_id: Any, command: str, fp: str | None,
+                 viewed: bool = False) -> str | None:
+    """LEAVE_REPLY for a confirmed forum fix, at most once per post per session."""
+    if post_id is None:
+        return None
+    nudged = state.setdefault("reply_nudged", [])
+    if post_id in nudged:
+        return None
+    nudged.append(post_id)
+    return messages.leave_reply(post_id, command, fp, viewed)
+
+
+def _take_viewed(state: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """The most recent solved post the agent opened while `key` was failing (and forget them all), or None."""
+    viewed = [v for v in state.get("viewed_posts") or [] if isinstance(v, dict)]
+    mine = [v for v in viewed if v.get("key") == key]
+    if mine:
+        state["viewed_posts"] = [v for v in viewed if v.get("key") != key]
+    return mine[-1] if mine else None
+
+
+def _note_viewed(payload: dict[str, Any], state: dict[str, Any], get_post: bool) -> None:
+    """The agent's own `search` / `get_post` showed a SOLVED post: remember it for the command failing now."""
+    key = _failing_key(state["history"])
+    if not key:
+        return   # nothing is failing: a later pass would prove nothing about this post
+    headers = POST_HEADER_RE.findall(notebook.tool_response_text(payload))
+    if get_post:   # one post: its header comes first (the replies below it are other agents' text)
+        headers = headers[:1]
+    post_id = next((int(n) for label, n in headers if label == "SOLVED"), None)   # search: the best solved match
+    if post_id is None:
+        return
+    fp = (_last_failed_run(state["history"], key) or {}).get("err_fp")
+    viewed = [v for v in state.get("viewed_posts") or [] if isinstance(v, dict)
+              and (v.get("post_id"), v.get("key")) != (post_id, key)]
+    viewed.append({"post_id": post_id, "key": key, "fp": fp})
+    state["viewed_posts"] = viewed[-notebook.VIEWED_LIMIT:]
 
 
 def _ask_judge(payload: dict[str, Any], state: dict[str, Any], backend: Any) -> list[struggles.Signal]:
@@ -289,6 +351,18 @@ def _after_mcp_tool(payload: dict[str, Any], state: dict[str, Any]) -> str | Non
     episode = state.get("episode")
     if "ask_for_help" in name or "check_help" in name:
         return _after_team_tool(payload, state, "ask_for_help" in name)
+    if name.endswith("__search") or name.endswith("__get_post"):
+        _note_viewed(payload, state, name.endswith("__get_post"))
+        return None
+    if name.endswith("__reply"):   # it already replied to that post: no LEAVE_REPLY for it later
+        tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+        post_id = tool_input.get("post_id")
+        if isinstance(post_id, int) and not isinstance(post_id, bool) \
+                and "Reply #" in notebook.tool_response_text(payload):
+            nudged = state.setdefault("reply_nudged", [])
+            if post_id not in nudged:
+                nudged.append(post_id)
+        return None
     if "post_open_question" in name and episode:
         episode["oq_posted"] = True
     elif name.endswith("__post") and episode:

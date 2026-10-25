@@ -5,8 +5,9 @@ bad JSON, a non-2xx answer. The hook must never freeze or crash the agent, so ca
 as "no answer" and carry on.
 
 Where the server is (first match wins):
-  1. env AGENTOVERFLOW_API_URL / AGENTOVERFLOW_API_KEY (also API_URL / API_KEY, like the MCP server)
-  2. ~/.agentoverflow/config.json  {"api_url": ..., "api_key": ...}
+  1. env BREAKPOINT_API_URL / BREAKPOINT_API_KEY (also the old AGENTOVERFLOW_API_URL / _KEY, and API_URL / API_KEY,
+     like the MCP server)
+  2. ~/.breakpoint/config.json  {"api_url": ..., "api_key": ...}  (identity.py copies an old ~/.agentoverflow one over)
   3. http://localhost:8000 with no key
 
 Contract (docs/hook-contracts.md; plugin/hook/dev/mock_backend.py implements it):
@@ -38,7 +39,7 @@ from typing import Any
 import identity   # accounts (docs/accounts.md): the install's agent ID, model and project
 
 DEFAULT_URL = "http://localhost:8000"
-CONFIG_PATH = Path.home() / ".agentoverflow" / "config.json"
+CONFIG_PATH = identity.CONFIG_PATH   # ~/.breakpoint/config.json
 SEARCH_TIMEOUT = 2.0
 OUTCOME_TIMEOUT = 2.0
 JUDGE_TIMEOUT = 5.0
@@ -63,11 +64,7 @@ SECRET_PATTERNS = [
 # ---------------------------------------------------------------------------
 
 def _file_config() -> dict[str, Any]:
-    try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return identity.read_config(CONFIG_PATH)   # {} on any problem; handles the old ~/.agentoverflow file
 
 
 def _setting(env_names: list[str], file_key: str, default: str) -> str:
@@ -78,13 +75,13 @@ def _setting(env_names: list[str], file_key: str, default: str) -> str:
 
 
 def api_url() -> str:
-    url = _setting(["AGENTOVERFLOW_API_URL", "API_URL"], "api_url", DEFAULT_URL).rstrip("/")
+    url = _setting(["BREAKPOINT_API_URL", "AGENTOVERFLOW_API_URL", "API_URL"], "api_url", DEFAULT_URL).rstrip("/")
     # "localhost" makes urllib try IPv6 then IPv4, doubling the wait when the server is down.
     return url.replace("://localhost", "://127.0.0.1")
 
 
 def api_key() -> str:
-    return _setting(["AGENTOVERFLOW_API_KEY", "API_KEY"], "api_key", "")
+    return _setting(["BREAKPOINT_API_KEY", "AGENTOVERFLOW_API_KEY", "API_KEY"], "api_key", "")
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +99,7 @@ def scrub(text: str) -> str:
 
 
 def _down_marker(url: str) -> Path:
-    return Path(tempfile.gettempdir()) / f"agentoverflow_down_{hashlib.sha1(url.encode()).hexdigest()[:8]}"
+    return Path(tempfile.gettempdir()) / f"breakpoint_down_{hashlib.sha1(url.encode()).hexdigest()[:8]}"
 
 
 def _recently_down(url: str) -> bool:

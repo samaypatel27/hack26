@@ -18,6 +18,10 @@ The state file holds:
   checkpoints  git snapshots saved this session, oldest first (checkpoints.py, docs/rewind.md):
                {"id", "ref", "label", "time", "history_idx", "key", "cmd"}. Two entries can share one
                snapshot when the files did not change in between.
+  viewed_posts solved posts the agent opened itself with the `search` / `get_post` MCP tools while a command was
+               failing, oldest first: {"post_id", "key", "fp"} (key = that failing command). If the command
+               then passes, the brain treats it like a confirmed forum fix (outcome + LEAVE_REPLY).
+  reply_nudged post ids LEAVE_REPLY was sent for (or the agent already replied to): at most once per post
 
 This file also turns raw hook payloads into history records (action_from_tool_use).
 """
@@ -39,6 +43,7 @@ HISTORY_LIMIT = 200
 TAIL_CHARS = 500        # output kept per run, for the AI judge and "already tried" notes
 ERROR_CHARS = 2000      # error text kept for forum searches and messages
 GIT_TIMEOUT = 2
+VIEWED_LIMIT = 10      # viewed_posts entries kept
 CHECKPOINT_LIMIT = 20   # entries kept in the notes (checkpoints.py keeps the same number of git refs)
 REWIND_KIND = "rewind"  # history record written by rewind.py; struggles.py counts from the last one
 
@@ -110,6 +115,8 @@ def new_state(payload: dict[str, Any]) -> dict[str, Any]:
         "last_error": None,
         "goal_key": None,
         "checkpoints": [],
+        "viewed_posts": [],
+        "reply_nudged": [],
     }
 
 
@@ -148,8 +155,9 @@ def load(payload: dict[str, Any]) -> dict[str, Any]:
         return new_state(payload)
     for key in ("episode", "last_judge", "last_error", "goal_key"):
         state.setdefault(key, None)
-    if not isinstance(state.get("checkpoints"), list):
-        state["checkpoints"] = []
+    for key in ("checkpoints", "viewed_posts", "reply_nudged"):   # older notes files lack the last two
+        if not isinstance(state.get(key), list):
+            state[key] = []
     if not state.get("project_id"):
         state["project_id"] = project_id(project_dir(payload))
     return state

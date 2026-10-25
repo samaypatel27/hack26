@@ -28,8 +28,8 @@ import messages  # noqa: E402
 import notebook  # noqa: E402
 import struggles  # noqa: E402
 
-ENV_KEYS = ["CLAUDE_PROJECT_DIR", "AGENTOVERFLOW_API_URL", "AGENTOVERFLOW_API_KEY", "API_URL", "API_KEY",
-            "AGENTOVERFLOW_SPECIALIST"]
+ENV_KEYS = ["CLAUDE_PROJECT_DIR", "BREAKPOINT_API_URL", "BREAKPOINT_API_KEY", "API_URL", "API_KEY",
+            "BREAKPOINT_SPECIALIST", "AGENTOVERFLOW_API_URL", "AGENTOVERFLOW_API_KEY", "AGENTOVERFLOW_SPECIALIST"]
 
 PRISMA = ('Exit code 1\nPrismaClientInitializationError: Prisma Client could not locate the Query Engine for runtime '
           '"linux-musl-openssl-3.0.x".\n    at /app/node_modules/@prisma/client/runtime/library.js:111:12')
@@ -47,11 +47,11 @@ OPEN = {"id": 3, "description": "pytest cannot import app\nTried: PYTHONPATH", "
 
 
 def tag(output):
-    """The first [AgentOverflow: TAG] in a hook output, or None."""
+    """The first [Breakpoint: TAG] in a hook output, or None."""
     if not output:
         return None
     text = output.get("reason") or output["hookSpecificOutput"]["additionalContext"]
-    return text.split("]")[0].replace("[AgentOverflow: ", "")
+    return text.split("]")[0].replace("[Breakpoint: ", "")
 
 
 def text_of(output):
@@ -122,7 +122,7 @@ class TempProject(unittest.TestCase):
         return self.send("UserPromptSubmit", prompt=prompt)
 
     def mcp(self, name, response):
-        return self.send("PostToolUse", tool_name=f"mcp__plugin_agentoverflow_agentoverflow__{name}",
+        return self.send("PostToolUse", tool_name=f"mcp__plugin_breakpoint_breakpoint__{name}",
                          tool_input={}, tool_response=[{"type": "text", "text": response}])
 
     def stop(self, active=False):
@@ -238,7 +238,7 @@ class Messages(unittest.TestCase):
             messages.not_done(DC, "abc", "why"),
         ]
         for text in texts:
-            self.assertRegex(text.splitlines()[0], r"^\[AgentOverflow: [A-Z_]+\] \S")
+            self.assertRegex(text.splitlines()[0], r"^\[Breakpoint: [A-Z_]+\] \S")
             self.assertIn(f"command: {DC if DC in text else PT}", text)
             self.assertIn("fingerprint: abc", text)
         self.assertIn("ask_for_help", texts[4])
@@ -272,9 +272,45 @@ class Ladder(TempProject):
         self.assertEqual(self.state()["episode"]["pending_fix"],
                          {"post_id": 1, "key": "docker compose up", "fp": struggles.fingerprint(PRISMA)})
         self.edit("prisma/schema.prisma")
-        self.assertIsNone(self.ok(DC, "listening on :3000"))
+        out = self.ok(DC, "listening on :3000")
         self.assertIn(("outcome", 1, True), self.backend.calls)
+        self.assertEqual(tag(out), "LEAVE_REPLY")   # a posted fix worked: a reply, never NOTABLE_SOLVE
+        self.assertTrue(text_of(out).splitlines()[0].endswith("The fix from post #1 worked."))
+        self.assertIn(f"command: {DC}", text_of(out))
+        self.assertIn("post: #1", text_of(out))
+        self.assertIn("`reply` tool (post 1)", text_of(out))
         self.assertIsNone(self.state()["episode"])
+        self.assertEqual(self.state()["reply_nudged"], [1])
+        self.assertIsNone(self.stop())   # never at Stop
+
+    def test_leave_reply_at_most_once_per_post_per_session(self):
+        self.backend.search_result = [SOLVED]
+        for _ in range(3):
+            self.fail(DC, PRISMA)
+        self.assertEqual(tag(self.ok(DC)), "LEAVE_REPLY")
+        for _ in range(3):
+            out = self.fail(DC, PRISMA)
+        self.assertEqual(tag(out), "KNOWN_FIX")   # the same post again, later in the session
+        self.assertIsNone(self.ok(DC))            # outcome reported, but no second LEAVE_REPLY
+        self.assertEqual(self.backend.calls.count(("outcome", 1, True)), 2)
+
+    def test_known_fix_from_ask_for_help_also_leaves_a_reply(self):
+        self.fail(DC, PRISMA)
+        self.mcp("ask_for_help", "KNOWN_FIX: forum post #4 matches this problem (same error fingerprint).")
+        out = self.ok(DC)
+        self.assertEqual(tag(out), "LEAVE_REPLY")
+        self.assertIn("post: #4", text_of(out))
+        self.assertIn(("outcome", 4, True), self.backend.calls)
+
+    def test_no_leave_reply_when_the_agent_already_replied(self):
+        self.backend.search_result = [SOLVED]
+        for _ in range(3):
+            self.fail(DC, PRISMA)
+        self.send("PostToolUse", tool_name="mcp__plugin_breakpoint_breakpoint__reply",
+                  tool_input={"post_id": 1, "body": "Also needed openssl on Alpine 3.20."},
+                  tool_response=[{"type": "text", "text": "Reply #12 | agent-7f3a (X) | now | Upvotes: 0\n..."}])
+        self.assertIsNone(self.ok(DC))
+        self.assertIn(("outcome", 1, True), self.backend.calls)
 
     def test_fix_failed_reports_and_moves_on(self):
         self.backend.search_result = [SOLVED]
@@ -285,7 +321,7 @@ class Ladder(TempProject):
         out = self.fail(DC, PRISMA)
         self.assertEqual(tag(out), "FIX_FAILED")
         self.assertIn(("outcome", 1, False), self.backend.calls)
-        self.assertIn("[AgentOverflow: CALL_TEAM]", text_of(out))   # node_modules in the trace: external
+        self.assertIn("[Breakpoint: CALL_TEAM]", text_of(out))   # node_modules in the trace: external
         self.assertIn("forum fix from post #1 -> did not work", self.state()["episode"]["tried"])
 
     def test_no_match_external_calls_the_team(self):
@@ -413,10 +449,28 @@ class Ladder(TempProject):
         self.assertFalse(hasattr(backend, "get_updates"))
         self.assertFalse(hasattr(messages, "UPDATES"))
 
+    def test_known_fix_shows_top_replies_as_community_notes(self):
+        replies = [{"author": "agent-7f3a (Claude Sonnet 5.5)", "body": "Also add openssl to the image.\nThen rebuild.",
+                    "upvotes": 3},
+                   {"author": "agent-1b2c (GPT)", "body": "word " * 100, "upvotes": 1},
+                   {"author": "agent-9999 (X)", "body": "third one is not shown", "upvotes": 0}]
+        text = messages.known_fix({**SOLVED, "top_replies": replies}, DC, "abc", [])
+        lines = text.splitlines()
+        notes = lines.index("Community notes (top replies from other agents who used this fix):")
+        self.assertGreater(notes, next(i for i, ln in enumerate(lines) if ln.startswith("Solution:")))
+        self.assertGreater(notes, lines.index(messages.COMMUNITY_LABEL.rstrip().splitlines()[-1]))   # labeled
+        self.assertEqual(lines[notes + 1],
+                         "- agent-7f3a (Claude Sonnet 5.5), 3 upvotes: Also add openssl to the image. Then rebuild.")
+        self.assertTrue(lines[notes + 2].startswith("- agent-1b2c (GPT), 1 upvote: word word"))
+        self.assertTrue(lines[notes + 2].endswith("...") and len(lines[notes + 2]) < 260)
+        self.assertNotIn("third one", text)
+        self.assertNotIn("Community notes", messages.known_fix(SOLVED, DC, "abc", []))
+        self.assertNotIn("Community notes", messages.known_fix({**SOLVED, "top_replies": "junk"}, DC, "abc", []))
+
     def test_known_fix_shows_the_useful_count(self):
         """The real tables keep "useful" marks, not times worked/applied."""
         text = messages.known_fix(SOLVED, DC, "abc", [])
-        self.assertTrue(text.startswith("[AgentOverflow: KNOWN_FIX]"))
+        self.assertTrue(text.startswith("[Breakpoint: KNOWN_FIX]"))
         self.assertIn("(marked useful by 9 agents)", text.splitlines()[0])
         self.assertIn("marked useful by 1 agent", messages._proof({"useful_count": 1}))
         self.assertIn("worked 9 of 10 times", messages._proof({"times_worked": 9, "times_applied": 10}))
@@ -425,6 +479,119 @@ class Ladder(TempProject):
         for _ in range(5):
             self.assertIsNone(self.fail("grep -r foo .", "Exit code 1"))
         self.assertEqual(self.backend.calls, [])
+
+
+# ---------------------------------------------------------------------------
+# LEAVE_REPLY after a solved post the agent found itself (search / get_post)
+# ---------------------------------------------------------------------------
+
+def solved_header(post_id, solved=True):
+    label = "SOLVED" if solved else "OPEN QUESTION"
+    return f"{label} post #{post_id} | forum: docker | tags: docker | votes: 2 | Visited: 1 | Useful: 0 | Replies: 0"
+
+
+class ViewedPosts(TempProject):
+    def search_tool(self, *headers):
+        text = messages.COMMUNITY_LABEL + "\n\n=====\n\n".join(h + "\n\nProblem:\nx\n\nGeneral solution:\ny"
+                                                                for h in headers)
+        return self.send("PostToolUse", tool_name="mcp__plugin_breakpoint_breakpoint__search",
+                         tool_input={"error": "x"}, tool_response=[{"type": "text", "text": text}])
+
+    def get_post_tool(self, post_id, solved=True, replies="No replies yet."):
+        text = (messages.COMMUNITY_LABEL + solved_header(post_id, solved) + "\n\nProblem:\nx\n\nAgent replies:\n"
+                + replies)
+        return self.send("PostToolUse", tool_name="mcp__plugin_breakpoint_breakpoint__get_post",
+                         tool_input={"post_id": post_id}, tool_response=[{"type": "text", "text": text}])
+
+    def test_search_then_the_failing_command_passes(self):
+        self.fail(DC, PRISMA)
+        self.assertIsNone(self.search_tool(solved_header(3, solved=False), solved_header(4), solved_header(5)))
+        self.assertEqual(self.state()["viewed_posts"],
+                         [{"post_id": 4, "key": "docker compose up", "fp": struggles.fingerprint(PRISMA)}])
+        self.edit("Dockerfile")
+        out = self.ok(DC)
+        self.assertEqual(tag(out), "LEAVE_REPLY")
+        self.assertIn("after you read the fix in post #4", text_of(out).splitlines()[0])
+        self.assertIn("post: #4", text_of(out))
+        self.assertIn("If you did not use post #4, skip this too.", text_of(out))
+        self.assertIn(("outcome", 4, True), self.backend.calls)
+        self.assertEqual(self.state()["viewed_posts"], [])
+        self.assertIsNone(self.stop())
+
+    def test_get_post_uses_the_header_not_the_replies(self):
+        self.fail(DC, PRISMA)
+        self.get_post_tool(7, replies="Reply #1 | a | t | Upvotes: 0\n" + solved_header(99))
+        self.assertEqual(tag(self.ok(DC)), "LEAVE_REPLY")
+        self.assertIn(("outcome", 7, True), self.backend.calls)
+        self.assertNotIn(("outcome", 99, True), self.backend.calls)
+
+    def test_the_most_recent_viewed_post_counts(self):
+        self.fail(DC, PRISMA)
+        self.get_post_tool(7)
+        self.search_tool(solved_header(8))
+        out = self.ok(DC)
+        self.assertIn("post: #8", text_of(out))
+        self.assertEqual([c for c in self.backend.calls if c[0] == "outcome"], [("outcome", 8, True)])
+
+    def test_known_fix_post_wins_over_viewed_posts(self):
+        self.backend.search_result = [SOLVED]
+        self.fail(DC, PRISMA)
+        self.get_post_tool(8)
+        self.fail(DC, PRISMA)
+        self.assertEqual(tag(self.fail(DC, PRISMA)), "KNOWN_FIX")
+        out = self.ok(DC)
+        self.assertIn("post: #1", text_of(out))
+        self.assertEqual([c for c in self.backend.calls if c[0] == "outcome"], [("outcome", 1, True)])
+        self.assertEqual(self.state()["viewed_posts"], [])
+
+    def test_a_known_fix_that_failed_is_not_credited_later(self):
+        self.backend.search_result = [SOLVED]
+        for _ in range(3):
+            self.fail(DC, PRISMA)
+        self.get_post_tool(1)   # the agent reads the KNOWN_FIX post in full, as the skill says
+        self.assertEqual(tag(self.fail(DC, PRISMA)), "FIX_FAILED")
+        self.edit()
+        self.assertNotEqual(tag(self.ok(DC)), "LEAVE_REPLY")
+        self.assertNotIn(("outcome", 1, True), self.backend.calls)
+
+    def test_open_questions_and_nothing_failing_do_not_count(self):
+        self.fail(DC, PRISMA)
+        self.get_post_tool(3, solved=False)
+        self.search_tool(solved_header(3, solved=False))
+        self.assertEqual(self.state()["viewed_posts"], [])
+        self.ok(DC)
+        self.get_post_tool(4)   # nothing is failing now
+        self.assertEqual(self.state()["viewed_posts"], [])
+        self.assertIsNone(self.ok(DC))
+        self.assertFalse(any(c[0] == "outcome" for c in self.backend.calls))
+
+    def test_once_per_post_per_session(self):
+        for _ in range(2):
+            self.fail(DC, PRISMA)
+            self.get_post_tool(4)
+            out = self.ok(DC)
+        self.assertIsNone(out)
+        self.assertEqual(self.backend.calls.count(("outcome", 4, True)), 2)
+
+    def test_tester_winner_gets_notable_solve_not_a_reply(self):
+        for _ in range(3):
+            self.fail(DC, PRISMA)
+        self.mcp("ask_for_help", "TEAM_STARTED: run-1")
+        self.mcp("check_help", "TEAM_REPORT: run-1\n1. ...")
+        self.get_post_tool(4)
+        tester = messages.tester_command(self.project, self.sid, "run-1", DC)
+        self.send("PostToolUse", tool_name="Bash", tool_input={"command": tester},
+                  tool_response={"stdout": "WINNER: hypothesis 1 (musl engine)\n", "stderr": ""})
+        self.edit("schema.prisma")
+        self.assertEqual(tag(self.ok(DC)), "NOTABLE_SOLVE")
+        self.assertFalse(any(c[0] == "outcome" for c in self.backend.calls))
+
+    def test_older_notes_files_get_the_new_lists(self):
+        folder = self.project / ".claude" / "loop_state"
+        folder.mkdir(parents=True)
+        (folder / f"{self.sid}.json").write_text(json.dumps({"history": [], "project_id": "p"}))
+        state = self.state()
+        self.assertEqual((state["viewed_posts"], state["reply_nudged"]), ([], []))
 
 
 class Triage(unittest.TestCase):
@@ -539,8 +706,8 @@ class Backend(TempProject):
             ("POST", "/api/judge"): (200, {"stuck": True, "reason": "r", "confidence": 0.8}),
         })
         self.addCleanup(self.server.close)
-        os.environ["AGENTOVERFLOW_API_URL"] = self.server.url
-        os.environ["AGENTOVERFLOW_API_KEY"] = "k1"
+        os.environ["BREAKPOINT_API_URL"] = self.server.url
+        os.environ["BREAKPOINT_API_KEY"] = "k1"
         patcher = mock.patch.object(backend, "CONFIG_PATH", self.project / "no_config.json")
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -579,7 +746,7 @@ class Backend(TempProject):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        os.environ["AGENTOVERFLOW_API_URL"] = f"http://127.0.0.1:{port}"
+        os.environ["BREAKPOINT_API_URL"] = f"http://127.0.0.1:{port}"
         self.addCleanup(backend._mark_down, f"http://127.0.0.1:{port}", False)
         self.assertIsNone(backend.search("e", "c", "f"))
         started = time.time()
@@ -591,7 +758,7 @@ class Backend(TempProject):
         config.write_text(json.dumps({"api_url": "http://example.test:1", "api_key": "file"}))
         with mock.patch.object(backend, "CONFIG_PATH", config):
             self.assertEqual(backend.api_url(), self.server.url)    # env wins
-            del os.environ["AGENTOVERFLOW_API_URL"], os.environ["AGENTOVERFLOW_API_KEY"]
+            del os.environ["BREAKPOINT_API_URL"], os.environ["BREAKPOINT_API_KEY"]
             os.environ["API_KEY"] = "plain"
             self.assertEqual((backend.api_url(), backend.api_key()), ("http://example.test:1", "plain"))
         self.assertEqual(backend.api_url(), "http://127.0.0.1:8000")   # default, localhost -> 127.0.0.1
@@ -618,15 +785,16 @@ class EndToEnd(TempProject):
         server = FakeServer({("GET", "/api/search"): (200, [{**SOLVED, "solution": "Use the café → fix"}]),
                              ("POST", "/api/outcomes"): (200, {"post_status": "solved"})})
         self.addCleanup(server.close)
-        env = {"AGENTOVERFLOW_API_URL": server.url}
+        env = {"BREAKPOINT_API_URL": server.url}
         outputs = [self.run_main(self.bash_fail(DC, PRISMA), env) for _ in range(3)]
         self.assertEqual(outputs[:2], ["", ""])
         result = json.loads(outputs[2])
-        self.assertTrue(result["hookSpecificOutput"]["additionalContext"].startswith("[AgentOverflow: KNOWN_FIX]"))
+        self.assertTrue(result["hookSpecificOutput"]["additionalContext"].startswith("[Breakpoint: KNOWN_FIX]"))
         self.assertIn("café", result["hookSpecificOutput"]["additionalContext"])
         passed = {"hook_event_name": "PostToolUse", "session_id": "e2e", "cwd": str(self.project),
                   "tool_name": "Bash", "tool_input": {"command": DC}, "tool_response": {"stdout": "up", "stderr": ""}}
-        self.assertEqual(self.run_main(passed, env), "")
+        left = json.loads(self.run_main(passed, env))
+        self.assertTrue(left["hookSpecificOutput"]["additionalContext"].startswith("[Breakpoint: LEAVE_REPLY]"))
         self.assertEqual(server.requests[-1]["body"]["worked"], True)
         self.assertTrue((self.project / ".claude" / "loop_state" / "e2e.json").exists())
         self.assertFalse((self.project / ".claude" / "loop_state" / "_errors.log").exists())
@@ -639,9 +807,10 @@ class EndToEnd(TempProject):
                                         "cwd": str(self.project), "tool_name": "Bash", "tool_input": 5}), "")
 
     def test_specialist_sessions_do_nothing(self):
-        out = self.run_main(self.bash_fail(DC, PRISMA), {"AGENTOVERFLOW_SPECIALIST": "1"})
-        self.assertEqual(out, "")
-        self.assertFalse((self.project / ".claude").exists())
+        for name in ("BREAKPOINT_SPECIALIST", "AGENTOVERFLOW_SPECIALIST"):   # the old name still works
+            out = self.run_main(self.bash_fail(DC, PRISMA), {name: "1"})
+            self.assertEqual(out, "")
+            self.assertFalse((self.project / ".claude").exists())
 
     def test_handler_crash_is_logged_not_raised(self):
         env = {"PYTHONPATH": ""}

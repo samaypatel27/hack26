@@ -71,15 +71,17 @@ def main() -> None:
     parser.add_argument("--keep", action="store_true", help="keep the temp project folder")
     args = parser.parse_args()
 
-    project = args.project or Path(tempfile.mkdtemp(prefix="agentoverflow_replay_"))
+    project = args.project or Path(tempfile.mkdtemp(prefix="breakpoint_replay_"))
     project.mkdir(parents=True, exist_ok=True)
     transcript = project / "transcript.jsonl"
     transcript.write_text("", encoding="utf-8")
 
     env = {**os.environ, "CLAUDE_PROJECT_DIR": str(project)}
-    env.pop("AGENTOVERFLOW_SPECIALIST", None)
+    env.pop("BREAKPOINT_SPECIALIST", None)
+    env.pop("AGENTOVERFLOW_SPECIALIST", None)   # the old name of the same flag
     if args.api_url:
-        env["AGENTOVERFLOW_API_URL"] = args.api_url
+        env["BREAKPOINT_API_URL"] = args.api_url
+        env.pop("AGENTOVERFLOW_API_URL", None)
 
     step = 0
     for line in args.scenario.read_text(encoding="utf-8").splitlines():

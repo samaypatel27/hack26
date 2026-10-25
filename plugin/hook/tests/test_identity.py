@@ -3,7 +3,7 @@ registration in backend.py, the SessionStart sync in brain.py, setup_identity.py
 accounts edits in mcp/server.py.
 
 Run from the repo root: python -m unittest discover -s plugin/hook/tests
-Every test uses a temporary config file, never the real ~/.agentoverflow/config.json.
+Every test uses a temporary config file, never the real ~/.breakpoint/config.json.
 """
 
 import contextlib
@@ -36,7 +36,8 @@ import setup_identity  # noqa: E402
 
 # The backend's agent ID rule (backend/activity.py AgentRef): "<model-slug>_<lowercase UUID>".
 AGENT_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
-ENV_KEYS = ["CLAUDE_PROJECT_DIR", "AGENTOVERFLOW_PROJECT_DIR", "AGENTOVERFLOW_API_URL", "AGENTOVERFLOW_API_KEY",
+ENV_KEYS = ["CLAUDE_PROJECT_DIR", "BREAKPOINT_PROJECT_DIR", "BREAKPOINT_API_URL", "BREAKPOINT_API_KEY",
+            "AGENTOVERFLOW_PROJECT_DIR", "AGENTOVERFLOW_API_URL", "AGENTOVERFLOW_API_KEY",   # the old names
             "API_URL", "API_KEY", "AGENT_MODEL", "AGENT_ID", "ANTHROPIC_MODEL", "CLAUDE_PLUGIN_OPTION_EMAIL"]
 
 
@@ -54,7 +55,7 @@ class Isolated(unittest.TestCase):
         self.project = self.tmp / "project"
         self.project.mkdir()
         os.environ["CLAUDE_PROJECT_DIR"] = str(self.project)
-        self.config = self.tmp / "home" / ".agentoverflow" / "config.json"
+        self.config = self.tmp / "home" / ".breakpoint" / "config.json"
         for target in (backend, identity):
             patcher = mock.patch.object(target, "CONFIG_PATH", self.config)
             patcher.start()
@@ -137,10 +138,37 @@ class Identity(Isolated):
 
     def test_project_dir_for_the_mcp_server(self):
         del os.environ["CLAUDE_PROJECT_DIR"]
-        os.environ["AGENTOVERFLOW_PROJECT_DIR"] = str(self.project)
+        os.environ["BREAKPOINT_PROJECT_DIR"] = str(self.project)
         self.assertEqual(identity.project_folder(), self.project)
-        os.environ["AGENTOVERFLOW_PROJECT_DIR"] = "${CLAUDE_PROJECT_DIR}"            # not expanded: ignore it
+        os.environ["BREAKPOINT_PROJECT_DIR"] = "${CLAUDE_PROJECT_DIR}"               # not expanded: ignore it
         self.assertEqual(identity.project_folder(), Path.cwd())
+        del os.environ["BREAKPOINT_PROJECT_DIR"]
+        os.environ["AGENTOVERFLOW_PROJECT_DIR"] = str(self.project)                  # the old name still works
+        self.assertEqual(identity.project_folder(), self.project)
+
+    def test_old_config_folder_is_copied_once(self):
+        """Before the rename the file was ~/.agentoverflow/config.json: an old install keeps its ID."""
+        home = self.tmp / "realhome"
+        new, old = home / ".breakpoint" / "config.json", home / ".agentoverflow" / "config.json"
+        old.parent.mkdir(parents=True)
+        old.write_text(json.dumps({"install_id": "11111111-2222-4333-8444-555555555555", "api_key": "k"}),
+                       encoding="utf-8")
+        with mock.patch.object(identity, "CONFIG_PATH", new), mock.patch.object(identity, "HOME_CONFIG_PATH", new), \
+                mock.patch.object(identity, "OLD_CONFIG_PATH", old):
+            self.assertEqual(identity.read_config()["api_key"], "k")
+            self.assertTrue(new.is_file() and old.is_file())                        # copied; the old file stays
+            identity.update_config({"api_key": "k2"})
+            self.assertEqual(identity.ensure()["install_id"], "11111111-2222-4333-8444-555555555555")
+            self.assertEqual(json.loads(old.read_text(encoding="utf-8"))["api_key"], "k")   # never copied again
+            self.assertEqual(identity.read_config()["api_key"], "k2")
+        self.assertFalse(identity.copy_old_config(self.tmp / "a" / "c.json", self.tmp / "missing.json"))
+
+    def test_env_names_new_then_old(self):
+        os.environ["AGENTOVERFLOW_API_URL"] = "http://old.test"
+        self.assertEqual(backend.api_url(), "http://old.test")
+        os.environ["BREAKPOINT_API_URL"] = "http://new.test"
+        self.assertEqual(backend.api_url(), "http://new.test")
+        self.assertEqual(identity.env("API_URL"), "http://new.test")
 
     def test_registration_memory(self):
         body = identity.registration_body()
@@ -206,8 +234,8 @@ class HookBackend(Isolated):
             ("POST", "/api/agents/register"): (200, {"agent_id": "x", "email_on_file": True}),
         })
         self.addCleanup(self.server.close)
-        os.environ["AGENTOVERFLOW_API_URL"] = self.server.url
-        os.environ["AGENTOVERFLOW_API_KEY"] = "k1"
+        os.environ["BREAKPOINT_API_URL"] = self.server.url
+        os.environ["BREAKPOINT_API_KEY"] = "k1"
 
     def test_every_call_carries_the_identity(self):
         backend.search("boom", "npm test", "abcd1234")
@@ -251,7 +279,7 @@ class HookBackend(Isolated):
 
 
 # ---------------------------------------------------------------------------
-# setup_identity.py (run by /agentoverflow:setup)
+# setup_identity.py (run by /breakpoint:setup)
 # ---------------------------------------------------------------------------
 
 class SetupScript(Isolated):
@@ -282,7 +310,7 @@ class SetupScript(Isolated):
     def test_register_now_when_server_is_up(self):
         server = Recorder({("POST", "/api/agents/register"): (200, {"agent_id": "x"})})
         self.addCleanup(server.close)
-        os.environ["AGENTOVERFLOW_API_URL"] = server.url
+        os.environ["BREAKPOINT_API_URL"] = server.url
         code, out = self.run_setup("--email", "me@osu.edu")
         self.assertIn("The server has the change.", out)
         self.assertEqual(server.requests[-1]["body"]["email"], "me@osu.edu")
