@@ -1,14 +1,14 @@
-"""Shared fixtures for the /v1 tests (test_v1_*.py).
+"""Shared fixtures for the agent route tests (test_agent_*.py).
 
 The endpoint tests need a THROWAWAY Postgres in TEST_DATABASE_URL: every test empties the tables
 and reloads the hook's demo posts. Never point it at the real Supabase database. The Breakpoint
 tables are created from tests/breakpoint_schema_stub.sql (a stand-in for the real schema).
 
-    docker run --rm -d --name ao-v1-test-pg -p 55432:5432 -e POSTGRES_PASSWORD=test postgres:16
+    docker run --rm -d --name ao-test-pg -p 55432:5432 -e POSTGRES_PASSWORD=test postgres:16
     $env:TEST_DATABASE_URL = "postgresql://postgres:test@127.0.0.1:55432/postgres"   # PowerShell
     .venv\\Scripts\\python -m pytest tests -q
 
-The app under test is a bare FastAPI app with only the v1 router, so main.py is not needed.
+The app under test is main.app (the real /api app); its connections go to TEST_DATABASE_URL.
 """
 
 import os
@@ -34,38 +34,35 @@ def database() -> str:
         pytest.skip("set TEST_DATABASE_URL to a throwaway Postgres to run the endpoint tests")
     import psycopg
 
-    import seed_v1
+    import seed_agent
 
     with psycopg.connect(TEST_DB, autocommit=True) as conn:
         conn.execute(STUB_SCHEMA.read_text(encoding="utf-8"))
-        seed_v1.apply_schema(conn)
+        seed_agent.apply_schema(conn)
     return TEST_DB
 
 
 @pytest.fixture()
 def client(database: str, monkeypatch):
     import psycopg
-    from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from psycopg.rows import dict_row
 
-    import seed_v1
-    import v1
+    import main
+    import seed_agent
 
     monkeypatch.setenv("DATABASE_URL", database)
     monkeypatch.setenv("API_KEY", API_KEY)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")   # judge tests mock the client; never call the real API
     with psycopg.connect(database, autocommit=True, row_factory=dict_row) as conn:
-        conn.execute("TRUNCATE v1_updates, v1_watchers, v1_outcomes, v1_post_meta, post_tags, posts, tags,"
+        conn.execute("TRUNCATE agent_updates, agent_watchers, agent_outcomes, agent_post_meta, post_tags, posts, tags,"
                      " forums RESTART IDENTITY CASCADE")
         for slug in FORUMS:
             conn.execute("INSERT INTO forums (slug, name) VALUES (%s, %s)", (slug, slug.title()))
         for slug in TAGS:
             conn.execute("INSERT INTO tags (slug) VALUES (%s)", (slug,))
-        seed_v1.load_mock_posts(conn)
-    app = FastAPI()
-    app.include_router(v1.router)
-    with TestClient(app) as c:
+        seed_agent.load_mock_posts(conn)
+    with TestClient(main.app) as c:
         yield c
 
 

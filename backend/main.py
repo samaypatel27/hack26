@@ -1,20 +1,25 @@
-import json
 import os
-import re
+import time
+from collections import defaultdict, deque
+from pathlib import Path
 from typing import Any, Literal
 
 import psycopg
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
-import status
+import agent
+import agent_db
+import safety
+from matching import ATTACH_MIN_SCORE, best_match, best_text_match, words
+from scrub import scrub
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 
-app = FastAPI(title="AgentOverflow")
+app = FastAPI(title="Breakpoint")
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,12 +27,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(agent.router)  # /api/search, /api/outcomes, /api/updates, /api/judge
 
 SORTS = {
-    "new": "created_at DESC, id DESC",
-    "top": "hit_count DESC, created_at DESC, id DESC",
-    "unsolved": "created_at DESC, id DESC",
+    "top": "post_votes DESC, created_at DESC, id DESC",
+    "newest": "created_at DESC, id DESC",
 }
+
+VOTE_COLUMNS = {"post": "post_votes", "solution": "solution_votes"}
+VOTE_LIMIT = 30  # votes per IP per window
+VOTE_WINDOW_S = 60
+_votes_by_ip: dict[str, deque[float]] = defaultdict(deque)
+
+MAX_TAGS = 4
+FALLBACK_FORUM = "general"
 
 
 def connect() -> psycopg.Connection:
@@ -40,23 +53,89 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
-def make_preview(body: str, length: int = 150) -> str:
-    text = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)
-    text = re.sub(r"[`*_#>]|^\s*[-+]\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\s+", " ", text).strip()
+def headline(description: str, length: int = 120) -> str:
+    first = description.strip().splitlines()[0] if description.strip() else ""
+    return first if len(first) <= length else first[:length].rstrip() + "…"
+
+
+def body(description: str) -> str:
+    """The problem text without its first line (the headline)."""
+    lines = description.strip().splitlines()
+    return "\n".join(lines[1:]).strip()
+
+
+def preview(description: str, length: int = 280) -> str:
+    text = " ".join(body(description).replace("`", "").split())
     return text if len(text) <= length else text[:length].rstrip() + "…"
 
 
-class ReplyIn(BaseModel):
-    root_cause: str
-    fix: str
-    why_obvious_fixes_failed: str
-    author_verified: bool = True
+def to_card(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": p["id"],
+        "headline": headline(p["description"]),
+        "preview": preview(p["description"]),
+        "value": p["value"],
+        "forum": p["forum"],
+        "forum_name": p["forum_name"],
+        "tags": list(p["tags"]),
+        "author": p["author"],
+        "post_votes": p["post_votes"],
+        "solution_votes": p["solution_votes"],
+        # Open means nobody has posted a solution.
+        "is_open": p["solution"] is None,
+        # Aliases for clients/tests written against the status/upvotes shape.
+        "upvotes": p["post_votes"],
+        "status": "open" if p["solution"] is None else "solved",
+        "created_at": p["created_at"].isoformat(),
+    }
 
 
-class OutcomeIn(BaseModel):
-    worked: bool
-    note: str = ""  # accepted, not stored (no UI in v1)
+def resolve_tags(requested: list[str], known: set[str]) -> tuple[list[str], list[str]]:
+    """Keep known tags (any forum's), de-duplicated, at most MAX_TAGS. Returns (kept, dropped).
+    With nothing valid left, the post gets the general tag."""
+    kept: list[str] = []
+    dropped: list[str] = []
+    for raw in requested:
+        slug = raw.strip().lower()
+        if not slug:
+            continue
+        if slug in known and slug not in kept and len(kept) < MAX_TAGS:
+            kept.append(slug)
+        else:
+            dropped.append(slug)
+    return (kept or [FALLBACK_FORUM], dropped)
+
+
+def allow_vote(ip: str, now: float | None = None) -> bool:
+    """Sliding-window rate limit: at most VOTE_LIMIT votes per IP per VOTE_WINDOW_S seconds."""
+    now = time.monotonic() if now is None else now
+    hits = _votes_by_ip[ip]
+    while hits and now - hits[0] > VOTE_WINDOW_S:
+        hits.popleft()
+    if len(hits) >= VOTE_LIMIT:
+        return False
+    hits.append(now)
+    return True
+
+
+class VoteIn(BaseModel):
+    target: Literal["post", "solution"]
+    direction: Literal[1, -1]
+
+
+class PostIn(BaseModel):
+    description: str
+    value: str
+    solution: str | None = None  # None = an open question
+    forum: str = FALLBACK_FORUM
+    tags: list[str] = []
+    author: str = "anonymous"
+    open_question_id: int | None = None
+    # Agent fields (from the hook's messages); stored in agent_post_meta, never shown publicly.
+    fingerprint: str | None = None
+    command: str | None = None
+    project: str | None = None
+    team_run_id: str | None = None
 
 
 @app.get("/api/health")
@@ -64,101 +143,190 @@ def health() -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.get("/api/forums")
+def list_forums() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT slug, name, description, tags, post_count FROM forum_overview"
+            " ORDER BY post_count DESC, slug"
+        ).fetchall()
+    return [{**r, "tags": list(r["tags"])} for r in rows]
+
+
 @app.get("/api/posts")
 def list_posts(
-    id: int | None = None,
-    sort: Literal["new", "top", "unsolved"] = "new",
+    filter: Literal["all", "solved", "open"] = "all",
+    forum: str | None = None,
+    tags: str | None = Query(default=None, description="Comma-separated; a post must have all of them"),
+    sort: Literal["top", "newest"] = "newest",
     q: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[dict[str, Any]]:
     where: list[str] = []
     params: list[Any] = []
-    if id is not None:
-        where.append("id = %s")
-        params.append(id)
-    if sort == "unsolved":
-        where.append("status IN ('open', 'reopened')")
+    if forum:
+        where.append("forum = %s")
+        params.append(forum.lower())
+    wanted = [t.strip().lower() for t in (tags or "").split(",") if t.strip()]
+    if wanted:
+        where.append("tags @> %s::text[]")
+        params.append(wanted)
+    if filter == "solved":
+        where.append("solution IS NOT NULL")
+    elif filter == "open":
+        where.append("solution IS NULL")
     if q:
-        where.append("(title ILIKE %s OR body ILIKE %s OR tags ILIKE %s)")
-        params += [f"%{q}%"] * 3
-    sql = "SELECT * FROM posts"
+        where.append(
+            "(description ILIKE %s OR value ILIKE %s OR solution ILIKE %s"
+            " OR array_to_string(tags, ' ') ILIKE %s OR forum ILIKE %s)"
+        )
+        params += [f"%{q}%"] * 5
+    sql = "SELECT * FROM post_cards"
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += f" ORDER BY {SORTS[sort]} LIMIT %s"
     params.append(limit)
 
     with connect() as conn:
-        posts = conn.execute(sql, params).fetchall()
-        ids = [p["id"] for p in posts]
-        rows = (
-            conn.execute("SELECT * FROM replies WHERE post_id = ANY(%s)", (ids,)).fetchall()
-            if ids
-            else []
-        )
-
-    replies_by_post: dict[int, list[dict[str, Any]]] = {i: [] for i in ids}
-    for r in rows:
-        replies_by_post[r["post_id"]].append(r)
-
-    items = []
-    for p in posts:
-        # Best first: non-failing before failing, then smoothed success rate, then newest.
-        ranked = sorted(
-            replies_by_post[p["id"]],
-            key=lambda r: (not status.is_failing(r), status.score(r), r["created_at"]),
-            reverse=True,
-        )
-        items.append(
-            {
-                "id": p["id"],
-                "title": p["title"],
-                "preview": make_preview(p["body"]),
-                "body": p["body"],
-                "tags": json.loads(p["tags"]),
-                "status": p["status"],
-                "hit_count": p["hit_count"],
-                "created_at": p["created_at"].isoformat(),
-                "reply_count": len(ranked),
-                "replies": [{**r, "created_at": r["created_at"].isoformat()} for r in ranked],
-            }
-        )
-    return items
+        rows = conn.execute(sql, params).fetchall()
+    return [to_card(p) for p in rows]
 
 
-@app.post("/api/posts/{post_id}/replies", dependencies=[Depends(require_api_key)])
-def create_reply(post_id: int, reply: ReplyIn) -> dict[str, Any]:
-    body = (
-        f"**Root cause:** {reply.root_cause}\n\n"
-        f"**Fix:** {reply.fix}\n\n"
-        f"**Why the obvious fixes didn't work:** {reply.why_obvious_fixes_failed}"
-    )
-    # TODO: run safety.py on all fields (§8.4) before saving.
+@app.get("/api/posts/{post_id}")
+def get_post(post_id: int) -> dict[str, Any]:
     with connect() as conn:
-        post = conn.execute("SELECT status FROM posts WHERE id = %s FOR UPDATE", (post_id,)).fetchone()
-        if post is None:
-            raise HTTPException(status_code=404, detail="Post not found")
-        reply_id = conn.execute(
-            "INSERT INTO replies (post_id, body, author_verified) VALUES (%s, %s, %s) RETURNING id",
-            (post_id, body, reply.author_verified),
-        ).fetchone()["id"]
-        new_status = status.after_reply(post["status"])
-        conn.execute("UPDATE posts SET status = %s, updated_at = now() WHERE id = %s", (new_status, post_id))
-    return {"reply_id": reply_id, "post_status": new_status}
+        p = conn.execute("SELECT * FROM post_cards WHERE id = %s", (post_id,)).fetchone()
+    if p is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+    return {**to_card(p), "body": body(p["description"]), "solution": p["solution"]}
 
 
-@app.post("/api/replies/{reply_id}/outcome", dependencies=[Depends(require_api_key)])
-def report_outcome(reply_id: int, outcome: OutcomeIn) -> dict[str, str]:
+def fill_open_question(conn: psycopg.Connection, question_id: int, solution: str) -> dict[str, Any] | None:
+    """Give an Open Question its solution (only if it still has none). Returns the question or None."""
+    return conn.execute(
+        "UPDATE posts SET solution = %s, status = 'solved' WHERE id = %s AND solution IS NULL"
+        " RETURNING id, description",
+        (solution, question_id),
+    ).fetchone()
+
+
+def find_open_question(conn: psycopg.Connection, post: PostIn, fingerprint: str | None, tags: list[str]) -> int | None:
+    """The Open Question a new solution is about: the same error fingerprint, else a close text match
+    that shares a tag (PROJECT_PLAN.md, "Matching a new solution to an Open Question")."""
+    if fingerprint:
+        for same in agent_db.posts_with_fingerprint(conn, fingerprint, open_only=True):
+            return same["id"]
+    candidates = conn.execute("SELECT * FROM post_cards WHERE solution IS NULL").fetchall()
+    # Require a shared tag, unless the post only got the fallback tag.
+    wanted = [] if tags == [FALLBACK_FORUM] else tags
+    match = best_text_match(
+        words(f"{post.description} {post.command or ''}"),
+        [{**c, "tags": list(c["tags"])} for c in candidates],
+        ATTACH_MIN_SCORE,
+        tags=wanted,
+    )
+    return match["id"] if match else None
+
+
+def notify_solved(conn: psycopg.Connection, question: dict[str, Any], solver_project: str | None) -> None:
+    """Queue "your open question was solved" for every project waiting on it (not the solver's own)."""
+    message = f"Your open question '{headline(question['description'])}' now has a solution in post #{question['id']}."
+    for project in agent_db.watchers(conn, question["id"]):
+        if project != solver_project:
+            agent_db.add_update(conn, project, message, question["id"])
+
+
+@app.post("/api/posts", dependencies=[Depends(require_api_key)])
+def create_post(post: PostIn) -> dict[str, Any]:
+    """Create a solved post (solution given) or an open question (no solution).
+
+    Everything is safety-checked (400 if refused) and scrubbed of secrets first. An unknown forum
+    falls back to "general"; unknown tags are dropped. A solution for an existing open question
+    fills that question in instead of creating a new post: the question is the one named by
+    `open_question_id`, else the one with the same error fingerprint, else a close text match.
+    An open question that duplicates an existing one is not created twice.
+    """
+    reason = safety.check(post.description, post.value, post.solution, post.command)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+    post = post.model_copy(update={
+        name: scrub(getattr(post, name)) for name in ("description", "value", "solution", "command", "author")
+    })
+    fingerprint = agent_db.clean_fingerprint(post.fingerprint)
+    project = (post.project or "").strip()[:200] or None
+    team_run_id = (post.team_run_id or "").strip()[:200] or None
+    command = (post.command or "").strip()[:1000] or None
+
+    with connect() as conn:
+        forum_row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (post.forum.strip().lower(),)).fetchone()
+        if forum_row is None:
+            forum_row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (FALLBACK_FORUM,)).fetchone()
+        known = {r["slug"] for r in conn.execute("SELECT slug FROM tags").fetchall()}
+        tags, dropped = resolve_tags(post.tags, known)
+        result: dict[str, Any] = {"forum": forum_row["slug"], "tags": tags, "dropped_tags": dropped}
+
+        if post.solution is not None:
+            filled = None
+            if post.open_question_id is not None:
+                filled = fill_open_question(conn, post.open_question_id, post.solution)
+            if filled is None:
+                question_id = find_open_question(conn, post, fingerprint, tags)
+                filled = fill_open_question(conn, question_id, post.solution) if question_id else None
+            if filled:
+                agent_db.save_meta(conn, filled["id"], fingerprint, command, None, team_run_id)
+                notify_solved(conn, filled, project)
+                return {**result, "post_id": filled["id"], "attached_to_open_question": True, "duplicate_of": None}
+
+        if post.solution is None:
+            duplicate_id = None
+            if fingerprint:
+                for same in agent_db.posts_with_fingerprint(conn, fingerprint, open_only=True):
+                    duplicate_id = same["id"]
+                    break
+            if duplicate_id is None:
+                open_posts = conn.execute(
+                    "SELECT * FROM post_cards WHERE solution IS NULL AND forum = %s", (forum_row["slug"],)
+                ).fetchall()
+                match = best_match(post.description, [{**p, "tags": list(p["tags"])} for p in open_posts], forum=forum_row["slug"])
+                duplicate_id = match["id"] if match else None
+            if duplicate_id is not None:
+                if project:
+                    agent_db.add_watcher(conn, duplicate_id, project)  # tell this project when it is solved
+                return {**result, "post_id": duplicate_id, "attached_to_open_question": False, "duplicate_of": duplicate_id}
+
+        new = conn.execute(
+            "INSERT INTO posts (description, value, solution, author, forum_id, status)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                post.description,
+                post.value,
+                post.solution,
+                post.author,
+                forum_row["id"],
+                "solved" if post.solution is not None else "open",
+            ),
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO post_tags (post_id, tag_id) SELECT %s, id FROM tags WHERE slug = ANY(%s)",
+            (new["id"], tags),
+        )
+        agent_db.save_meta(conn, new["id"], fingerprint, command, project, team_run_id)
+    return {**result, "post_id": new["id"], "attached_to_open_question": False, "duplicate_of": None}
+
+
+@app.post("/api/posts/{post_id}/vote")
+def vote(post_id: int, vote: VoteIn, request: Request) -> dict[str, int]:
+    ip = request.client.host if request.client else "unknown"
+    if not allow_vote(ip):
+        raise HTTPException(status_code=429, detail="Too many votes. Try again in a minute.")
+    column = VOTE_COLUMNS[vote.target]  # whitelisted, safe to interpolate
     with connect() as conn:
         row = conn.execute(
-            "UPDATE replies SET times_applied = times_applied + 1,"
-            " times_worked = times_worked + %s WHERE id = %s RETURNING post_id",
-            (1 if outcome.worked else 0, reply_id),
+            f"UPDATE posts SET {column} = {column} + %s"
+            " WHERE id = %s AND (%s = 'post' OR solution IS NOT NULL)"
+            " RETURNING post_votes, solution_votes",
+            (vote.direction, post_id, vote.target),
         ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Reply not found")
-        post_id = row["post_id"]
-        current = conn.execute("SELECT status FROM posts WHERE id = %s FOR UPDATE", (post_id,)).fetchone()["status"]
-        replies = conn.execute("SELECT * FROM replies WHERE post_id = %s", (post_id,)).fetchall()
-        new_status = status.after_outcome(current, outcome.worked, replies)
-        conn.execute("UPDATE posts SET status = %s, updated_at = now() WHERE id = %s", (new_status, post_id))
-    return {"post_status": new_status}
+    if row is None:
+        raise HTTPException(status_code=404, detail="Post not found, or it has no solution to vote on")
+    return row

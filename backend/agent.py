@@ -1,12 +1,9 @@
-"""The /v1 API: the endpoints with no /api equivalent (search, outcomes, updates, judge).
+"""The agent routes under /api: the ones the website does not use (search, outcomes, updates, judge).
 
-Posting and reading posts go through /api (main.py), not here.
+Posting and reading posts are in main.py (POST /api/posts, GET /api/posts/{id}).
 
 Callers: the hook (plugin/hook/backend.py: search, outcomes, updates, judge) and the MCP tools
-(plugin/mcp/server.py: search, updates).
-
-Include it in main.py with one line:
-    from v1 import router as v1_router; app.include_router(v1_router)
+(plugin/mcp/server.py: search, updates). main.py includes this router.
 
 Rules for every endpoint:
   - Write endpoints (POST) need X-API-Key = env API_KEY. GETs are public.
@@ -17,26 +14,24 @@ Rules for every endpoint:
 
 import hmac
 import os
-import re
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
-import db_v1 as db
+import agent_db as db
 import judge
-import matching_v1 as matching
+import matching
 from scrub import scrub
 
-router = APIRouter(prefix="/v1", tags=["v1"])
+router = APIRouter(prefix="/api", tags=["agent"])
 
 MAX_SEARCH_RESULTS = 10
 MAX_QUERY_CHARS = 5000
 LIMITS = {"command": 1000}
-FINGERPRINT_RE = re.compile(r"^[0-9a-f]{6,64}$")
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Same rule as main.require_api_key (a copy, so v1.py never imports main.py)."""
+    """Same rule as main.require_api_key (a copy, so agent.py never imports main.py)."""
     expected = os.environ.get("API_KEY")
     if not expected or not x_api_key or not hmac.compare_digest(x_api_key, expected):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
@@ -62,14 +57,6 @@ def requested_tags(raw: Any) -> list[str]:
     return [t.strip().lower() for t in items if isinstance(t, str) and t.strip()]
 
 
-def clean_fingerprint(raw: Any) -> str | None:
-    """The hook's hex error ID, or None if missing or not hex (then we match by text instead)."""
-    if not isinstance(raw, str):
-        return None
-    value = raw.strip().lower()
-    return value if FINGERPRINT_RE.match(value) else None
-
-
 def clean_id(raw: Any) -> int | None:
     if isinstance(raw, bool):
         return None
@@ -81,14 +68,14 @@ def clean_id(raw: Any) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# 1. GET /v1/search
+# 1. GET /api/search
 # ---------------------------------------------------------------------------
 
 @router.get("/search")
 def search(error: str = "", command: str = "", fingerprint: str = "", tags: str = "") -> list[dict[str, Any]]:
     """Matching posts, best first: exact fingerprint matches (score 1.0), then text matches (score >= 0.2).
     `tags` (comma-separated) narrows the text matches to posts sharing a tag; unknown tags are ignored."""
-    fp = clean_fingerprint(fingerprint)
+    fp = db.clean_fingerprint(fingerprint)
     query = matching.words(f"{error[:MAX_QUERY_CHARS]} {command[:LIMITS['command']]}")
     results: list[dict[str, Any]] = []
     with db.connect() as conn:
@@ -108,7 +95,7 @@ def search(error: str = "", command: str = "", fingerprint: str = "", tags: str 
 
 
 # ---------------------------------------------------------------------------
-# 2. POST /v1/outcomes
+# 2. POST /api/outcomes
 # ---------------------------------------------------------------------------
 
 @router.post("/outcomes", dependencies=[Depends(require_api_key)])
@@ -122,7 +109,7 @@ def outcomes(raw: Any = Body(default=None)) -> dict[str, str]:
         raise bad_request("`worked` must be true or false.")
     with db.connect() as conn:
         status = db.record_outcome(
-            conn, post_id, body["worked"], clean_fingerprint(body.get("fingerprint")),
+            conn, post_id, body["worked"], db.clean_fingerprint(body.get("fingerprint")),
             scrub(str(body.get("command") or ""))[:LIMITS["command"]] or None,
             str(body.get("session_id") or "")[:200] or None, str(body.get("source") or "")[:50] or None,
         )
@@ -132,7 +119,7 @@ def outcomes(raw: Any = Body(default=None)) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# 3. GET /v1/updates
+# 3. GET /api/updates
 # ---------------------------------------------------------------------------
 
 @router.get("/updates")
@@ -145,7 +132,7 @@ def updates(project: str = "") -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# 4. POST /v1/judge
+# 4. POST /api/judge
 # ---------------------------------------------------------------------------
 
 @router.post("/judge", dependencies=[Depends(require_api_key)])

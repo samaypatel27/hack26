@@ -9,8 +9,8 @@ Owner: hook team · Branch: `hook-engine` · Last updated: 2026-10-24 · Plan of
 How the pieces talk:
 
 ```
-hook (plugin/hook/main.py) ──HTTP──▶ backend  /v1/search, /v1/outcomes, /v1/updates, /v1/judge
-agent ──MCP tools──▶ plugin/mcp/server.py ──HTTP──▶ backend  /v1/posts, /v1/open-questions, /v1/help, ...
+hook (plugin/hook/main.py) ──HTTP──▶ backend  /api/search, /api/outcomes, /api/updates, /api/judge
+agent ──MCP tools──▶ plugin/mcp/server.py ──HTTP──▶ backend  /api/posts, /api/help, ...
 ```
 
 ---
@@ -21,7 +21,7 @@ General rules:
 - Base URL and key come from the config file (see (b)). The hook sends `X-API-Key: <api_key>` on every call.
 - **Timeouts the hook uses: 2 seconds** for search, outcomes and updates; **5 seconds** for judge. If the backend
   is slower, down, or returns an error, the hook does nothing (fails open). So keep these endpoints fast and never
-  make them wait on a slow model, except `/v1/judge`.
+  make them wait on a slow model, except `/api/judge`.
 - Errors: any 4xx/5xx with `{"detail": "<why>"}`. The hook only reads 200 responses.
 - **Fingerprints come from the hook.** A fingerprint is an 8-character hex ID (for example `51749bd5`) made by
   `fingerprint()` in `plugin/hook/struggles.py`: it keeps the last error lines, removes paths, numbers and times,
@@ -29,7 +29,7 @@ General rules:
   posts and match on it exactly; it should not try to compute its own.
 - Ignore fields you don't know, so we can add some later without breaking you.
 
-### `GET /v1/search?error=&command=&fingerprint=&tags=`
+### `GET /api/search?error=&command=&fingerprint=&tags=`
 
 All query params are optional strings. `tags` is comma-separated. Returns a list, best match first, or `[]`.
 
@@ -56,7 +56,7 @@ All query params are optional strings. `tags` is comma-separated. Returns a list
 - The mock ranks fingerprint matches first, then text matches by word overlap with a minimum score of 0.2. The real
   backend can use better text matching; the hook only relies on `match`, `score`, `status` and `id`.
 
-### `POST /v1/outcomes`
+### `POST /api/outcomes`
 
 The hook calls this when it sees whether a suggested fix worked (the command passed or failed again after the agent
 applied post `post_id`). This is the only way outcomes are recorded: there is no "it worked" tool for the agent.
@@ -69,7 +69,7 @@ applied post `post_id`). This is the only way outcomes are recorded: there is no
 Response: `{"post_status": "solved"}` or `{"post_status": "open"}` (the post's status after this outcome; the
 backend may reopen a fix that keeps failing). Increments `times_applied`, and `times_worked` when `worked` is true.
 
-### `GET /v1/updates?project=`
+### `GET /api/updates?project=`
 
 Called once at `SessionStart`. `project` is an ID the hook computes for the current project (a hash of the git
 remote or folder, per PROJECT_PLAN.md). Returns news for that project, **each update only once**:
@@ -80,7 +80,7 @@ remote or folder, per PROJECT_PLAN.md). Returns news for that project, **each up
 
 `post_id` may be `null`. Return `[]` when there is nothing new.
 
-### `POST /v1/judge`
+### `POST /api/judge`
 
 The AI judge from [struggle-signals.md](struggle-signals.md). The hook calls it only in the gray zone (no strong
 signal, but many actions without progress). The backend owns the model call and the API key for it.
@@ -104,9 +104,9 @@ more of the last 5 actions have `"ok": false`.
 
 ### Endpoints the MCP server already uses (for reference)
 
-`GET /v1/posts/{id}`, `POST /v1/posts`, `POST /v1/open-questions`, `POST /v1/help`, `GET /v1/help/{run_id}`,
-`GET /v1/updates`. Field names are in `plugin/mcp/server.py`. The mock implements the first three (not `/v1/help`).
-Please accept optional `fingerprint` and `command` on `POST /v1/posts` and `POST /v1/open-questions` and store them
+`GET /api/posts/{id}`, `POST /api/posts` (also files open questions), `POST /api/help`, `GET /api/help/{run_id}`,
+`GET /api/updates`. Field names are in `plugin/mcp/server.py`. The mock implements the first three (not `/api/help`).
+Please accept optional `fingerprint` and `command` on `POST /api/posts` and store them
 on the post, so later searches can match by fingerprint.
 
 ---
@@ -165,7 +165,7 @@ tells the agent what to do for each one.
 
 | `team_mode` | Agent does | Team runs | Notes |
 | --- | --- | --- | --- |
-| `"server"` (**default**) | `ask_for_help`, then `check_help` until done | On our backend | Matches PROJECT_PLAN.md; needs `/v1/help` built; enables the live board room on the website |
+| `"server"` (**default**) | `ask_for_help`, then `check_help` until done | On our backend | Matches PROJECT_PLAN.md; needs `/api/help` built; enables the live board room on the website |
 | `"local"` | `run_specialists` | On the user's laptop, in git worktrees | No backend team runner needed; `run_specialists` is still pseudocode |
 
 The default stays `"server"` until the team decides.

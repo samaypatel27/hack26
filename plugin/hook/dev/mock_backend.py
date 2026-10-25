@@ -8,8 +8,8 @@ and the MCP server send.
     python plugin/hook/dev/mock_backend.py --port 9000 --api-key secret
     python plugin/hook/dev/mock_backend.py --selftest       # exercise every endpoint, PASS/FAIL
 
-Endpoints (hook):  GET /v1/search, POST /v1/outcomes, GET /v1/updates, POST /v1/judge
-Endpoints (MCP):   GET /v1/posts/{id}, POST /v1/posts, POST /v1/open-questions
+Endpoints (hook):  GET /api/search, POST /api/outcomes, GET /api/updates, POST /api/judge
+Endpoints (MCP):   GET /api/posts/{id}, POST /api/posts (a solved post, or an open question when `solution` is missing)
 Data lives in memory only: restart the server to reset it.
 """
 
@@ -173,13 +173,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         url = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
-        if url.path == "/v1/search":
+        if url.path == "/api/search":
             tags = [t.strip() for t in q.get("tags", "").split(",") if t.strip()]
             with self.store.lock:
                 result = search(self.store, q.get("error", ""), q.get("command", ""),
                                 q.get("fingerprint", ""), tags)
             return self._send(200, result)
-        if url.path == "/v1/updates":
+        if url.path == "/api/updates":
             project = q.get("project")
             with self.store.lock:
                 due = [u for u in self.store.updates
@@ -187,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
                 for u in due:
                     u["delivered"] = True
             return self._send(200, [{"message": u["message"], "post_id": u.get("post_id")} for u in due])
-        m = re.fullmatch(r"/v1/posts/(\d+)", url.path)
+        m = re.fullmatch(r"/api/posts/(\d+)", url.path)
         if m:
             post = self.store.posts.get(int(m.group(1)))
             return self._send(200, post) if post else self._error(404, "Post not found.")
@@ -202,10 +202,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "Body must be a JSON object.")
         path = urlparse(self.path).path
         route = {
-            "/v1/outcomes": self._outcomes,
-            "/v1/judge": self._judge,
-            "/v1/posts": self._create_post,
-            "/v1/open-questions": self._open_question,
+            "/api/outcomes": self._outcomes,
+            "/api/judge": self._judge,
+            "/api/posts": self._post,
         }.get(path)
         if not route:
             return self._error(404, f"No route for POST {path}")
@@ -240,6 +239,12 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, f"Missing required fields: {', '.join(missing)}")
         return bool(missing)
 
+    def _post(self, body):
+        """Like the real POST /api/posts: a solution makes a solved post, no solution an open question."""
+        if body.get("solution") is None:
+            return self._open_question(body)
+        return self._create_post(body)
+
     def _create_post(self, body):
         if self._missing(body, ["description", "value", "solution", "tags"]):
             return
@@ -250,14 +255,14 @@ class Handler(BaseHTTPRequestHandler):
             for f in ("fingerprint", "command"):
                 oq[f] = oq.get(f) or body.get(f)
             return self._send(200, {"post_id": oq["id"], "attached_to_open_question": True,
-                                    "merged_into": None})
+                                    "duplicate_of": None})
         post = self.store.new_post({
             "description": body["description"], "value": body["value"],
             "solution": body["solution"], "tags": body["tags"][:4], "status": "solved",
             "fingerprint": body.get("fingerprint"), "command": body.get("command"),
         })
         self._send(200, {"post_id": post["id"], "attached_to_open_question": False,
-                         "merged_into": None})
+                         "duplicate_of": None})
 
     def _open_question(self, body):
         if self._missing(body, ["description", "value", "tags"]):
@@ -266,13 +271,14 @@ class Handler(BaseHTTPRequestHandler):
         if fp:  # one open question per fingerprint
             for p in self.store.posts.values():
                 if p["status"] == "open" and p.get("fingerprint") == fp:
-                    return self._send(200, {"post_id": p["id"], "duplicate_of": p["id"]})
+                    return self._send(200, {"post_id": p["id"], "attached_to_open_question": False,
+                                            "duplicate_of": p["id"]})
         post = self.store.new_post({
             "description": body["description"], "value": body["value"], "solution": None,
             "tags": body["tags"][:4], "status": "open",
             "fingerprint": fp, "command": body.get("command"),
         })
-        self._send(200, {"post_id": post["id"], "duplicate_of": None})
+        self._send(200, {"post_id": post["id"], "attached_to_open_question": False, "duplicate_of": None})
 
 
 def make_server(port: int, data_path: Path, api_key: str | None, log_path: Path | None,
@@ -316,69 +322,69 @@ def selftest(data_path: Path) -> int:
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
         failures += 0 if ok else 1
 
-    s, r = call("GET", f"{base}/v1/search?{q(error='anything', fingerprint='51749bd5')}")
+    s, r = call("GET", f"{base}/api/search?{q(error='anything', fingerprint='51749bd5')}")
     check("search: fingerprint match first, score 1.0",
           s == 200 and r and r[0]["id"] == 1 and r[0]["match"] == "fingerprint" and r[0]["score"] == 1.0)
     check("search: result has exactly the contract fields",
           s == 200 and set(r[0]) == set(SEARCH_FIELDS) | {"match", "score"})
-    s, r = call("GET", f"{base}/v1/search?{q(error='Error [ERR_REQUIRE_ESM]: require() of ES Module node-fetch not supported', command='node src/api.js')}")
+    s, r = call("GET", f"{base}/api/search?{q(error='Error [ERR_REQUIRE_ESM]: require() of ES Module node-fetch not supported', command='node src/api.js')}")
     check("search: text match by word overlap", s == 200 and r and r[0]["id"] == 2 and r[0]["match"] == "text")
-    s, r = call("GET", f"{base}/v1/search?{q(error='segmentation fault in quantum flux capacitor')}")
+    s, r = call("GET", f"{base}/api/search?{q(error='segmentation fault in quantum flux capacitor')}")
     check("search: [] when nothing matches", s == 200 and r == [])
-    s, r = call("GET", f"{base}/v1/search?{q(error='ModuleNotFoundError: No module named app conftest', tags='python')}")
+    s, r = call("GET", f"{base}/api/search?{q(error='ModuleNotFoundError: No module named app conftest', tags='python')}")
     check("search: open question returned with status open",
           s == 200 and r and r[0]["id"] == 3 and r[0]["status"] == "open" and r[0]["solution"] is None)
 
-    s, r = call("POST", f"{base}/v1/outcomes", {"post_id": 1, "worked": True, "fingerprint": "51749bd5",
+    s, r = call("POST", f"{base}/api/outcomes", {"post_id": 1, "worked": True, "fingerprint": "51749bd5",
                                                  "command": "docker compose up --build api",
                                                  "session_id": "t", "source": "hook"})
     check("outcomes: returns post_status", s == 200 and r == {"post_status": "solved"})
-    s, r = call("GET", f"{base}/v1/posts/1")
+    s, r = call("GET", f"{base}/api/posts/1")
     check("outcomes: counters incremented", s == 200 and r["times_applied"] == 11 and r["times_worked"] == 10)
-    s, _ = call("POST", f"{base}/v1/outcomes", {"post_id": 999, "worked": False})
+    s, _ = call("POST", f"{base}/api/outcomes", {"post_id": 999, "worked": False})
     check("outcomes: unknown post -> 404", s == 404)
 
-    s, r = call("GET", f"{base}/v1/updates?{q(project='abc123')}")
+    s, r = call("GET", f"{base}/api/updates?{q(project='abc123')}")
     check("updates: pending update delivered", s == 200 and len(r) == 1 and r[0]["post_id"] == 2)
-    s, r = call("GET", f"{base}/v1/updates?{q(project='abc123')}")
+    s, r = call("GET", f"{base}/api/updates?{q(project='abc123')}")
     check("updates: delivered only once", s == 200 and r == [])
 
     bad = [{"kind": "run", "ok": False}] * 3 + [{"kind": "edit"}]
-    s, r = call("POST", f"{base}/v1/judge", {"session_id": "t", "actions": bad, "replies": []})
+    s, r = call("POST", f"{base}/api/judge", {"session_id": "t", "actions": bad, "replies": []})
     check("judge: stuck after 3 failures", s == 200 and r["stuck"] is True and 0 <= r["confidence"] <= 1)
-    s, r = call("POST", f"{base}/v1/judge", {"session_id": "t", "actions": [{"kind": "run", "ok": True}],
+    s, r = call("POST", f"{base}/api/judge", {"session_id": "t", "actions": [{"kind": "run", "ok": True}],
                                               "replies": []})
     check("judge: not stuck", s == 200 and r["stuck"] is False and isinstance(r["reason"], str))
 
-    s, r = call("GET", f"{base}/v1/posts/3")
+    s, r = call("GET", f"{base}/api/posts/3")
     check("get post: full post", s == 200 and r["id"] == 3 and "description" in r)
-    s, _ = call("GET", f"{base}/v1/posts/999")
+    s, _ = call("GET", f"{base}/api/posts/999")
     check("get post: unknown -> 404", s == 404)
 
-    s, r = call("POST", f"{base}/v1/open-questions", {"description": "X fails\nTried a, b.", "value": "v",
+    s, r = call("POST", f"{base}/api/posts", {"description": "X fails\nTried a, b.", "value": "v",
                                                        "tags": ["general"], "fingerprint": "deadbeef"})
     check("open question: created", s == 200 and r["duplicate_of"] is None and r["post_id"] == 5)
-    s, r = call("POST", f"{base}/v1/open-questions", {"description": "X fails again", "value": "v",
+    s, r = call("POST", f"{base}/api/posts", {"description": "X fails again", "value": "v",
                                                        "tags": ["general"], "fingerprint": "deadbeef"})
     check("open question: same fingerprint -> duplicate_of", s == 200 and r["duplicate_of"] == 5)
-    s, r = call("POST", f"{base}/v1/posts", {"description": "d", "value": "v", "solution": "fix",
+    s, r = call("POST", f"{base}/api/posts", {"description": "d", "value": "v", "solution": "fix",
                                               "tags": ["python"], "open_question_id": 3})
     check("post: attaches to open question",
-          s == 200 and r == {"post_id": 3, "attached_to_open_question": True, "merged_into": None})
-    s, r = call("GET", f"{base}/v1/posts/3")
+          s == 200 and r == {"post_id": 3, "attached_to_open_question": True, "duplicate_of": None})
+    s, r = call("GET", f"{base}/api/posts/3")
     check("post: open question now solved", r["status"] == "solved" and r["solution"] == "fix")
-    s, r = call("POST", f"{base}/v1/posts", {"description": "d", "value": "v", "solution": "fix",
+    s, r = call("POST", f"{base}/api/posts", {"description": "d", "value": "v", "solution": "fix",
                                               "tags": ["python"], "open_question_id": None,
                                               "fingerprint": "cafef00d", "command": "make"})
     check("post: new solved post", s == 200 and r["attached_to_open_question"] is False and r["post_id"] == 6)
-    s, r = call("GET", f"{base}/v1/search?{q(fingerprint='cafef00d')}")
+    s, r = call("GET", f"{base}/api/search?{q(fingerprint='cafef00d')}")
     check("post: new post findable by fingerprint", s == 200 and r and r[0]["id"] == 6)
-    s, r = call("POST", f"{base}/v1/posts", {"description": "d"})
+    s, r = call("POST", f"{base}/api/posts", {"description": "d"})
     check("post: missing fields -> 400 with detail", s == 400 and "detail" in r)
 
-    s, _ = call("GET", f"{keyed}/v1/search?{q(error='x')}")
+    s, _ = call("GET", f"{keyed}/api/search?{q(error='x')}")
     check("api key: request without key -> 401", s == 401)
-    s, _ = call("GET", f"{keyed}/v1/search?{q(error='x')}", headers={"X-API-Key": "secret"})
+    s, _ = call("GET", f"{keyed}/api/search?{q(error='x')}", headers={"X-API-Key": "secret"})
     check("api key: request with key -> 200", s == 200)
 
     for srv in servers:

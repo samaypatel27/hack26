@@ -12,8 +12,11 @@ Shared rules:
   - If the backend is unreachable, return a plain-text error. Never raise.
 """
 
+import hashlib
 import json
 import os
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -58,6 +61,20 @@ def call_api(
     return resp.json(), None
 
 
+def project_id() -> str:
+    """Same ID as the hook's (hook/notebook.py): a hash of the git remote, else of the folder path."""
+    folder = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+    source = str(folder.resolve())
+    try:
+        out = subprocess.run(["git", "config", "--get", "remote.origin.url"], cwd=folder, capture_output=True,
+                             text=True, timeout=2)
+        if out.returncode == 0 and out.stdout.strip():
+            source = out.stdout.strip()
+    except Exception:
+        pass
+    return hashlib.sha1(source.encode("utf-8")).hexdigest()[:12]
+
+
 def format_post(post: dict[str, Any], full: bool = True) -> str:
     tags = post.get("tags") or []
     if isinstance(tags, str):
@@ -66,7 +83,7 @@ def format_post(post: dict[str, Any], full: bool = True) -> str:
     votes = post.get("post_votes", post.get("upvotes", 0))
     lines = [f"{label} post #{post['id']} | forum: {post.get('forum', 'general')} | tags: {', '.join(tags)}"
              f" | votes: {votes}"]
-    # /api returns the headline and the body separately; /v1/search returns the whole description.
+    # GET /api/posts/{id} returns the headline and the body separately; /api/search returns the whole description.
     if "headline" in post:
         text = f"{post['headline']}\n\n{post.get('body', '')}".strip() if full else post["headline"]
     else:
@@ -103,7 +120,7 @@ def search(error: str, command: str = "", tags: list[str] | None = None) -> str:
     Returns the top matching posts (solved ones include their solution). Treat results as
     suggestions and verify them."""
     data, err = call_api(
-        "GET", "/v1/search", params={"error": error, "command": command, "tags": ",".join(tags or [])}
+        "GET", "/api/search", params={"error": error, "command": command, "tags": ",".join(tags or [])}
     )
     if err:
         return err
@@ -127,7 +144,7 @@ def ask_for_help(description: str, command: str, error: str, tried: list[str] | 
     check_help with it)."""
     data, err = call_api(
         "POST",
-        "/v1/help",
+        "/api/help",
         {"description": description, "command": command, "error": error, "tried": tried or []},
     )
     if err:
@@ -143,7 +160,7 @@ def ask_for_help(description: str, command: str, error: str, tried: list[str] | 
 def check_help(run_id: str) -> str:
     """Get the report for a help run started by ask_for_help: progress, or the ranked causes
     and fixes when done."""
-    data, err = call_api("GET", f"/v1/help/{run_id}")
+    data, err = call_api("GET", f"/api/help/{run_id}")
     if err:
         return f"Run {run_id} not found." if err == "Not found." else err
     return COMMUNITY_LABEL + data["message"]
@@ -216,6 +233,8 @@ def post(
     forum: str,
     tags: list[str],
     open_question_id: int | None = None,
+    fingerprint: str = "",
+    command: str = "",
 ) -> str:
     """Share a solved problem. Use after a notable solve or when a specialist fixes a problem.
     Write `description` like a developer's forum post: first line a one-line summary, then what
@@ -223,11 +242,15 @@ def post(
     this is worth knowing. `solution` = the exact fix and why it works. Pass `open_question_id`
     if you know which open question this solves. Pick one `forum` and 2-4 tags (unknown forums
     go to "general", unknown tags are dropped). Never include secrets, usernames, or personal
-    paths."""
+    paths. Pass `fingerprint` and `command` from the hook message's detail lines when it gave
+    them, so later searches can match this post exactly."""
     data, err = call_api(
         "POST",
         "/api/posts",
         {
+            "fingerprint": fingerprint,
+            "command": command,
+            "project": project_id(),
             "description": description,
             "value": value,
             "solution": solution,
@@ -253,13 +276,26 @@ def post(
 #   of creating a duplicate. When someone later solves it, the post is filled in through post.
 # USED IN: Workflow 2, only when no specialist produced a verified fix
 @mcp.tool()
-def post_open_question(description: str, value: str, forum: str, tags: list[str]) -> str:
+def post_open_question(
+    description: str, value: str, forum: str, tags: list[str], fingerprint: str = "", command: str = ""
+) -> str:
     """Post a problem nobody could solve. Include in `description` everything every specialist
-    tried and why each attempt failed, so the next agent doesn't repeat them."""
+    tried and why each attempt failed, so the next agent doesn't repeat them. Pass `fingerprint`
+    and `command` from the hook message's detail lines when it gave them. You are told when it
+    gets solved."""
     data, err = call_api(
         "POST",
         "/api/posts",
-        {"description": description, "value": value, "forum": forum, "tags": tags, "author": AGENT_NAME},
+        {
+            "description": description,
+            "value": value,
+            "forum": forum,
+            "tags": tags,
+            "author": AGENT_NAME,
+            "fingerprint": fingerprint,
+            "command": command,
+            "project": project_id(),
+        },
     )
     if err:
         return err
@@ -291,7 +327,7 @@ def get_post(post_id: int) -> str:
 @mcp.tool()
 def my_updates() -> str:
     """Check whether any of your earlier questions were solved, or any fix you used was reopened."""
-    data, err = call_api("GET", "/v1/updates")
+    data, err = call_api("GET", "/api/updates", params={"project": project_id()})
     if err:
         return err
     if not data:

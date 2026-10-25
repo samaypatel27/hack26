@@ -1,8 +1,8 @@
-"""Create the /v1 tables, and optionally add the hook's demo posts.
+"""Create the agent tables, and optionally add the hook's demo posts.
 
 Run from backend/ (needs the Breakpoint schema, i.e. the `posts` table, to exist already):
-    python seed_v1.py               # apply schema_v1.sql to DATABASE_URL (safe to repeat)
-    python seed_v1.py --mock-data   # ... and add plugin/hook/dev/mock_data.json's posts (skips ones already there)
+    python seed_agent.py               # apply schema_agent.sql to DATABASE_URL (safe to repeat)
+    python seed_agent.py --mock-data   # ... and add plugin/hook/dev/mock_data.json's posts (skips ones already there)
 
 The demo posts carry the fingerprints the hook computes (for example the Prisma post is
 51749bd5), so the hook's replay scenarios find them. Like seed.py, this creates missing tags.
@@ -17,10 +17,9 @@ import psycopg
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
-import db_v1
 
 HERE = Path(__file__).resolve().parent
-SCHEMA = HERE / "schema_v1.sql"
+SCHEMA = HERE / "schema_agent.sql"
 MOCK_DATA = HERE.parent / "plugin" / "hook" / "dev" / "mock_data.json"
 
 
@@ -36,13 +35,19 @@ def load_mock_posts(conn: psycopg.Connection, path: Path = MOCK_DATA) -> int:
             continue
         for tag in p["tags"]:
             conn.execute("INSERT INTO tags (slug) VALUES (%s) ON CONFLICT (slug) DO NOTHING", (tag,))
-        forum = db_v1.resolve_forum(conn, None, p["tags"])
-        post_id = db_v1.insert_post(conn, {**p, "author": "agent"}, forum["id"])
+        forum = conn.execute("SELECT id FROM forums WHERE slug = 'general'").fetchone()
+        post_id = conn.execute(
+            "INSERT INTO posts (description, value, solution, author, forum_id, status, post_votes)"
+            " VALUES (%s, %s, %s, 'agent', %s, %s, %s) RETURNING id",
+            (p["description"], p["value"], p["solution"], forum["id"],
+             "open" if p["solution"] is None else "solved", p["upvotes"]),
+        ).fetchone()["id"]
+        conn.execute("INSERT INTO post_tags (post_id, tag_id) SELECT %s, id FROM tags WHERE slug = ANY(%s)",
+                     (post_id, p["tags"]))
         conn.execute(
-            "UPDATE posts SET post_votes = %s WHERE id = %s", (p["upvotes"], post_id))
-        conn.execute(
-            "UPDATE v1_post_meta SET times_worked = %s, times_applied = %s WHERE post_id = %s",
-            (p["times_worked"], p["times_applied"], post_id))
+            "INSERT INTO agent_post_meta (post_id, fingerprint, command, times_worked, times_applied)"
+            " VALUES (%s, %s, %s, %s, %s)",
+            (post_id, p.get("fingerprint"), p.get("command"), p["times_worked"], p["times_applied"]))
         added += 1
     return added
 
@@ -54,7 +59,7 @@ def main() -> None:
     load_dotenv(HERE / ".env")
     with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as conn:
         apply_schema(conn)
-        print("schema_v1.sql applied")
+        print("schema_agent.sql applied")
         if args.mock_data:
             print(f"added {load_mock_posts(conn)} demo posts")
 

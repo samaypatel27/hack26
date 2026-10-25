@@ -10,10 +10,10 @@ Where the server is (first match wins):
   3. http://localhost:8000 with no key
 
 Contract (docs/hook-contracts.md; plugin/hook/dev/mock_backend.py implements it):
-  GET  /v1/search?error=&command=&fingerprint=&tags=a,b  -> [post, ...] best first, [] if none
-  POST /v1/outcomes {post_id, worked, fingerprint, command, session_id, source: "hook"} -> {"post_status"}
-  GET  /v1/updates?project=<project_id>                  -> [{"message", "post_id"}]
-  POST /v1/judge    {session_id, actions, replies}       -> {"stuck", "reason", "confidence"}
+  GET  /api/search?error=&command=&fingerprint=&tags=a,b  -> [post, ...] best first, [] if none
+  POST /api/outcomes {post_id, worked, fingerprint, command, session_id, source: "hook"} -> {"post_status"}
+  GET  /api/updates?project=<project_id>                  -> [{"message", "post_id"}]
+  POST /api/judge    {session_id, actions, replies}       -> {"stuck", "reason", "confidence"}
 
 Speed: on Windows a connection to a closed local port waits for the full timeout, so after one
 connection failure we remember "server down" in a temp file for DOWN_SECONDS and skip calls until then.
@@ -167,7 +167,7 @@ def search(error: str, command: str, fingerprint: str | None, tags: list[str] | 
     params = {"error": scrub(error)[:MAX_ERROR_CHARS], "command": scrub(command), "fingerprint": fingerprint or ""}
     if tags:
         params["tags"] = ",".join(tags)
-    data = _request("GET", "/v1/search", SEARCH_TIMEOUT, params=params)
+    data = _request("GET", "/api/search", SEARCH_TIMEOUT, params=params)
     if not isinstance(data, list):
         return None
     return [p for p in data if isinstance(p, dict)]
@@ -178,13 +178,13 @@ def report_outcome(post_id: int, worked: bool, fingerprint: str | None, command:
     """Tell the server a suggested fix worked or failed, from watching the command (never the agent's word)."""
     body = {"post_id": post_id, "worked": bool(worked), "fingerprint": fingerprint or "",
             "command": scrub(command), "session_id": session_id, "source": "hook"}
-    data = _request("POST", "/v1/outcomes", OUTCOME_TIMEOUT, body=body)
+    data = _request("POST", "/api/outcomes", OUTCOME_TIMEOUT, body=body)
     return data if isinstance(data, dict) else None
 
 
 def get_updates(project_id: str) -> list[dict[str, Any]] | None:
     """News for this project: an open question got solved, a fix got reopened."""
-    data = _request("GET", "/v1/updates", UPDATES_TIMEOUT, params={"project": project_id})
+    data = _request("GET", "/api/updates", UPDATES_TIMEOUT, params={"project": project_id})
     if not isinstance(data, list):
         return None
     return [u for u in data if isinstance(u, dict) and u.get("message")]
@@ -197,7 +197,7 @@ def judge(session_id: str, actions: list[dict[str, Any]], replies: list[str]) ->
         "actions": [{k: scrub(v) if isinstance(v, str) else v for k, v in a.items()} for a in actions],
         "replies": [scrub(r) for r in replies],
     }
-    data = _request("POST", "/v1/judge", JUDGE_TIMEOUT, body=body)
+    data = _request("POST", "/api/judge", JUDGE_TIMEOUT, body=body)
     if not isinstance(data, dict) or "stuck" not in data:
         return None
     return data

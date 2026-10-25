@@ -51,7 +51,7 @@ Inside the session:
 - To see which hooks ran and what they printed, start with `claude --debug --plugin-dir ./plugin`.
 
 To trigger the hook, make a command fail the same way three times, for example ask Claude to run a script that
-prints the Prisma error from `mock_data.json` and exits 1. Watch the mock backend's terminal for the `/v1/search`
+prints the Prisma error from `mock_data.json` and exits 1. Watch the mock backend's terminal for the `/api/search`
 call.
 
 **4. Run the hook engine's unit tests:**

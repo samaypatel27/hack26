@@ -86,7 +86,7 @@ miss, especially logic struggles that produce no errors.
 | Question | "Is this coding agent stuck or going in circles? Consider repeated attempts, edits that don't change results, and claims that don't match results." |
 | Answer format | JSON: `{"stuck": true or false, "reason": "<one sentence>", "confidence": 0.0 to 1.0}` |
 | Counts as | Strong signal when `stuck` is true and `confidence >= 0.7` |
-| Where it runs | Through the backend (proposed endpoint `POST /v1/judge`), so the API key stays on the server and the hook stays fast. Fail open: no answer within ~5 seconds = no signal |
+| Where it runs | Through the backend (proposed endpoint `POST /api/judge`), so the API key stays on the server and the hook stays fast. Fail open: no answer within ~5 seconds = no signal |
 
 The hook only collects and sends the recent activity. The backend owns the model call.
 
@@ -136,4 +136,4 @@ The hook moves the stuck episode up the help ladder one step at a time:
 - [ ] Final thresholds for each v1 signal, after testing on the trap tasks
 - [ ] The pushback and success-claim phrase lists
 - [ ] Judge trigger numbers (20 actions / 10 minutes / once per 10 actions)
-- [ ] Backend team confirms `POST /v1/judge`, or we call the model from the hook directly
+- [ ] Backend team confirms `POST /api/judge`, or we call the model from the hook directly

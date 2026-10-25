@@ -539,10 +539,10 @@ class Backend(TempProject):
     def setUp(self):
         super().setUp()
         self.server = FakeServer({
-            ("GET", "/v1/search"): (200, [SOLVED]),
-            ("POST", "/v1/outcomes"): (200, {"post_status": "solved"}),
-            ("GET", "/v1/updates"): (200, [{"message": "solved!", "post_id": 2}]),
-            ("POST", "/v1/judge"): (200, {"stuck": True, "reason": "r", "confidence": 0.8}),
+            ("GET", "/api/search"): (200, [SOLVED]),
+            ("POST", "/api/outcomes"): (200, {"post_status": "solved"}),
+            ("GET", "/api/updates"): (200, [{"message": "solved!", "post_id": 2}]),
+            ("POST", "/api/judge"): (200, {"stuck": True, "reason": "r", "confidence": 0.8}),
         })
         self.addCleanup(self.server.close)
         os.environ["AGENTOVERFLOW_API_URL"] = self.server.url
@@ -554,7 +554,7 @@ class Backend(TempProject):
     def test_search_contract(self):
         self.assertEqual(backend.search("E" * 5000, "npm test", "abcd1234", ["node", "esm"]), [SOLVED])
         req = self.server.requests[-1]
-        self.assertEqual((req["method"], req["path"], req["key"]), ("GET", "/v1/search", "k1"))
+        self.assertEqual((req["method"], req["path"], req["key"]), ("GET", "/api/search", "k1"))
         self.assertEqual(len(req["query"]["error"][0]), 2000)
         self.assertEqual(req["query"]["command"], ["npm test"])
         self.assertEqual(req["query"]["fingerprint"], ["abcd1234"])
@@ -574,13 +574,13 @@ class Backend(TempProject):
         self.assertEqual(sent["actions"][0]["out"], "token=<secret>")   # scrubbed
 
     def test_errors_return_none(self):
-        self.server.routes[("GET", "/v1/search")] = (500, {"detail": "boom"})
+        self.server.routes[("GET", "/api/search")] = (500, {"detail": "boom"})
         self.assertIsNone(backend.search("e", "c", "f"))
-        self.server.routes[("GET", "/v1/search")] = (200, b"not json")
+        self.server.routes[("GET", "/api/search")] = (200, b"not json")
         self.assertIsNone(backend.search("e", "c", "f"))
-        self.server.routes[("GET", "/v1/search")] = (200, {"not": "a list"})
+        self.server.routes[("GET", "/api/search")] = (200, {"not": "a list"})
         self.assertIsNone(backend.search("e", "c", "f"))
-        self.server.routes[("POST", "/v1/judge")] = (200, {"no": "stuck field"})
+        self.server.routes[("POST", "/api/judge")] = (200, {"no": "stuck field"})
         self.assertIsNone(backend.judge("s", [], []))
 
     def test_server_down_returns_none_and_is_remembered(self):
@@ -625,8 +625,8 @@ class EndToEnd(TempProject):
                 "tool_name": "Bash", "tool_input": {"command": cmd}, "error": err}
 
     def test_known_fix_round_trip_through_main(self):
-        server = FakeServer({("GET", "/v1/search"): (200, [{**SOLVED, "solution": "Use the café → fix"}]),
-                             ("POST", "/v1/outcomes"): (200, {"post_status": "solved"})})
+        server = FakeServer({("GET", "/api/search"): (200, [{**SOLVED, "solution": "Use the café → fix"}]),
+                             ("POST", "/api/outcomes"): (200, {"post_status": "solved"})})
         self.addCleanup(server.close)
         env = {"AGENTOVERFLOW_API_URL": server.url}
         outputs = [self.run_main(self.bash_fail(DC, PRISMA), env) for _ in range(3)]

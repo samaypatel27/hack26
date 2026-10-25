@@ -1,17 +1,19 @@
-"""Database access for the /v1 API (search, outcomes, updates).
+"""Database access for the agent routes in agent.py (search, outcomes, updates) and the agent
+fields of POST /api/posts (main.py).
 
-Posts live in the Breakpoint tables and are written only by /api (main.py). /v1 reads them through
-the post_cards view and keeps agent-only fields in the v1_ tables from schema_v1.sql.
+Posts live in the Breakpoint tables and are written only by POST /api/posts. These helpers read them
+through the post_cards view and keep agent-only fields in the agent_ tables from schema_agent.sql.
 
 Uses a small connection pool when psycopg_pool is installed (`psycopg[binary,pool]`), so each
-request doesn't pay for a new TLS connection to Supabase: the hook gives /v1/search only 2
+request doesn't pay for a new TLS connection to Supabase: the hook gives /api/search only 2
 seconds. Without it, it falls back to one connection per request like main.connect().
 Every function takes an open connection, so a route can do several steps in one transaction:
-`with db_v1.connect() as conn: ...` commits on success and rolls back on an exception.
+`with agent_db.connect() as conn: ...` commits on success and rolls back on an exception.
 """
 
 import atexit
 import os
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -27,6 +29,15 @@ except ImportError:  # optional dependency
     ConnectionPool = None  # type: ignore[assignment,misc]
 
 CANDIDATE_LIMIT = 500      # text matching looks at most at this many recent posts
+FINGERPRINT_RE = re.compile(r"^[0-9a-f]{6,64}$")
+
+
+def clean_fingerprint(raw: Any) -> str | None:
+    """The hook's hex error ID, or None if missing or not hex (then we match by text instead)."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    return value if FINGERPRINT_RE.match(value) else None
 
 _pool: Any = None
 _pool_lock = threading.Lock()
@@ -77,7 +88,7 @@ POST_SELECT = (
     "SELECT c.id, c.description, c.value, c.solution, c.forum, c.tags, c.author, c.post_votes,"
     " c.created_at, m.fingerprint, m.command, m.project,"
     " COALESCE(m.times_worked, 0) AS times_worked, COALESCE(m.times_applied, 0) AS times_applied"
-    " FROM post_cards c LEFT JOIN v1_post_meta m ON m.post_id = c.id"
+    " FROM post_cards c LEFT JOIN agent_post_meta m ON m.post_id = c.id"
 )
 
 
@@ -142,18 +153,18 @@ def known_tags(conn: psycopg.Connection) -> set[str]:
 def record_outcome(conn: psycopg.Connection, post_id: int, worked: bool, fingerprint: str | None,
                    command: str | None, session_id: str | None, source: str | None) -> str | None:
     """Count one observed outcome. Returns the post's status ("solved" | "open"), or None if
-    there is no such post. v1 never reopens a failing fix; the counts are there for when we do."""
+    there is no such post. we never reopen a failing fix; the counts are there for when we do."""
     post = conn.execute("SELECT solution FROM posts WHERE id = %s", (post_id,)).fetchone()
     if post is None:
         return None
     conn.execute(
-        "INSERT INTO v1_post_meta (post_id, times_applied, times_worked) VALUES (%s, 1, %s)"
-        " ON CONFLICT (post_id) DO UPDATE SET times_applied = v1_post_meta.times_applied + 1,"
-        " times_worked = v1_post_meta.times_worked + EXCLUDED.times_worked",
+        "INSERT INTO agent_post_meta (post_id, times_applied, times_worked) VALUES (%s, 1, %s)"
+        " ON CONFLICT (post_id) DO UPDATE SET times_applied = agent_post_meta.times_applied + 1,"
+        " times_worked = agent_post_meta.times_worked + EXCLUDED.times_worked",
         (post_id, 1 if worked else 0),
     )
     conn.execute(
-        "INSERT INTO v1_outcomes (post_id, worked, fingerprint, command, session_id, source)"
+        "INSERT INTO agent_outcomes (post_id, worked, fingerprint, command, session_id, source)"
         " VALUES (%s, %s, %s, %s, %s, %s)",
         (post_id, worked, fingerprint, command, session_id, source),
     )
@@ -167,8 +178,49 @@ def record_outcome(conn: psycopg.Connection, post_id: int, worked: bool, fingerp
 def take_updates(conn: psycopg.Connection, project: str) -> list[dict[str, Any]]:
     """Undelivered updates for a project, oldest first, marked delivered in the same statement."""
     rows = conn.execute(
-        "UPDATE v1_updates SET delivered = true WHERE project = %s AND NOT delivered"
+        "UPDATE agent_updates SET delivered = true WHERE project = %s AND NOT delivered"
         " RETURNING id, message, post_id",
         (project,),
     ).fetchall()
     return [{"message": r["message"], "post_id": r["post_id"]} for r in sorted(rows, key=lambda r: r["id"])]
+
+
+def add_update(conn: psycopg.Connection, project: str, message: str, post_id: int | None) -> None:
+    conn.execute("INSERT INTO agent_updates (project, message, post_id) VALUES (%s, %s, %s)",
+                 (project, message, post_id))
+
+
+# ---------------------------------------------------------------------------
+# Agent fields of a post, and the projects waiting on an Open Question
+# ---------------------------------------------------------------------------
+
+def save_meta(conn: psycopg.Connection, post_id: int, fingerprint: str | None, command: str | None,
+              project: str | None, team_run_id: str | None) -> None:
+    """Store the agent-only fields of a post. Fields not given keep what the post already has."""
+    if not any((fingerprint, command, project, team_run_id)):
+        return
+    conn.execute(
+        "INSERT INTO agent_post_meta (post_id, fingerprint, command, project, team_run_id)"
+        " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (post_id) DO UPDATE SET"
+        " fingerprint = COALESCE(EXCLUDED.fingerprint, agent_post_meta.fingerprint),"
+        " command = COALESCE(EXCLUDED.command, agent_post_meta.command),"
+        " project = COALESCE(agent_post_meta.project, EXCLUDED.project),"
+        " team_run_id = COALESCE(EXCLUDED.team_run_id, agent_post_meta.team_run_id)",
+        (post_id, fingerprint, command, project, team_run_id),
+    )
+
+
+def add_watcher(conn: psycopg.Connection, post_id: int, project: str) -> None:
+    """Remember a project that hit the same Open Question later, so it gets the update too."""
+    conn.execute("INSERT INTO agent_watchers (post_id, project) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                 (post_id, project))
+
+
+def watchers(conn: psycopg.Connection, post_id: int) -> list[str]:
+    """Projects to tell when an Open Question is solved: the asker plus everyone attached later."""
+    rows = conn.execute(
+        "SELECT project FROM agent_post_meta WHERE post_id = %s AND project IS NOT NULL"
+        " UNION SELECT project FROM agent_watchers WHERE post_id = %s",
+        (post_id, post_id),
+    ).fetchall()
+    return sorted(r["project"] for r in rows)

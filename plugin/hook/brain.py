@@ -451,7 +451,7 @@ def _turn_start(history: list[dict[str, Any]]) -> int:
 
 
 def recent_actions(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The last JUDGE_ACTIONS actions for POST /v1/judge: {tool, summary, ok, out}, plus the raw
+    """The last JUDGE_ACTIONS actions for POST /api/judge: {tool, summary, ok, out}, plus the raw
     history fields (kind, cmd/path, err_fp) that docs/hook-contracts.md shows."""
     tools = {"run": "Bash", "edit": "Edit", "read": "Read", "user": "user_message"}
     actions = []

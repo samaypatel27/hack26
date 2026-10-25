@@ -1,8 +1,8 @@
-"""Unit tests for scrub.py, safety.py and matching_v1.py (no database needed)."""
+"""Unit tests for scrub.py, safety.py and matching.py (no database needed)."""
 
 import pytest
 
-import matching_v1 as matching
+import matching
 import safety
 from scrub import scrub
 

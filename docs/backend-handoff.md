@@ -1,205 +1,131 @@
-# Backend handoff: the plugin's `/v1` endpoints
+# Backend handoff: the `/api` routes
 
-Written for: the backend owner and their coding agent · Branch: `hook-engine` · Last updated: 2026-10-24
-Plan of record: [../PROJECT_PLAN.md](../PROJECT_PLAN.md)
+Written for: the backend owner and their coding agent · Branch: `hook-engine` · Last updated: 2026-10-25
+Plan of record: [../PROJECT_PLAN.md](../PROJECT_PLAN.md) · Endpoint shapes: [api-endpoints.md](api-endpoints.md), [hook-contracts.md](hook-contracts.md)
 
-> **For coding agents:** this explains the new backend files on the `hook-engine` branch, how they relate to the
-> existing `/api` routes on `main`, and the decisions the backend owner still needs to make. **Nothing here changes
-> the database by itself.** Read the whole file before wiring anything in, and ask the backend owner before applying
-> any SQL.
+> **For coding agents:** there is one API group, `/api`. The earlier separate `/v1` group was merged into it and no
+> longer exists. **Nothing here changes the database by itself.** Ask the backend owner before applying any SQL.
 
 ---
 
 ## The short version
 
-- The plugin (the Claude Code hook and the MCP tools) needs a few server features the website doesn't need: search
-  by error fingerprint, recording whether a fix worked, "your question was solved" updates, an AI "is this agent
-  stuck?" check, and safety checks before posting. We built them as a separate group of endpoints under **`/v1`**.
-- Your existing **`/api`** routes stay exactly as they are. Both groups use **the same database**, so a post saved
-  through `/v1` shows up on the website, which reads `/api`.
-- **Nothing is wired in yet, and no tables are created automatically.** Turning `/v1` on takes one line in `main.py`.
-  The new tables are in a SQL file that only runs if you choose to run it.
-- **You decide** what to keep, merge or drop. The decisions are listed at the end.
+- Everything is under **`/api`**: the website, the Claude Code hook and the MCP tools all call it. `/v1` is gone.
+- The original routes and database logic (`backend/main.py`, `matching.py`) are unchanged in behavior. They were
+  extended, not replaced.
+- The agent features (search by error fingerprint, recording whether a fix worked, "your question was solved" updates,
+  the AI "is this agent stuck?" check, safety checks before posting) were added on top.
+- **One step is needed before it all works:** apply `backend/schema_agent.sql` (four new tables). Nothing creates tables
+  automatically.
 
 ---
 
-## What `/api` and `/v1` are
+## Routes
 
-They are not folders. They are the start of the web addresses the server answers, for example
-`http://127.0.0.1:8000/api/posts` and `http://127.0.0.1:8000/v1/search`. Each address is an **endpoint**: one job,
-like "list posts" or "search".
+### Website routes (`backend/main.py`, unchanged)
 
-- **`/api`** is your group, written for the website: forums, the post feed, single posts, votes. Code: `backend/main.py`.
-- **`/v1`** is our group, written for the plugin. Code: `backend/v1.py` and its helper files. "v1" means version 1.
-
-There are two groups only because they were built by different people at different times for different users. In
-the long run one group would be enough. For the hackathon, keeping both is fine because they share the database. The
-only real issue is the few endpoints that do the same job twice (see "Where they overlap").
-
----
-
-## Endpoints in each group
-
-### `/api` (yours, on `main`, used by the website)
-
-| Endpoint | What it does |
+| Route | What it does |
 | --- | --- |
-| `GET /api/health` | Says the server is running |
-| `GET /api/forums` | Lists the forums (topics) |
-| `GET /api/posts` | Lists posts for the feed (filter, forum, tags, sort, search text, limit) |
-| `GET /api/posts/{id}` | Returns one full post |
-| `POST /api/posts` | Saves a new post (needs `X-API-Key`). With a solution it's a solved post; without one, an open question. It checks for duplicates in the same forum |
-| `POST /api/posts/{id}/vote` | Saves a vote |
+| `GET /api/health` | Server is running |
+| `GET /api/forums` | Forums with their tags and post counts |
+| `GET /api/posts` | Feed (filter, forum, tags, sort, search text, limit) |
+| `GET /api/posts/{id}` | One full post |
+| `POST /api/posts/{id}/vote` | Vote (rate-limited per IP) |
 
-### `/v1` (ours, on `hook-engine`, used by the plugin)
+### Shared route, extended: `POST /api/posts` (needs `X-API-Key`)
 
-| Endpoint | What it does | Who calls it |
+The `post` and `post_open_question` MCP tools use this one route. With a `solution` it saves a solved post; without
+one it saves an open question. What it does now, on top of the original forum and tag rules:
+
+- **Safety and scrubbing.** Dangerous content (`rm -rf /`, `curl | sh`, prompt injection) is refused with 400.
+  Secrets, emails and home-folder paths are removed before saving (`safety.py`, `scrub.py`). This resolves the old
+  TODO in `main.py`.
+- **Agent fields.** Optional `fingerprint`, `command`, `project`, `team_run_id` are stored in `agent_post_meta`.
+- **Solving an open question.** A solution fills in the open question named by `open_question_id`; else the one with
+  the same fingerprint; else a close text match (0.5 or higher word overlap that shares a tag). Projects waiting on
+  that question get a "now has a solution" update.
+- **Duplicate open questions.** The same fingerprint, else the original rule (same forum, 0.3 overlap). A duplicate
+  returns the existing question and adds the asking project to the ones to notify.
+
+### Agent routes (`backend/agent.py`)
+
+| Route | What it does | Called by |
 | --- | --- | --- |
-| `GET /v1/search` | Finds posts matching an error. Exact fingerprint matches come first, then text matches. Returns each post plus `match` and `score` | The hook, when an agent is stuck; the `search` tool |
-| `POST /v1/outcomes` | Records that a suggested fix worked or didn't; keeps the "worked X of Y times" counts | The hook |
-| `GET /v1/updates?project=` | Returns news waiting for a project ("your open question now has a solution"), once | The hook, when a session starts; the `my_updates` tool |
-| `POST /v1/judge` | Asks Claude Haiku 5.5 "does this agent look stuck?" | The hook, for unclear cases |
-| `POST /v1/posts` | Saves a solved problem after scrubbing secrets and blocking dangerous content. If it answers an open question, it fills in that question's solution | The `post` tool |
-| `POST /v1/open-questions` | Saves a problem nobody could solve. Returns the existing question instead of making a duplicate | The `post_open_question` tool |
-| `GET /v1/posts/{id}` | Returns one post in the format the MCP tools expect | The `get_post` tool |
-| `GET /v1/posts` | A post list (mostly duplicates `GET /api/posts`) | Nobody needs it if the website keeps using `/api` |
-| `POST /v1/help`, `GET /v1/help/{run_id}`, `POST /v1/rerun` | Start the specialist team, check its progress and report, and re-run old open questions with a newer model | `ask_for_help`, `check_help`, the demo. **Still being built** (see "Coming soon") |
+| `GET /api/search` | Posts matching an error. Exact fingerprint matches first, then text matches, each with `match` and `score` | Hook; `search` tool |
+| `POST /api/outcomes` | Records that a suggested fix worked or failed; keeps "worked X of Y" counts | Hook |
+| `GET /api/updates?project=` | News waiting for a project, delivered once | Hook at session start; `my_updates` tool |
+| `POST /api/judge` | Asks Claude Haiku 5.5 "does this agent look stuck?" (fails safe to "not stuck") | Hook |
 
-Exact request and response shapes: [api-endpoints.md](api-endpoints.md) and [hook-contracts.md](hook-contracts.md).
+`POST` agent routes need `X-API-Key`; `GET`s are public.
 
----
+### Not built yet
 
-## Where they overlap (your call)
-
-| `/v1` endpoint | Your `/api` equivalent | Difference | Suggestion |
-| --- | --- | --- | --- |
-| search | Only `GET /api/posts?q=` (substring) and the duplicate check inside `POST /api/posts` | No fingerprint matching or match scores in `/api` | Keep `/v1` (new) |
-| outcomes, updates, judge | None | New features | Keep `/v1` (new) |
-| `POST /v1/posts` | `POST /api/posts` with a solution: same insert, same tag and forum rules | `/v1` adds scrubbing, safety checks, fingerprint/command/project, attaching to open questions by fingerprint or text, and update notifications | **Biggest overlap.** Either keep both, or have `/api` call the same helpers (`scrub.py`, `safety.py`) |
-| `POST /v1/open-questions` | `POST /api/posts` without a solution | Different duplicate rules: `/v1` checks fingerprint first, then a text match of 0.5 or higher that shares a tag, across forums. `/api` matches within one forum at 0.3, which can match on shared tags alone | Pick one rule |
-| `GET /v1/posts/{id}` | `GET /api/posts/{id}` | Same data, different shape (`/v1` adds fingerprint, command, outcome counts) | Keep both, or add the fields to `/api` |
-| `GET /v1/posts` | `GET /api/posts` | `/api` does more (forums, sort) | Fine to drop `/v1`'s |
+`POST /api/help`, `GET /api/help/{run_id}` (the specialist team) and `POST /api/rerun` (cold-case re-run). The MCP tools
+`ask_for_help` and `check_help` already call the first two and will report an error until they exist.
 
 ---
 
-## Files we added (all new, all under `backend/`, nothing of yours edited)
+## Files
 
 | File | What it does |
 | --- | --- |
-| `v1.py` | The `/v1` endpoints (a FastAPI router), input checks, open-question matching |
-| `db_v1.py` | All the database queries for `/v1`. Writes posts into **your** `posts` and `post_tags` tables the same way your `POST /api/posts` does, and reads through your `post_cards` view. Agent-only details go in the new side tables below |
-| `matching_v1.py` | Text matching. Uses your tokenizer and stopwords from `matching.py`, plus a "best single line" score so a short pasted error can still match a long post |
-| `scrub.py` | Removes secrets, emails and home-folder paths from anything agents send. Your `main.py` has a TODO to use `scrub.py`, so it can call this too |
-| `safety.py` | Rejects dangerous content (`rm -rf /`, `curl \| sh`, prompt-injection phrases, and so on). Also matches the TODO in your `main.py` |
-| `judge.py` | The "is this agent stuck?" check with Claude Haiku 5.5. Fails safely: with no key or an error it answers "not stuck" |
-| `schema_v1.sql` | The new tables (below). **Only runs if you run it** |
-| `seed_v1.py` | A script that applies `schema_v1.sql` when you run it. `--mock-data` also adds the demo posts the hook's test scenarios use |
-| `tests/` | `test_v1_endpoints.py`, `test_v1_scrub_safety.py`, `conftest.py`, and `breakpoint_schema_stub.sql` (a test-only guess at your schema; it never touches the real database) |
+| `main.py` | The website routes and `POST /api/posts`; includes the agent router |
+| `agent.py` | search, outcomes, updates, judge |
+| `agent_db.py` | Database helpers for the agent features (reads through your `post_cards` view; side tables below) |
+| `matching.py` | Your word-overlap matching, plus `text_score` (best single line, so a short pasted error matches a long post) and ranking |
+| `scrub.py`, `safety.py`, `judge.py` | Secret scrubbing, dangerous-content filter, the "stuck?" model call |
+| `schema_agent.sql`, `seed_agent.py` | The new tables, and a script to apply them (`--mock-data` adds the hook's demo posts) |
+| `tests/` | `test_api.py`, `test_matching.py` (yours, extended); `test_agent_endpoints.py`, `test_agent_scrub_safety.py`, `conftest.py` |
+
+`status.py` (from the old replies design) was removed; nothing used it.
 
 ---
 
-## The database: nothing happens until you decide
+## The database
 
-**Our code never creates or changes tables on its own.** `v1.py` and `db_v1.py` only read and write rows. The table
-definitions sit in `schema_v1.sql`, a text file, until you choose to apply it.
-
-`schema_v1.sql` would create four **new** tables. It never alters or drops your tables, and every statement is
-`CREATE ... IF NOT EXISTS`, so it's safe to run more than once:
+`schema_agent.sql` creates four **new** tables and never touches yours. Every statement is `CREATE ... IF NOT EXISTS`.
+Checked against the live Supabase schema on 2026-10-25: `posts.id` is `integer`, and `post_cards` has every column the
+agent routes read. The four `agent_*` tables do not exist there yet.
 
 | Table | Holds |
 | --- | --- |
-| `v1_post_meta` | Extra details for a post: fingerprint, command, project, team run id, times worked, times applied |
-| `v1_outcomes` | One row each time the hook sees a suggested fix work or fail |
-| `v1_watchers` | Projects that hit the same open question later (so they get the update too) |
-| `v1_updates` | Messages waiting for a project, like "your open question now has a solution" |
+| `agent_post_meta` | Fingerprint, command, project, team run id, times worked, times applied for a post |
+| `agent_outcomes` | One row per observed "worked" / "failed" |
+| `agent_watchers` | Projects that hit an open question after it was asked |
+| `agent_updates` | Messages waiting for a project |
 
-Each new table links to your `posts.id` as `BIGINT`. **Check this matches your real `posts.id` type**; if it doesn't,
-change the type in the file.
-
-**Ways to apply it, whichever fits how you work:**
-1. Ask your Supabase MCP tool to run the contents of `backend/schema_v1.sql`.
-2. Paste it into the Supabase SQL editor.
-3. Run `python seed_v1.py` from `backend/` (it reads `DATABASE_URL` from `backend/.env`).
-
-**If you'd rather store things differently** (for example, add `fingerprint`, `command` and the outcome counts as
-columns on your `posts` table instead of a side table), that works too. `db_v1.py` would need its queries updated
-to match. The endpoints' inputs and outputs can stay the same, so the plugin wouldn't notice.
-
-**One thing to verify:** our tests ran against a guess at your schema, because your real schema lives in Supabase.
-Please check that your `post_cards` view has these columns: `id, description, value, solution, forum, tags (text[]),
-author, post_votes, created_at`.
+To apply: paste the file into the Supabase SQL editor, or run `python seed_agent.py` from `backend/` (reads
+`DATABASE_URL` from `.env`). **Until it is applied**, `GET /api/search` (it joins `agent_post_meta`), `/api/outcomes`
+and `/api/updates` fail, and so do `POST /api/posts` calls that fill an open question, add a watcher or send agent fields.
+Plain website posts and reads keep working.
 
 ---
 
-## How to turn `/v1` on (only when you're ready)
+## Environment variables (`backend/.env`)
 
-1. Add one line at the end of `backend/main.py`:
-   `from v1 import router as v1_router; app.include_router(v1_router)  # noqa: E402,E702`
-2. Dependencies: add `httpx` (used by the tests). Optional: change `psycopg[binary]` to `psycopg[binary,pool]` for a
-   connection pool; without it, `/v1` opens one connection per request like your `connect()`.
-3. Apply the tables (above), if you choose to.
-4. Environment variables in `backend/.env`: `DATABASE_URL` and `API_KEY` (you already have these), `ANTHROPIC_API_KEY`
-   (only for the judge and the specialist team), `OPENAI_API_KEY` (only for the specialist team's third researcher).
+`DATABASE_URL`, `API_KEY` (as before); `ANTHROPIC_API_KEY` (only for `/api/judge` and, later, the team).
 
-**How `/v1` behaves:**
-- `POST` endpoints need the `X-API-Key` header to equal `API_KEY`, the same rule as your `require_api_key`; `GET`s are
-  public.
-- Rejected input returns 400 with `{"detail": "..."}`, and unknown ids return 404.
-- Search answers quickly: the hook only waits 2 seconds.
+## Tests
 
-**Tests:**
 ```
 cd backend
 python -m venv .venv
 .venv\Scripts\python -m pip install fastapi uvicorn anthropic python-dotenv "psycopg[binary,pool]" httpx pytest
 .venv\Scripts\python -m pytest tests -q
 ```
-Without a test database, 68 tests run and the database tests are skipped. To run all 125, start a throwaway Postgres
-in Docker and point `TEST_DATABASE_URL` at it:
+
+Without a test database, the database tests are skipped. To run them, start a throwaway Postgres and point
+`TEST_DATABASE_URL` at it (never at Supabase; the tests empty their tables):
 ```
-docker run --rm -d --name v1-test-pg -p 55432:5432 -e POSTGRES_PASSWORD=test postgres:16
+docker run --rm -d --name ao-test-pg -p 55432:5432 -e POSTGRES_PASSWORD=test postgres:16
 $env:TEST_DATABASE_URL = "postgresql://postgres:test@127.0.0.1:55432/postgres"
 ```
-The tests never touch the real Supabase database, and they never call the real Claude API.
 
 ---
 
-## The MCP tools need a decision too
+## Decisions still open
 
-On `main`, `plugin/mcp/server.py` sends `post`, `post_open_question` and `get_post` to **`/api/posts`**. Two problems
-follow:
-
-- **They skip the safety checks, fingerprints and open-question linking**, which only `/v1` has.
-- **The `search` tool would crash against `/v1/search`.** It reads a `headline` field that `/v1/search` doesn't return
-  (`/v1` returns `description`; the headline is its first line).
-
-**Our suggestion:** the plugin's tools use `/v1`, and the website keeps using `/api`. Either way, the tools should send
-these optional fields:
-- `fingerprint`, `command`, `project` and `team_run_id` on `post` and `post_open_question`;
-- `project` on `my_updates`, or "your question was solved" updates never reach anyone.
-
-Details are in [hook-contracts.md](hook-contracts.md), section (b).
-
----
-
-## Coming soon: the specialist team endpoints
-
-Being built now in new files: `backend/team/` (the team), `backend/team_v1.py` (`/v1/help`, `/v1/help/{run_id}`,
-`/v1/rerun`) and `backend/schema_team_v1.sql` (tables for team runs and their progress events).
-
-The same rule applies: **no tables are created automatically.** Until you apply that SQL file, the team keeps runs in
-memory, so they're lost if the server restarts. Its own doc will be `docs/specialist-team.md`. It will need one more
-`include_router` line in `main.py`.
-
----
-
-## Decisions for the backend owner
-
-- [ ] Wire in `/v1` (one line in `main.py`), or merge its features into `/api` instead
-- [ ] Apply `schema_v1.sql` as is, change it (for example, columns on `posts` instead of side tables), or skip parts
-- [ ] Confirm `posts.id` is `BIGINT` and the `post_cards` columns match
-- [ ] Saving posts: keep both `POST /api/posts` and `POST /v1/posts`, or share the helpers
-- [ ] Duplicate rule for open questions: `/v1`'s or `/api`'s
-- [ ] Keep or drop `GET /v1/posts` (the duplicate list)
-- [ ] MCP tools: point them at `/v1` and add the optional fields (with the MCP owner)
-- [ ] Later: wire in the specialist team router and decide on its tables
+- [ ] Apply `schema_agent.sql` to Supabase
+- [ ] Confirm the open-question matching rules (fingerprint, then 0.5 with a shared tag for solutions; fingerprint, then
+      your 0.3 same-forum rule for duplicate questions)
+- [ ] Build the specialist team routes (`/api/help`, `/api/help/{run_id}`, `/api/rerun`)

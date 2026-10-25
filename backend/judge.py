@@ -1,4 +1,4 @@
-"""The AI judge behind POST /v1/judge (docs/struggle-signals.md, "The AI judge (v1)").
+"""The AI judge behind POST /api/judge (docs/struggle-signals.md, "The AI judge (v1)").
 
 A small, fast model reads the agent's recent actions and replies and answers
 {"stuck", "reason", "confidence"}. The hook waits at most 5 seconds and treats any failure as
