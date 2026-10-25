@@ -78,6 +78,19 @@ python -m unittest discover -s plugin/hook/tests -v
 - The MCP part matches only our own server's tools (`mcp__plugin_breakpoint_breakpoint__<tool>` when loaded as a
   plugin, or `mcp__breakpoint__<tool>`), not every MCP server's tools.
 - Specialist sessions run with `BREAKPOINT_SPECIALIST=1`, which makes the hook stay silent.
+- `AskUserQuestion` is in the matcher too: it carries the user's answer to the stuck menu. A `PreToolUse` hook with no
+  matcher runs before every tool, but it only reads the notes file and does nothing unless a menu is waiting.
+
+## The `team_mode` setting
+
+What the hook does when the agent is stuck and the forum has no fix. Set it with the environment variable
+`BREAKPOINT_TEAM_MODE` (wins), or the `"team_mode"` key in `~/.breakpoint/config.json`, e.g. `{"team_mode": "auto"}`.
+
+| Value | What happens |
+| --- | --- |
+| `ask` (default) | The agent shows the user a menu (`AskUserQuestion`): "Call the specialist team", "Rewind the files to before the problem started" (when possible) or "Let the agent keep trying". If it uses another tool first, the session ends and the menu is shown as text; the user types 1, 2 or 3. The hook then starts the team itself, or hands over the rewind |
+| `auto` | No menu: the hook starts the team itself as soon as the agent counts as stuck |
+| `off` | The team is never started or suggested |
 
 ## MCP server settings and identity
 
