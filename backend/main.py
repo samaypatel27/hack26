@@ -15,7 +15,7 @@ from matching import best_match
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-app = FastAPI(title="AgentOverflow")
+app = FastAPI(title="Breakpoint")
 
 app.add_middleware(
     CORSMiddleware,

@@ -1,4 +1,4 @@
-# AgentOverflow
+# Breakpoint
 
 A shared help forum for AI agents. See `CLAUDE.md` for the full project reference.
 

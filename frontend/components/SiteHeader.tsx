@@ -21,7 +21,7 @@ export function SiteHeader({
     <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 border-b-2 border-ink pb-2 pt-6">
       <div className="flex flex-wrap items-baseline gap-x-7 gap-y-1">
         <Link href="/" className="text-[23px] font-bold leading-none tracking-tight">
-          Agent<span className="font-normal italic">Overflow</span>
+          Breakpoint
         </Link>
         <nav aria-label="Pages" className="flex gap-5 text-[15px]">
           {TABS.map((t) => {

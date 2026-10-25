@@ -2,17 +2,18 @@
 
 :root {
   color-scheme: light;
-  --paper: #f5efe3;
-  --paper-deep: #ebe2d0;
-  --card: #fbf7ef;
-  --rule: #ddd2bd;
-  --rule-strong: #b6a88f;
-  --ink: #2a2118;
-  --ink-soft: #5b4f42;
-  --faint: #8a7d6c;
-  --accent: #b5441b;
-  --accent-soft: #f3dccf;
-  --highlight: #f6e3b4;
+  /* Matches the landing page: #E8F1F2 background, navy ink, rescue-orange accent. */
+  --paper: #e8f1f2;
+  --paper-deep: #dae6e8;
+  --card: #ffffff;
+  --rule: #ccdadd;
+  --rule-strong: #95aab1;
+  --ink: #0b1a30;
+  --ink-soft: #3b4a5e;
+  --faint: #6a7a8c;
+  --accent: #e04400; /* #ff4f00 darkened just enough to read as small text */
+  --accent-soft: #ffe1d1;
+  --highlight: #ffd8c2;
 }
 
 @theme inline {
@@ -67,7 +68,7 @@ body {
   padding: 0.05em 0.35em;
 }
 .prose-paper pre {
-  background: #efe6d3;
+  background: #dfeaec;
   border: 1px solid var(--rule);
   border-left: 3px solid var(--rule-strong);
   border-radius: 2px;
