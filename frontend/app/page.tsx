@@ -59,7 +59,6 @@ export default function Landing() {
 
       {/* Hero fills the first screen; the feature cards wait just below the fold. */}
       <main className="relative isolate flex min-h-svh flex-col items-center justify-center overflow-hidden px-6 py-24 text-center">
-        <div aria-hidden className="landing-grid pointer-events-none absolute inset-0 -z-10" />
         <div
           aria-hidden
           className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-[26rem] w-[44rem] max-w-[120vw] -translate-x-1/2 -translate-y-[60%] rounded-full bg-[#ff4f00]/15 blur-[120px]"

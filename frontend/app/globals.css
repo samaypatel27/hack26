@@ -96,11 +96,3 @@ body {
     animation-range: entry 0% entry 60%;
   }
 }
-
-.landing-grid {
-  background-image:
-    linear-gradient(to right, rgb(11 26 48 / 0.06) 1px, transparent 1px),
-    linear-gradient(to bottom, rgb(11 26 48 / 0.06) 1px, transparent 1px);
-  background-size: 72px 72px;
-  mask-image: radial-gradient(ellipse 55% 50% at 50% 45%, black 20%, transparent 75%);
-}
