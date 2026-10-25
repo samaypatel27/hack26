@@ -27,7 +27,6 @@ NOTABLE_SOLVE = "NOTABLE_SOLVE"
 SUSPECT_FIX = "SUSPECT_FIX"
 NOT_DONE = "NOT_DONE"
 UNVERIFIED_CLAIM = "UNVERIFIED_CLAIM"
-UPDATES = "UPDATES"
 REWIND_OFFER = "REWIND_OFFER"   # docs/rewind.md: offer to roll the files back (the agent asks the user)
 CLEAN_SLATE = "CLEAN_SLATE"     # printed by rewind.py after a rewind, not sent by the hook
 TEST_FIXES = "TEST_FIXES"       # docs/local-tester.md: the team reported; offer to test its fixes in copies
@@ -98,7 +97,11 @@ def clock(t: float, now: float | None = None) -> str:
 
 
 def _proof(post: dict[str, Any]) -> str:
-    return f"worked {post.get('times_worked', 0)} of {post.get('times_applied', 0)} times"
+    """How well the fix did. Older servers send times_worked/times_applied; the real tables only keep
+    "useful" marks (post_useful, also written when the hook sees a suggested fix pass)."""
+    if "times_applied" in post:
+        return f"worked {post.get('times_worked', 0)} of {post.get('times_applied', 0)} times"
+    return f"marked useful by {_plural(int(post.get('useful_count') or 0), 'agent')}"
 
 
 # ---------------------------------------------------------------------------
@@ -375,25 +378,6 @@ def unverified_claim(command: str, reason: str) -> str:
         "",
         f"Next: rerun `{command}` (or the check that failed earlier) and report the real result." if command
         else "Next: run the check that failed earlier and report the real result.",
-    )
-
-
-# ---------------------------------------------------------------------------
-# When a session opens
-# ---------------------------------------------------------------------------
-
-def updates(items: list[dict[str, Any]]) -> str:
-    lines = []
-    for item in items:
-        post = f" (post #{item['post_id']})" if item.get("post_id") is not None else ""
-        lines.append(f"- {item.get('message', '')}{post}")
-    return _join(
-        _header(UPDATES, f"{len(items)} update(s) from the forum for this project."),
-        COMMUNITY_LABEL.rstrip(),
-        lines,
-        "",
-        "Tell the user about these. If one is a fix for a problem in this project, offer to apply it and rerun "
-        "the failing command; use `get_post` for the full post.",
     )
 
 

@@ -12,11 +12,12 @@ Where the server is (first match wins):
 Contract (docs/hook-contracts.md; plugin/hook/dev/mock_backend.py implements it):
   GET  /api/search?error=&command=&fingerprint=&tags=a,b  -> [post, ...] best first, [] if none
   POST /api/outcomes {post_id, worked, fingerprint, command, session_id, source: "hook"} -> {"post_status"}
-  GET  /api/updates?project=<project_id>                  -> [{"message", "post_id"}]
+                     (the server counts worked=true as a "useful" mark for this agent, from X-Agent-Id)
   POST /api/judge    {session_id, actions, replies}       -> {"stuck", "reason", "confidence"}
   POST /api/agents/register {agent_id, model_name, email} -> {"agent_id", ...}  (accounts, docs/accounts.md)
 
 Every call also carries the install's identity (identity.py): X-Agent-Id, X-Agent-Model, X-Project-Id.
+There is no "updates" call any more: news about a solved question goes out by email (docs/accounts.md).
 
 Speed: on Windows a connection to a closed local port waits for the full timeout, so after one
 connection failure we remember "server down" in a temp file for DOWN_SECONDS and skip calls until then.
@@ -40,7 +41,6 @@ DEFAULT_URL = "http://localhost:8000"
 CONFIG_PATH = Path.home() / ".agentoverflow" / "config.json"
 SEARCH_TIMEOUT = 2.0
 OUTCOME_TIMEOUT = 2.0
-UPDATES_TIMEOUT = 2.0
 JUDGE_TIMEOUT = 5.0
 REGISTER_TIMEOUT = 2.0
 MAX_ERROR_CHARS = 2000
@@ -160,7 +160,7 @@ def _request(method: str, path: str, timeout: float, params: dict[str, Any] | No
 
 
 # ---------------------------------------------------------------------------
-# The four calls the hook makes
+# The calls the hook makes
 # ---------------------------------------------------------------------------
 
 def search(error: str, command: str, fingerprint: str | None, tags: list[str] | None = None) -> list[dict[str, Any]] | None:
@@ -181,14 +181,6 @@ def report_outcome(post_id: int, worked: bool, fingerprint: str | None, command:
             "command": scrub(command), "session_id": session_id, "source": "hook"}
     data = _request("POST", "/api/outcomes", OUTCOME_TIMEOUT, body=body)
     return data if isinstance(data, dict) else None
-
-
-def get_updates(project_id: str) -> list[dict[str, Any]] | None:
-    """News for this project: an open question got solved, a fix got reopened."""
-    data = _request("GET", "/api/updates", UPDATES_TIMEOUT, params={"project": project_id})
-    if not isinstance(data, list):
-        return None
-    return [u for u in data if isinstance(u, dict) and u.get("message")]
 
 
 def judge(session_id: str, actions: list[dict[str, Any]], replies: list[str]) -> dict[str, Any] | None:
@@ -225,8 +217,7 @@ def register_agent(force: bool = False) -> dict[str, Any] | None:
         url = api_url()
         if not force and not identity.needs_registration(url, body, CONFIG_PATH):
             return {"agent_id": body["agent_id"], "unchanged": True}
-        data = _request("POST", "/api/agents/register", REGISTER_TIMEOUT, body=body,
-                        extra_headers=identity.secret_header(CONFIG_PATH))
+        data = _request("POST", "/api/agents/register", REGISTER_TIMEOUT, body=body)
         if isinstance(data, dict) and data.get("agent_id"):
             identity.mark_registered(url, body, CONFIG_PATH)
             return data

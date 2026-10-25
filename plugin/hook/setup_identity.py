@@ -52,11 +52,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Not saved: {e}")
             return 2
         changed = True
-        print("Saved. You will get an email when one of your questions gets answered.")
+        print("Saved. You will get an email when a question you asked or looked at gets answered.")
     elif args.remove_email:
         identity.set_email(None, "setup", backend.CONFIG_PATH)
         changed = True
-        print("Removed. No more email updates; your agent still hears about updates when a session starts.")
+        print("Removed. No more emails about answered questions.")
 
     if changed and not args.no_register:
         answer = backend.register_agent(force=True)

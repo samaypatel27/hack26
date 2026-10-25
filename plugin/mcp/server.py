@@ -3,8 +3,8 @@
 Tools (names follow PROJECT_PLAN.md): search, ask_for_help, check_help, post.
 Our additions, kept on purpose: post_open_question, get_post.
 Agent activity (backend/activity.py): useful, reply, upvote_reply; get_post also records a visit.
-"Your open question was solved" news needs no tool: the SessionStart hook delivers it (GET /api/updates),
-and humans who gave an email get one.
+"Your open question was solved" news needs no tool: the server emails the asker and every agent that opened
+the question with get_post (if they saved an email with /agentoverflow:setup), once, when it gets its answer.
 
 Shared rules:
   - Thin wrapper: every tool makes one HTTP call to the backend with X-API-Key (plus registering this
@@ -61,7 +61,7 @@ def registration_error(agent: str) -> str | None:
     body = identity.registration_body()
     if body["agent_id"] != agent:   # AGENT_ID set by hand: register it as is, without the email
         body = {"agent_id": agent, "model_name": identity.current_model()}
-    data, err = call_api("POST", "/api/agents/register", body, extra_headers=identity.secret_header())
+    data, err = call_api("POST", "/api/agents/register", body)
     if err:
         data, err = call_api("POST", "/api/agents", {"agent_id": agent, "model_name": body["model_name"]})
     if err:
@@ -83,8 +83,8 @@ def registered_agent() -> tuple[str | None, str | None]:
 
 
 def agent_fields() -> dict[str, Any]:
-    """Fields added to post bodies: the project (so "your question was solved" reaches it), a public
-    author name, and agent_id when the server knows this agent (it 404s on unknown agent IDs)."""
+    """Fields added to post bodies: the project, a public author name, and agent_id when the server knows
+    this agent (it 404s on unknown agent IDs). The agent_id is what makes the asker get the "solved" email."""
     agent = current_agent_id()
     fields: dict[str, Any] = {"project": project_id(), "author": identity.public_name()}
     if ensure_registered(agent):
@@ -92,18 +92,6 @@ def agent_fields() -> dict[str, Any]:
     return fields
 
 
-def link_post(post_id: Any, role: str) -> None:
-    """Best effort: tie this agent and project to a post (role "asker" or "watcher")."""
-    if isinstance(post_id, int):
-        call_api("POST", "/api/accounts/watch", {"post_id": post_id, "project": project_id(),
-                 "role": role}, extra_headers=identity.secret_header())
-
-
-def announce_solved(post_id: Any) -> None:
-    """Best effort: tell the accounts router an Open Question now has a solution (it emails watchers once).
-    POST /api/posts already does this on the server; a second call only answers "already_sent"."""
-    if isinstance(post_id, int):
-        call_api("POST", "/api/accounts/solved", {"post_id": post_id}, extra_headers=identity.secret_header())
 # --- end accounts ----------------------------------------------------------------------------
 
 COMMUNITY_LABEL = (
@@ -221,7 +209,10 @@ def format_post(post: dict[str, Any], full: bool = True) -> str:
 
 
 def reply_author(item: dict[str, Any]) -> str:
-    """"agent-7f3a (Model Name)": the short public name, never the full agent ID (same rule as the website)."""
+    """"agent-7f3a (Model Name)": the short public name, never the full agent ID (same rule as the website).
+    The server already sends it as `author`; older servers sent the full agent_id, shortened here."""
+    if item.get("author"):
+        return str(item["author"])
     return f"{identity.short_name(str(item.get('agent_id') or ''))} ({item.get('model_name') or 'unknown model'})"
 
 
@@ -652,10 +643,10 @@ def post(
     if data.get("revise"):   # QUALITY: not saved; the agent fixes the listed problems and calls again
         return data["feedback"]
     if data.get("attached_to_open_question"):
-        if data.get("linked_by"):   # matched by similarity: the server already sent "possible answer" news
+        if data.get("linked_by"):   # matched by similarity: the server emailed "possible answer, not verified yet"
             return (f"Solution attached to open question #{data['post_id']} as a possible answer (matched by "
                     "similarity; the asker's agent verifies it)." + filed_under(data, forum) + quality_tail(data))
-        announce_solved(data.get("post_id"))  # accounts: email the people waiting on it
+        # The server already emailed the asker and the agents that opened the question.
         return f"Solution attached to open question #{data['post_id']}." + filed_under(data, forum) + quality_tail(data)
     return f"Posted as new solved post #{data['post_id']}." + filed_under(data, forum) + quality_tail(data)
 
@@ -668,7 +659,7 @@ def post(
 #   the team's) and why each failed, so the next agent skips those dead ends. If a matching open
 #   question already exists, the backend returns it instead of creating a duplicate. The same
 #   quality check and REVISE replies as post apply. When someone later solves it, the post is
-#   filled in through post, and the asker hears about it at its next session start (and by email).
+#   filled in through post, and the asker (and every agent that opened it) gets an email.
 # USED IN: Workflow 2, only when the team produced no fix that works
 OPEN_QUESTION_HELP = (
     "Post a problem nobody could solve. Include in `description` everything you and the team "
@@ -676,7 +667,7 @@ OPEN_QUESTION_HELP = (
     "a short title, `relevancy` = when the problem applies. Pass `fingerprint` and `command` from the "
     "hook message's detail lines when it gave them. If the reply starts with REVISE, the question was "
     "not saved: fix each listed problem and call this tool again with `attempt` set to the number the "
-    "reply gives (attempt + 1). You are told when it gets solved.\n\n" + FORUM_HELP
+    "reply gives (attempt + 1). The user gets an email when it is answered, if they saved one.\n\n" + FORUM_HELP
 )
 
 
@@ -706,8 +697,8 @@ def post_open_question(
         return err
     if data.get("revise"):   # QUALITY: not saved; the agent fixes the listed problems and calls again
         return data["feedback"]
-    link_post(data.get("duplicate_of") or data.get("post_id"),
-              "watcher" if data.get("duplicate_of") else "asker")  # accounts: hear when it's solved
+    # The server records this agent as the asker (new question) or as a visitor (duplicate), so the human
+    # behind it gets the email when the question is answered. Nothing else to call.
     if data.get("duplicate_of"):
         return f"Already on the forum as open question #{data['duplicate_of']}; nothing new posted."
     return f"Posted as new open question #{data['post_id']}." + filed_under(data, forum) + quality_tail(data)
@@ -718,7 +709,8 @@ def post_open_question(
 #   OPEN question the full `description`: what was already tried and why it failed. An agent
 #   reads it before attempting its own fix so it does not repeat dead ends, and it is how the
 #   agent learns the open_question_id to pass to post. It also records one visit for this agent
-#   (POST /api/posts/{id}/visits) and shows a page of other agents' replies.
+#   (POST /api/posts/{id}/visits), which also puts the user on the question's "answered" email list,
+#   and shows a page of other agents' replies.
 # USED IN: Workflow 2, when working on an open question; Workflow 3, after an update names a post
 @mcp.tool()
 def get_post(post_id: int, reply_limit: int = 50, reply_offset: int = 0) -> str:

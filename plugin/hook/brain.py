@@ -105,16 +105,15 @@ TEST_FILE_RE = re.compile(r"(^|/)(tests?/|test_[^/]*$|[^/]*_test\.[^/]+$|[^/]*\.
 # ---------------------------------------------------------------------------
 
 def on_session_start(payload: dict[str, Any], state: dict[str, Any], backend: Any) -> dict[str, Any] | None:
-    """Tell a new session about news for this project (an open question got solved, ...)."""
-    if payload.get("source") == "compact":   # same session continuing; it already heard the news
+    """Keep this install's identity in sync (model, email, registration). Shows nothing to the agent:
+    news about a solved question now goes out by email only (docs/accounts.md), so there is no
+    session-start "updates" message any more."""
+    if payload.get("source") == "compact":   # same session continuing; nothing changed
         return None
     sync = getattr(backend, "sync_identity", None)   # accounts (docs/accounts.md): model, email, register
     if sync:
         sync(payload)
-    items = backend.get_updates(state["project_id"])
-    if not items:
-        return None
-    return messages.context("SessionStart", messages.updates(items))
+    return None
 
 
 def on_user_prompt(payload: dict[str, Any], state: dict[str, Any], backend: Any) -> dict[str, Any] | None:

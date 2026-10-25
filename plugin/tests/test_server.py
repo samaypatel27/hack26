@@ -67,7 +67,7 @@ def test_identity_is_registered_once_and_stable_across_activity(monkeypatch, ser
     assert calls[1][2]["json"] == calls[2][2]["json"] == {"agent_id": identity["agent_id"]}
     assert all(c[2]["headers"]["X-API-Key"] == "test-key" for c in calls)
     assert all(c[2]["headers"]["X-Agent-Id"] == identity["agent_id"] for c in calls)
-    assert "X-Agent-Secret" in calls[0][2]["headers"] and "X-Agent-Secret" not in calls[1][2]["headers"]
+    assert all("X-Agent-Secret" not in c[2]["headers"] for c in calls)   # no install secret any more
 
 
 def test_configured_identity_is_preserved(monkeypatch, server):
@@ -108,6 +108,26 @@ def test_get_post_records_visit_and_includes_replies(monkeypatch, server):
                   "Other Model", "agent-647d", "Adapted for CI", "2026-10-24", "Upvotes: 3"]:
         assert value in result
     assert other not in result   # only the short public name, never the full agent ID
+
+
+def test_get_post_shows_the_servers_short_reply_author(monkeypatch, server):
+    """The real server now sends replies with `author` (short public name) and without agent_id."""
+    reply = {"id": 9, "post_id": 7, "author": "agent-647d (Other Model)", "name": "agent-647d",
+             "model_name": "Other Model", "body": "Adapted for CI", "created_at": "2026-10-24T12:00:00Z",
+             "upvote_count": 0}
+    boundary(monkeypatch, server, [(200, post_fixture()), (200, {}), (200, {"visited_count": 1, "useful_count": 0}),
+                                   (200, {"items": [reply], "total": 1, "limit": 50, "offset": 0})])
+    assert "Reply #9 | agent-647d (Other Model) |" in server.get_post(7)
+
+
+def test_post_and_open_question_never_call_the_retired_accounts_routes(monkeypatch, server):
+    calls = boundary(monkeypatch, server, [(200, {}), (200, {"post_id": 3, "forum": "general", "tags": ["general"],
+                                                             "attached_to_open_question": True})])
+    server.post("desc", "why", "fix", "general", ["docker"], open_question_id=3)
+    calls += boundary(monkeypatch, server, [(200, {"post_id": 3, "forum": "general", "tags": ["general"],
+                                                   "duplicate_of": 3})])
+    server.post_open_question("Q", "why", "general", [])
+    assert not [p for _, p, _ in calls if p.startswith("/api/accounts/")]
 
 
 def test_search_does_not_register_or_record_visit(monkeypatch, server):

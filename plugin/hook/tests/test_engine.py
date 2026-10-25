@@ -40,9 +40,9 @@ PT = "python -m pytest tests -q"
 
 SOLVED = {"id": 1, "description": "Prisma cannot find the Query Engine in Alpine\nmore text", "value": "v",
           "solution": "Add binaryTargets and run prisma generate in the Dockerfile.", "tags": ["prisma"],
-          "upvotes": 3, "status": "solved", "times_worked": 9, "times_applied": 10, "match": "fingerprint", "score": 1.0}
+          "upvotes": 3, "status": "solved", "useful_count": 9, "match": "fingerprint", "score": 1.0}
 OPEN = {"id": 3, "description": "pytest cannot import app\nTried: PYTHONPATH", "value": "v", "solution": None,
-        "tags": ["python"], "upvotes": 1, "status": "open", "times_worked": 0, "times_applied": 0,
+        "tags": ["python"], "upvotes": 1, "status": "open", "useful_count": 0,
         "match": "fingerprint", "score": 1.0}
 
 
@@ -59,8 +59,8 @@ def text_of(output):
 
 
 class FakeBackend:
-    def __init__(self, search=None, judge=None, updates=None):
-        self.search_result, self.judge_result, self.updates_result = search, judge, updates
+    def __init__(self, search=None, judge=None):
+        self.search_result, self.judge_result = search, judge
         self.calls = []
 
     def search(self, error, command, fingerprint, tags=None):
@@ -71,9 +71,9 @@ class FakeBackend:
         self.calls.append(("outcome", post_id, worked))
         return {"post_status": "solved"}
 
-    def get_updates(self, project_id):
-        self.calls.append(("updates", project_id))
-        return self.updates_result
+    def sync_identity(self, payload):
+        self.calls.append(("sync", payload.get("source")))
+        return {"agent_id": "x"}
 
     def judge(self, session_id, actions, replies):
         self.calls.append(("judge", len(actions), replies))
@@ -404,14 +404,22 @@ class Ladder(TempProject):
             self.send("PostToolUse", tool_name="Read", tool_input={"file_path": f"f{i}.js"}, tool_response={})
         self.assertIsNone(self.fail("npm test", "Exit code 1\nError: boom"))
 
-    def test_session_start_updates(self):
-        self.backend.updates_result = [{"message": "Your open question was solved.", "post_id": 2}]
-        out = self.send("SessionStart", source="startup")
-        self.assertEqual(tag(out), "UPDATES")
-        self.assertIn("post #2", text_of(out))
-        self.assertIn(messages.COMMUNITY_LABEL.rstrip(), text_of(out))
-        self.backend.updates_result = []
+    def test_session_start_only_syncs_identity_and_shows_nothing(self):
+        """No more session-start "updates": news about solved questions goes out by email (docs/accounts.md)."""
         self.assertIsNone(self.send("SessionStart", source="startup"))
+        self.assertEqual(self.backend.calls, [("sync", "startup")])
+        self.assertIsNone(self.send("SessionStart", source="compact"))   # same session continuing: nothing
+        self.assertEqual(self.backend.calls, [("sync", "startup")])
+        self.assertFalse(hasattr(backend, "get_updates"))
+        self.assertFalse(hasattr(messages, "UPDATES"))
+
+    def test_known_fix_shows_the_useful_count(self):
+        """The real tables keep "useful" marks, not times worked/applied."""
+        text = messages.known_fix(SOLVED, DC, "abc", [])
+        self.assertTrue(text.startswith("[AgentOverflow: KNOWN_FIX]"))
+        self.assertIn("(marked useful by 9 agents)", text.splitlines()[0])
+        self.assertIn("marked useful by 1 agent", messages._proof({"useful_count": 1}))
+        self.assertIn("worked 9 of 10 times", messages._proof({"times_worked": 9, "times_applied": 10}))
 
     def test_probe_commands_never_struggle(self):
         for _ in range(5):
@@ -528,7 +536,6 @@ class Backend(TempProject):
         self.server = FakeServer({
             ("GET", "/api/search"): (200, [SOLVED]),
             ("POST", "/api/outcomes"): (200, {"post_status": "solved"}),
-            ("GET", "/api/updates"): (200, [{"message": "solved!", "post_id": 2}]),
             ("POST", "/api/judge"): (200, {"stuck": True, "reason": "r", "confidence": 0.8}),
         })
         self.addCleanup(self.server.close)
@@ -547,12 +554,10 @@ class Backend(TempProject):
         self.assertEqual(req["query"]["fingerprint"], ["abcd1234"])
         self.assertEqual(req["query"]["tags"], ["node,esm"])
 
-    def test_outcome_updates_judge_contract(self):
+    def test_outcome_and_judge_contract(self):
         self.assertEqual(backend.report_outcome(1, True, "fp", "npm test", "s1"), {"post_status": "solved"})
         self.assertEqual(self.server.requests[-1]["body"], {"post_id": 1, "worked": True, "fingerprint": "fp",
                                                             "command": "npm test", "session_id": "s1", "source": "hook"})
-        self.assertEqual(backend.get_updates("p123"), [{"message": "solved!", "post_id": 2}])
-        self.assertEqual(self.server.requests[-1]["query"], {"project": ["p123"]})
         actions = [{"tool": "Bash", "summary": "npm test", "ok": False, "out": "token=abc123"}]
         self.assertEqual(backend.judge("s1", actions, ["reply"])["stuck"], True)
         sent = self.server.requests[-1]["body"]
@@ -578,7 +583,7 @@ class Backend(TempProject):
         self.addCleanup(backend._mark_down, f"http://127.0.0.1:{port}", False)
         self.assertIsNone(backend.search("e", "c", "f"))
         started = time.time()
-        self.assertIsNone(backend.get_updates("p"))
+        self.assertIsNone(backend.report_outcome(1, True, "f", "c", "s"))
         self.assertLess(time.time() - started, 0.5)
 
     def test_config_order(self):

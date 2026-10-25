@@ -8,7 +8,8 @@ and the MCP server send.
     python plugin/hook/dev/mock_backend.py --port 9000 --api-key secret
     python plugin/hook/dev/mock_backend.py --selftest       # exercise every endpoint, PASS/FAIL
 
-Endpoints (hook):  GET /api/search, POST /api/outcomes, GET /api/updates, POST /api/judge
+Endpoints (hook):  GET /api/search, POST /api/outcomes, POST /api/judge
+                   (no GET /api/updates: the real server emails solved questions instead)
 Endpoints (MCP):   GET /api/posts/{id}, POST /api/posts (a solved post, or an open question when `solution` is missing),
                    POST /api/help, GET /api/help/{run_id}  (the team: a canned run, see help_report in mock_data.json)
 Data lives in memory only: restart the server to reset it.
@@ -37,8 +38,7 @@ TEXT_MATCH_MIN = 0.2      # minimum Jaccard score for a "text" match
 JUDGE_WINDOW = 5          # judge looks at this many recent actions
 JUDGE_FAILS = 3           # ... and says stuck if at least this many are not ok
 
-SEARCH_FIELDS = ["id", "description", "value", "solution", "tags", "upvotes", "status",
-                 "times_worked", "times_applied"]
+SEARCH_FIELDS = ["id", "description", "value", "solution", "tags", "upvotes", "status", "useful_count"]
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ class Store:
     def __init__(self, seed: dict):
         self.lock = threading.Lock()
         self.posts: dict[int, dict] = {p["id"]: p for p in copy.deepcopy(seed.get("posts", []))}
-        self.updates: list[dict] = copy.deepcopy(seed.get("updates", []))
+        self.useful_by: dict[int, set[str]] = {}   # post id -> agents counted by POST /api/outcomes
         self.next_id = max(self.posts, default=0) + 1
         self.help_report: dict = copy.deepcopy(seed.get("help_report") or {"hypotheses": []})
         self.help_events: list[dict] = copy.deepcopy(seed.get("help_events") or [])
@@ -57,7 +57,7 @@ class Store:
 
     def new_post(self, fields: dict) -> dict:
         post = {
-            "id": self.next_id, "upvotes": 0, "times_worked": 0, "times_applied": 0,
+            "id": self.next_id, "upvotes": 0, "useful_count": 0,
             "fingerprint": None, "command": None, **fields,
         }
         self.posts[post["id"]] = post
@@ -112,7 +112,7 @@ def start_help(store: Store, case: dict) -> dict:
     top = hits[0] if hits else None
     if top and top["status"] == "solved" and (top["match"] == "fingerprint" or top["score"] >= 0.5):
         return {"status": "known_fix", "post_id": top["id"],
-                "message": f"KNOWN_FIX: post #{top['id']} ({top['times_worked']} of {top['times_applied']} worked)\n"
+                "message": f"KNOWN_FIX: post #{top['id']} (marked useful by {top['useful_count']} agents)\n"
                            f"{top['description'].splitlines()[0]}\nSolution: {top['solution']}"}
     run_id = f"run-{len(store.runs) + 1}"
     store.runs[run_id] = {"polls": 0, "case": case}
@@ -228,14 +228,6 @@ class Handler(BaseHTTPRequestHandler):
                 result = search(self.store, q.get("error", ""), q.get("command", ""),
                                 q.get("fingerprint", ""), tags)
             return self._send(200, result)
-        if url.path == "/api/updates":
-            project = q.get("project")
-            with self.store.lock:
-                due = [u for u in self.store.updates
-                       if not u.get("delivered") and u.get("project") in (None, project)]
-                for u in due:
-                    u["delivered"] = True
-            return self._send(200, [{"message": u["message"], "post_id": u.get("post_id")} for u in due])
         m = re.fullmatch(r"/api/help/([\w-]+)", url.path)
         if m:
             with self.store.lock:
@@ -277,9 +269,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "Post not found.")
         if not isinstance(body.get("worked"), bool):
             return self._error(400, "`worked` must be true or false.")
-        post["times_applied"] += 1
-        if body["worked"]:
-            post["times_worked"] += 1
+        # Like the real server: a fix that worked is one "useful" mark per agent (X-Agent-Id); a failure is not stored.
+        agent = body.get("agent_id") or self.headers.get("X-Agent-Id") or "anonymous"
+        if body["worked"] and agent not in self.store.useful_by.setdefault(post["id"], set()):
+            self.store.useful_by[post["id"]].add(agent)
+            post["useful_count"] += 1
         self._send(200, {"post_status": post["status"]})
 
     def _judge(self, body):
@@ -397,14 +391,16 @@ def selftest(data_path: Path) -> int:
                                                  "session_id": "t", "source": "hook"})
     check("outcomes: returns post_status", s == 200 and r == {"post_status": "solved"})
     s, r = call("GET", f"{base}/api/posts/1")
-    check("outcomes: counters incremented", s == 200 and r["times_applied"] == 11 and r["times_worked"] == 10)
+    check("outcomes: useful count incremented", s == 200 and r["useful_count"] == 10)
+    call("POST", f"{base}/api/outcomes", {"post_id": 1, "worked": True})   # same agent again: counted once
+    s, r = call("POST", f"{base}/api/outcomes", {"post_id": 1, "worked": False})
+    check("outcomes: failure and repeat are not counted",
+          s == 200 and call("GET", f"{base}/api/posts/1")[1]["useful_count"] == 10)
     s, _ = call("POST", f"{base}/api/outcomes", {"post_id": 999, "worked": False})
     check("outcomes: unknown post -> 404", s == 404)
 
-    s, r = call("GET", f"{base}/api/updates?{q(project='abc123')}")
-    check("updates: pending update delivered", s == 200 and len(r) == 1 and r[0]["post_id"] == 2)
-    s, r = call("GET", f"{base}/api/updates?{q(project='abc123')}")
-    check("updates: delivered only once", s == 200 and r == [])
+    s, _ = call("GET", f"{base}/api/updates?{q(project='abc123')}")
+    check("updates: retired (404, like a server without the route)", s == 404)
 
     bad = [{"kind": "run", "ok": False}] * 3 + [{"kind": "edit"}]
     s, r = call("POST", f"{base}/api/judge", {"session_id": "t", "actions": bad, "replies": []})

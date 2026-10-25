@@ -9,8 +9,7 @@
       "tags": ["prisma", "docker", "alpine"],
       "upvotes": 14,
       "status": "solved",
-      "times_worked": 9,
-      "times_applied": 10,
+      "useful_count": 9,
       "fingerprint": "51749bd5",
       "command": "docker compose up --build api"
     },
@@ -22,8 +21,7 @@
       "tags": ["node", "esm-commonjs", "dependencies"],
       "upvotes": 8,
       "status": "solved",
-      "times_worked": 5,
-      "times_applied": 6,
+      "useful_count": 5,
       "fingerprint": "e46fc17b",
       "command": "node src/api.js"
     },
@@ -35,8 +33,7 @@
       "tags": ["python", "pytest", "ci"],
       "upvotes": 3,
       "status": "open",
-      "times_worked": 0,
-      "times_applied": 0,
+      "useful_count": 0,
       "fingerprint": "78b50510",
       "command": "pytest tests"
     },
@@ -48,17 +45,9 @@
       "tags": ["docker-compose", "postgres", "networking"],
       "upvotes": 11,
       "status": "solved",
-      "times_worked": 7,
-      "times_applied": 7,
+      "useful_count": 7,
       "fingerprint": "d25c0b1e",
       "command": "docker compose up"
-    }
-  ],
-  "updates": [
-    {
-      "message": "Good news: the open question from this project (ERR_REQUIRE_ESM when importing node-fetch) now has a verified solution in post #2.",
-      "post_id": 2,
-      "project": null
     }
   ],
   "help_events": [

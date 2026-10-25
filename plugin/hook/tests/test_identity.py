@@ -75,7 +75,7 @@ class Identity(Isolated):
         self.config.write_text(json.dumps({"api_url": "http://x.test", "team_mode": "local"}), encoding="utf-8")
         first = identity.ensure()
         self.assertTrue(identity._is_uuid(first["install_id"]))
-        self.assertGreaterEqual(len(first["install_secret"]), 32)
+        self.assertNotIn("install_secret", first)   # no secret any more (no column for it on the server)
         self.assertEqual(identity.ensure()["install_id"], first["install_id"])     # same ID next time
         saved = self.read()
         self.assertEqual((saved["api_url"], saved["team_mode"]), ("http://x.test", "local"))   # other keys kept
@@ -132,8 +132,8 @@ class Identity(Isolated):
         self.assertRegex(h["X-Agent-Id"], AGENT_ID_RE)
         self.assertEqual(h["X-Agent-Model"], "claude-sonnet-5-5")
         self.assertEqual(h["X-Project-Id"], notebook.project_id(self.project))      # the hook's own project rule
-        self.assertNotIn("X-Agent-Secret", h)                                        # secret only on accounts calls
-        self.assertEqual(identity.secret_header()["X-Agent-Secret"], self.read()["install_secret"])
+        self.assertNotIn("X-Agent-Secret", h)                                        # no install secret any more
+        self.assertFalse(hasattr(identity, "secret_header"))
 
     def test_project_dir_for_the_mcp_server(self):
         del os.environ["CLAUDE_PROJECT_DIR"]
@@ -202,7 +202,6 @@ class HookBackend(Isolated):
     def setUp(self):
         super().setUp()
         self.server = Recorder({
-            ("GET", "/api/updates"): (200, []),
             ("GET", "/api/search"): (200, []),
             ("POST", "/api/agents/register"): (200, {"agent_id": "x", "email_on_file": True}),
         })
@@ -224,7 +223,7 @@ class HookBackend(Isolated):
         backend.sync_identity({"model": "claude-sonnet-5-5"})
         reg = [r for r in self.server.requests if r["path"] == "/api/agents/register"]
         self.assertEqual(len(reg), 1)
-        self.assertEqual(reg[0]["headers"]["x-agent-secret"], self.read()["install_secret"])
+        self.assertNotIn("x-agent-secret", reg[0]["headers"])
         self.assertEqual(reg[0]["body"]["model_name"], "claude-sonnet-5-5")
         self.assertEqual(reg[0]["body"]["email"], "me@osu.edu")
         self.assertRegex(reg[0]["body"]["agent_id"], AGENT_ID_RE)
@@ -241,14 +240,13 @@ class HookBackend(Isolated):
         self.server.routes[("POST", "/api/agents/register")] = (200, {"agent_id": "x"})
         self.assertEqual(backend.sync_identity({"model": "claude-sonnet-5-5"}), {"agent_id": "x"})
 
-    def test_brain_session_start_syncs_then_gets_updates(self):
+    def test_brain_session_start_syncs_and_no_longer_fetches_updates(self):
         payload = {"hook_event_name": "SessionStart", "session_id": "s1", "cwd": str(self.project),
                    "source": "startup", "model": "claude-sonnet-5-5"}
         state = notebook.load(payload)
-        brain.on_session_start(payload, state, backend)
+        self.assertIsNone(brain.on_session_start(payload, state, backend))         # nothing shown to the agent
         paths = [r["path"] for r in self.server.requests]
-        self.assertEqual(paths, ["/api/agents/register", "/api/updates"])
-        self.assertEqual(self.server.requests[-1]["query"], {"project": [state["project_id"]]})
+        self.assertEqual(paths, ["/api/agents/register"])                          # no GET /api/updates
         self.assertEqual(self.read()["model"], "claude-sonnet-5-5")
 
 
@@ -346,19 +344,17 @@ class McpServer(Isolated):
             ("POST", "/api/agents/register"): (200, {"agent_id": "x"}),
             ("POST", "/api/posts"): (200, {"post_id": 7, "forum": "general", "tags": ["general"],
                                            "attached_to_open_question": False, "duplicate_of": None}),
-            ("POST", "/api/accounts/watch"): (200, {"watching": True}),
-            ("POST", "/api/accounts/solved"): (200, {"status": "queued"}),
         }
         self.server = load_server(self.routes, self.calls)
 
     def test_settings_come_from_the_shared_config_file(self):
         self.assertEqual((self.server.API_URL, self.server.API_KEY), ("http://server.test", "file-key"))
 
-    def test_open_question_sends_project_identity_and_watches(self):
+    def test_open_question_sends_project_and_identity_only(self):
         out = self.server.post_open_question("Prisma fails\nTried X", "why", "general", ["docker"])
         self.assertIn("#7", out)
         paths = [c["path"] for c in self.calls]
-        self.assertEqual(paths, ["/api/agents/register", "/api/posts", "/api/accounts/watch"])
+        self.assertEqual(paths, ["/api/agents/register", "/api/posts"])   # no /api/accounts/watch any more
         posted = self.calls[1]
         agent = identity.agent_id()
         self.assertEqual(posted["body"]["agent_id"], agent)
@@ -367,16 +363,15 @@ class McpServer(Isolated):
         self.assertNotIn(identity.ensure()["install_id"], posted["body"]["author"])
         self.assertEqual(posted["headers"]["X-Agent-Id"], agent)
         self.assertNotIn("X-Agent-Secret", posted["headers"])
-        watch = self.calls[2]
-        self.assertEqual(watch["body"], {"post_id": 7, "project": identity.project_id(), "role": "asker"})
-        self.assertIn("X-Agent-Secret", watch["headers"])
+        self.assertNotIn("X-Agent-Secret", self.calls[0]["headers"])        # registration has no secret either
 
-    def test_solution_for_open_question_announces_it(self):
+    def test_solution_for_open_question_makes_no_extra_call(self):
+        """The server emails the asker and visitors itself when it attaches the solution."""
         self.routes[("POST", "/api/posts")] = (200, {"post_id": 3, "forum": "general", "tags": ["general"],
                                                      "attached_to_open_question": True})
-        self.server.post("desc", "why", "fix", "general", ["docker"], open_question_id=3)
-        self.assertEqual(self.calls[-1]["path"], "/api/accounts/solved")
-        self.assertEqual(self.calls[-1]["body"], {"post_id": 3})
+        out = self.server.post("desc", "why", "fix", "general", ["docker"], open_question_id=3)
+        self.assertIn("attached to open question #3", out)
+        self.assertEqual(self.calls[-1]["path"], "/api/posts")
 
     def test_unregistered_agent_still_posts_without_agent_id(self):
         del self.routes[("POST", "/api/agents/register")]                            # neither accounts router...

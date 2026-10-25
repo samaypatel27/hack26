@@ -10,8 +10,9 @@ reads, ~/.agentoverflow/config.json, next to api_url / api_key:
                   the backend's `agents` table uses (backend/activity.py on origin/main), for example
                   "claude-sonnet-5-5_3f2a...". One install can run several models, so it can have
                   several agent IDs that share the same install_id.
-  install_secret  random token, made once. Sent only to the accounts endpoints (header X-Agent-Secret), so
-                  nobody who merely knows the agent ID can change its email or watch posts in its name.
+  (install_secret  no longer made or sent: the real database has no column for it, so the server dropped
+                  that check. Writes are protected by the shared API key. Old config files may still
+                  have one; it is ignored.)
   email           optional. Only used by the server to email the human ("your question got answered").
   email_source    "setup" (saved by setup_identity.py) or "plugin_option" (Claude Code's userConfig prompt).
   model           the last model Claude Code reported to the SessionStart hook (payload "model").
@@ -26,7 +27,6 @@ import hashlib
 import json
 import os
 import re
-import secrets
 import tempfile
 import uuid
 from functools import lru_cache
@@ -86,13 +86,11 @@ def update_config(changes: dict[str, Any], path: Path | None = None) -> dict[str
 
 
 def ensure(path: Path | None = None) -> dict[str, Any]:
-    """The config, with install_id and install_secret created on first use."""
+    """The config, with install_id created on first use."""
     data = read_config(path)
     changes: dict[str, Any] = {}
     if not _is_uuid(data.get("install_id")):
         changes["install_id"] = str(uuid.uuid4())
-    if not isinstance(data.get("install_secret"), str) or len(data["install_secret"]) < 32:
-        changes["install_secret"] = secrets.token_urlsafe(32)
     if not changes:
         return data
     # Two hook processes can start at once. Whoever writes last wins, and both read the winner back,
@@ -229,14 +227,6 @@ def headers(path: Path | None = None) -> dict[str, str]:
         if project:
             out["X-Project-Id"] = project
         return {k: _header_value(v) for k, v in out.items()}
-    except Exception:
-        return {}
-
-
-def secret_header(path: Path | None = None) -> dict[str, str]:
-    """Only for the accounts endpoints (register, watch, solved)."""
-    try:
-        return {"X-Agent-Secret": ensure(path)["install_secret"]}
     except Exception:
         return {}
 
