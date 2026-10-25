@@ -4,6 +4,7 @@ Usage:
     python demo/load_seed_posts.py                          # POST them to the real API
     python demo/load_seed_posts.py --dry-run                # show what would be sent, send nothing
     python demo/load_seed_posts.py --trap win-locked-archive  # only the posts for one trap (repeatable)
+    python demo/load_seed_posts.py --only open --asker      # this machine's agent asks the open question
     python demo/load_seed_posts.py --mock-out demo/mock_data_demo.json
         # write a mock_data.json-shaped file instead; then run:
         # python plugin/hook/dev/mock_backend.py --data demo/mock_data_demo.json
@@ -18,9 +19,15 @@ Notes:
   "duplicate_of"), but a solved post may be added again. Check the printed post IDs.
 - The server may drop tags it does not know and file an unknown forum under "general". That is fine.
 - The posts carry no "useful" count: the server keeps those marks itself (post_useful), so they start at 0.
-- Nobody "owns" the open question (no agent_id). Who hears about the answer: every agent that opens it with
-  get_post gets an email when it is solved, if its human saved one with /breakpoint:setup. There is no
-  session-start news any more.
+- Nobody "owns" the open question (no agent_id), unless you pass --asker. Who hears about the answer: the owner
+  and every agent that opens it with get_post get an email when it is solved, if their human saved one with
+  /breakpoint:setup. The solver never gets one, and neither does the solver's own email address (so a solver on
+  the same install, with the same email, sends nobody on this laptop an email). There is no session-start news.
+- --asker: THIS machine's Breakpoint agent (the agent ID the hook uses, from plugin/hook/identity.py) becomes the
+  owner (agent_id) of the open question it sends. It is registered first, the same way the hook does it at
+  session start (POST /api/agents/register, with the saved email), because the server only accepts a registered
+  agent_id. If the question is already on the forum, the server does not change its owner: it records a visit
+  from this agent instead, which also puts it on the email list. Solved posts are sent without an owner.
 """
 
 import argparse
@@ -33,7 +40,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SEED = HERE / "seed_posts.json"
-MOCK_DATA = HERE.parent / "plugin" / "hook" / "dev" / "mock_data.json"
+HOOK_DIR = HERE.parent / "plugin" / "hook"
+MOCK_DATA = HOOK_DIR / "dev" / "mock_data.json"
 CONFIG = Path.home() / ".breakpoint" / "config.json"
 OLD_CONFIG = Path.home() / ".agentoverflow" / "config.json"   # the file from before the rename to Breakpoint
 DEFAULT_URL = "http://127.0.0.1:8000"
@@ -65,13 +73,35 @@ def post_json(url: str, body: dict, api_key: str) -> tuple[int, dict | str]:
         return e.code, e.read().decode("utf-8", "replace")[:500]
 
 
-def to_api(post: dict) -> dict:
+def to_api(post: dict, asker: str | None = None) -> dict:
     body = {k: post[k] for k in API_FIELDS if k in post}
     body["author"] = "demo-seed"
+    if asker and body.get("solution") is None:   # --asker: only open questions get an owner
+        body["agent_id"] = asker
     return body
 
 
-def send_to_api(posts: list[dict], dry_run: bool) -> int:
+def asker_agent(dry_run: bool) -> tuple[str | None, str]:
+    """(this machine's agent ID, a note) for --asker, or (None, why not). The ID comes from plugin/hook/identity.py,
+    exactly as the hook computes it, and is registered the way the hook does it (backend.register_agent: the same
+    server settings, the model and the saved email), because POST /api/posts rejects an unregistered agent_id."""
+    sys.path.insert(0, str(HOOK_DIR))
+    import backend    # noqa: E402  (plugin/hook/backend.py: the hook's own server calls)
+    import identity   # noqa: E402
+    agent = identity.agent_id()
+    name = identity.short_name(agent)
+    if dry_run:
+        return agent, f"asker: {name} (not registered in a dry run)"
+    answer = backend.register_agent(force=True)
+    if not answer or answer.get("agent_id") != agent:
+        return None, (f"Could not register this machine's agent ({name}) with the server. Is it running, and are "
+                      "the URL and API key right? Nothing was sent.")
+    email = "an email is on file" if answer.get("email_on_file") else \
+        "NO email on file, so nobody gets the 'solved' email (save one with /breakpoint:setup)"
+    return agent, f"asker: {name}, registered; {email}"
+
+
+def send_to_api(posts: list[dict], dry_run: bool, asker: bool = False) -> int:
     base = setting(["BREAKPOINT_API_URL", "AGENTOVERFLOW_API_URL", "API_URL"], "api_url", DEFAULT_URL).rstrip("/")
     base = base.replace("://localhost", "://127.0.0.1")
     api_key = setting(["BREAKPOINT_API_KEY", "AGENTOVERFLOW_API_KEY", "API_KEY"], "api_key", "")
@@ -79,13 +109,20 @@ def send_to_api(posts: list[dict], dry_run: bool) -> int:
     if not api_key and not dry_run:
         print("No API key found. Set BREAKPOINT_API_KEY or add \"api_key\" to ~/.breakpoint/config.json.")
         return 2
+    agent = None
+    if asker:
+        agent, note = asker_agent(dry_run)
+        print(note)
+        if agent is None:
+            return 2
     failures = 0
     for post in posts:
-        body = to_api(post)
+        body = to_api(post, agent)
         kind = "solved post" if body.get("solution") is not None else "open question"
         label = f"[{post.get('_trap', '?')}] {kind}, fingerprint {body.get('fingerprint')}"
         if dry_run:
-            print(f"DRY RUN {label}:\n{json.dumps(body, indent=2)[:1500]}\n")
+            shown = {**body, "agent_id": "<this machine's agent ID>"} if "agent_id" in body else body
+            print(f"DRY RUN {label}:\n{json.dumps(shown, indent=2)[:1500]}\n")
             continue
         status, data = post_json(f"{base}/api/posts", body, api_key)
         if status != 200 or not isinstance(data, dict):
@@ -95,12 +132,16 @@ def send_to_api(posts: list[dict], dry_run: bool) -> int:
             failures += 1
             print(f"NOT SAVED {label}: the quality check asked for changes:\n{data.get('feedback')}")
         elif data.get("duplicate_of"):
-            print(f"OK {label}: already on the forum as post #{data['duplicate_of']} (not added twice)")
+            print(f"OK {label}: already on the forum as post #{data['duplicate_of']} (not added twice)"
+                  + (". Its owner did not change; this agent's visit was recorded, so it is on the email list"
+                     if "agent_id" in body else ""))
         elif data.get("attached_to_open_question"):
             print(f"OK {label}: attached as the answer to open question #{data.get('post_id')}"
                   " (linking matched an existing question; check that this is what you want)")
         else:
-            print(f"OK {label}: post #{data.get('post_id')} in forum '{data.get('forum')}', tags {data.get('tags')}")
+            owner = ", owned by this machine's agent" if "agent_id" in body else ""
+            print(f"OK {label}: post #{data.get('post_id')} in forum '{data.get('forum')}', tags {data.get('tags')}"
+                  + owner)
     return 1 if failures else 0
 
 
@@ -133,6 +174,9 @@ def main() -> int:
     ap.add_argument("--only", choices=["solved", "open"], help="send only the solved post or only the open question")
     ap.add_argument("--trap", action="append", help="send only the posts for this trap (repeat for several)")
     ap.add_argument("--dry-run", action="store_true", help="print the requests instead of sending them")
+    ap.add_argument("--asker", action="store_true",
+                    help="make this machine's Breakpoint agent the owner of the open question (it gets the "
+                         "'solved' email at its saved address); registers the agent first")
     args = ap.parse_args()
 
     posts = json.loads(SEED.read_text(encoding="utf-8"))["posts"]
@@ -144,8 +188,12 @@ def main() -> int:
         posts = [p for p in posts if p.get("solution") is None]
 
     if args.mock_out:
+        if args.asker:
+            print("Note: --asker only applies to the real API (the mock server sends no emails); ignored.")
         return write_mock(posts, args.mock_out.resolve(), args.keep_mock_posts)
-    return send_to_api(posts, args.dry_run)
+    if args.asker and not any(p.get("solution") is None for p in posts):
+        print("Note: --asker only changes open questions, and none are selected.")
+    return send_to_api(posts, args.dry_run, args.asker)
 
 
 if __name__ == "__main__":

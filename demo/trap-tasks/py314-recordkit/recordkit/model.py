@@ -8,11 +8,17 @@
     Point(x=1).to_dict()  -> {"x": 1, "y": 0}
 """
 
+from __future__ import annotations
+
 import copy
 import functools
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from .money import quantize
+
+if TYPE_CHECKING:
+    from .store import Store
 
 MISSING = object()
 
@@ -43,6 +49,8 @@ class ModelMeta(type):
 
 
 class Model(metaclass=ModelMeta):
+    _store: Store | None = None   # the Store this record was last saved to (set by Store.save)
+
     # Decimal values are stored as given and rounded to cents when exported.
     _cents = functools.partial(quantize, exp=Decimal("0.01"))
 
