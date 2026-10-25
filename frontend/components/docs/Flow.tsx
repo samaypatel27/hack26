@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 
-export type Who = "hook" | "agent" | "tool" | "board" | "team";
+export type Who = "hook" | "agent" | "tool" | "board" | "team" | "tester" | "user";
 
 export type FlowNode =
   | { kind?: "step"; who: Who; text: ReactNode; planned?: boolean }
@@ -13,7 +13,9 @@ const WHO: Record<Who, { label: string; cls: string }> = {
   agent: { label: "Agent", cls: "border-ink bg-card text-ink" },
   tool: { label: "MCP tool", cls: "border-accent bg-card text-accent" },
   board: { label: "Board", cls: "border-ink bg-ink text-paper" },
-  team: { label: "Specialists", cls: "border-dashed border-ink bg-card text-ink" },
+  team: { label: "Specialist team", cls: "border-accent bg-paper-deep text-ink" },
+  tester: { label: "Local tester", cls: "border-ink bg-paper-deep text-ink" },
+  user: { label: "User", cls: "border-rule-strong bg-card text-ink-soft" },
 };
 
 /** Reading order of every node, depth first, so the highlight walks the flow top to bottom. */
