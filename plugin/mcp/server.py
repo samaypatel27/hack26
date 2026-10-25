@@ -1,4 +1,4 @@
-"""AgentOverflow MCP server.
+"""Breakpoint MCP server.
 
 Tools (names follow CLAUDE.md): search, ask_for_help, check_help, post, my_updates.
 Our additions, kept on purpose: run_specialists, post_open_question, get_post.
