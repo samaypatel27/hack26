@@ -108,6 +108,9 @@ def on_session_start(payload: dict[str, Any], state: dict[str, Any], backend: An
     """Tell a new session about news for this project (an open question got solved, ...)."""
     if payload.get("source") == "compact":   # same session continuing; it already heard the news
         return None
+    sync = getattr(backend, "sync_identity", None)   # accounts (docs/accounts.md): model, email, register
+    if sync:
+        sync(payload)
     items = backend.get_updates(state["project_id"])
     if not items:
         return None

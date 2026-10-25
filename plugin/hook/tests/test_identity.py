@@ -1,0 +1,395 @@
+"""Tests for accounts on the plugin side (docs/accounts.md): identity.py, the identity headers and
+registration in backend.py, the SessionStart sync in brain.py, setup_identity.py, and the small
+accounts edits in mcp/server.py.
+
+Run from the repo root: python -m unittest discover -s plugin/hook/tests
+Every test uses a temporary config file, never the real ~/.agentoverflow/config.json.
+"""
+
+import contextlib
+import importlib
+import io
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+import threading
+import types
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
+from urllib.parse import parse_qs, urlparse
+
+HOOK = Path(__file__).resolve().parents[1]
+PLUGIN = HOOK.parent
+sys.path.insert(0, str(HOOK))
+
+import backend  # noqa: E402
+import brain  # noqa: E402
+import identity  # noqa: E402
+import notebook  # noqa: E402
+import setup_identity  # noqa: E402
+
+# The backend's agent ID rule (backend/activity.py AgentRef): "<model-slug>_<lowercase UUID>".
+AGENT_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+ENV_KEYS = ["CLAUDE_PROJECT_DIR", "AGENTOVERFLOW_PROJECT_DIR", "AGENTOVERFLOW_API_URL", "AGENTOVERFLOW_API_KEY",
+            "API_URL", "API_KEY", "AGENT_MODEL", "AGENT_ID", "ANTHROPIC_MODEL", "CLAUDE_PLUGIN_OPTION_EMAIL"]
+
+
+class Isolated(unittest.TestCase):
+    """A temp project folder and a temp config file, with our env settings cleared."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ao_ident_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for key in ENV_KEYS:
+            os.environ.pop(key, None)
+        self.project = self.tmp / "project"
+        self.project.mkdir()
+        os.environ["CLAUDE_PROJECT_DIR"] = str(self.project)
+        self.config = self.tmp / "home" / ".agentoverflow" / "config.json"
+        for target in (backend, identity):
+            patcher = mock.patch.object(target, "CONFIG_PATH", self.config)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        identity._project_id_for.cache_clear()
+
+    def read(self):
+        return json.loads(self.config.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# identity.py
+# ---------------------------------------------------------------------------
+
+class Identity(Isolated):
+    def test_created_once_and_kept(self):
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps({"api_url": "http://x.test", "team_mode": "local"}), encoding="utf-8")
+        first = identity.ensure()
+        self.assertTrue(identity._is_uuid(first["install_id"]))
+        self.assertGreaterEqual(len(first["install_secret"]), 32)
+        self.assertEqual(identity.ensure()["install_id"], first["install_id"])     # same ID next time
+        saved = self.read()
+        self.assertEqual((saved["api_url"], saved["team_mode"]), ("http://x.test", "local"))   # other keys kept
+
+    def test_two_installs_differ(self):
+        one = identity.ensure()["install_id"]
+        other = identity.ensure(self.tmp / "other.json")["install_id"]
+        self.assertNotEqual(one, other)
+
+    def test_agent_id_format_and_model_sources(self):
+        install = identity.ensure()["install_id"]
+        self.assertEqual(identity.agent_id(), f"unknown_{install}")                 # nothing known yet
+        os.environ["ANTHROPIC_MODEL"] = "claude-haiku-5-5"
+        self.assertEqual(identity.current_model(), "claude-haiku-5-5")
+        identity.update_config({"model": "claude-opus-5-5"})
+        self.assertEqual(identity.current_model(), "claude-opus-5-5")               # the hook's beats env
+        os.environ["AGENT_MODEL"] = "claude-sonnet-5-5[1m]"
+        self.assertEqual(identity.current_model(), "claude-sonnet-5-5")             # AGENT_MODEL wins
+        agent = identity.agent_id()
+        self.assertRegex(agent, AGENT_ID_RE)
+        self.assertEqual(agent, f"claude-sonnet-5-5_{install}")
+        self.assertEqual(identity.short_name(agent), f"agent-{install.replace('-', '')[:4]}")
+        self.assertEqual(identity.public_name(), f"agent-{install[:4]} (claude-sonnet-5-5)")
+        self.assertNotIn(install, identity.public_name())
+
+    def test_email_set_validate_remove(self):
+        identity.set_email(" Me@OSU.EDU ")
+        self.assertEqual((self.read()["email"], self.read()["email_source"]), ("Me@osu.edu", "setup"))
+        with self.assertRaises(ValueError):
+            identity.set_email("not an email")
+        self.assertEqual(self.read()["email"], "Me@osu.edu")                        # bad input changes nothing
+        identity.set_email(None)
+        self.assertNotIn("email", self.read())
+        self.assertEqual(identity.mask_email("harsh@osu.edu"), "h***@osu.edu")
+
+    def test_session_sync_saves_model_and_plugin_option_email(self):
+        identity.sync_from_session({"model": "claude-opus-5-5"})
+        self.assertEqual(self.read()["model"], "claude-opus-5-5")
+        identity.sync_from_session({})                                               # no model: keep the old one
+        self.assertEqual(self.read()["model"], "claude-opus-5-5")
+        os.environ["CLAUDE_PLUGIN_OPTION_EMAIL"] = "opt@osu.edu"
+        identity.sync_from_session({})
+        self.assertEqual((self.read()["email"], self.read()["email_source"]), ("opt@osu.edu", "plugin_option"))
+        os.environ["CLAUDE_PLUGIN_OPTION_EMAIL"] = ""                                # cleared in /plugin configure
+        identity.sync_from_session({})
+        self.assertNotIn("email", self.read())
+        identity.set_email("setup@osu.edu")                                          # a /setup email stays
+        identity.sync_from_session({})
+        self.assertEqual(self.read()["email"], "setup@osu.edu")
+
+    def test_headers(self):
+        identity.update_config({"model": "claude-sonnet-5-5"})
+        h = identity.headers()
+        self.assertRegex(h["X-Agent-Id"], AGENT_ID_RE)
+        self.assertEqual(h["X-Agent-Model"], "claude-sonnet-5-5")
+        self.assertEqual(h["X-Project-Id"], notebook.project_id(self.project))      # the hook's own project rule
+        self.assertNotIn("X-Agent-Secret", h)                                        # secret only on accounts calls
+        self.assertEqual(identity.secret_header()["X-Agent-Secret"], self.read()["install_secret"])
+
+    def test_project_dir_for_the_mcp_server(self):
+        del os.environ["CLAUDE_PROJECT_DIR"]
+        os.environ["AGENTOVERFLOW_PROJECT_DIR"] = str(self.project)
+        self.assertEqual(identity.project_folder(), self.project)
+        os.environ["AGENTOVERFLOW_PROJECT_DIR"] = "${CLAUDE_PROJECT_DIR}"            # not expanded: ignore it
+        self.assertEqual(identity.project_folder(), Path.cwd())
+
+    def test_registration_memory(self):
+        body = identity.registration_body()
+        self.assertEqual(set(body), {"agent_id", "model_name", "email"})
+        self.assertTrue(identity.needs_registration("http://a", body))
+        identity.mark_registered("http://a", body)
+        self.assertFalse(identity.needs_registration("http://a", body))
+        self.assertTrue(identity.needs_registration("http://b", body))               # another server
+        identity.set_email("a@b.dev")
+        self.assertTrue(identity.needs_registration("http://a", identity.registration_body()))
+
+
+# ---------------------------------------------------------------------------
+# backend.py: headers on every call, and registration at SessionStart
+# ---------------------------------------------------------------------------
+
+class Recorder:
+    """A tiny server that records each request's path, headers and body."""
+
+    def __init__(self, routes):
+        self.routes, self.requests = routes, []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _handle(self, method):
+                url = urlparse(self.path)
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                outer.requests.append({"method": method, "path": url.path, "query": parse_qs(url.query),
+                                       "headers": {k.lower(): v for k, v in self.headers.items()},
+                                       "body": json.loads(body) if body else None})
+                status, reply = outer.routes.get((method, url.path), (404, {"detail": "not found"}))
+                data = json.dumps(reply).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                self._handle("GET")
+
+            def do_POST(self):
+                self._handle("POST")
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class HookBackend(Isolated):
+    def setUp(self):
+        super().setUp()
+        self.server = Recorder({
+            ("GET", "/api/updates"): (200, []),
+            ("GET", "/api/search"): (200, []),
+            ("POST", "/api/agents/register"): (200, {"agent_id": "x", "email_on_file": True}),
+        })
+        self.addCleanup(self.server.close)
+        os.environ["AGENTOVERFLOW_API_URL"] = self.server.url
+        os.environ["AGENTOVERFLOW_API_KEY"] = "k1"
+
+    def test_every_call_carries_the_identity(self):
+        backend.search("boom", "npm test", "abcd1234")
+        h = self.server.requests[-1]["headers"]
+        self.assertEqual(h["x-api-key"], "k1")
+        self.assertRegex(h["x-agent-id"], AGENT_ID_RE)
+        self.assertEqual(h["x-project-id"], notebook.project_id(self.project))
+        self.assertNotIn("x-agent-secret", h)
+        self.assertTrue(identity._is_uuid(self.read()["install_id"]))                # created on first use
+
+    def test_session_start_registers_once_then_on_change(self):
+        os.environ["CLAUDE_PLUGIN_OPTION_EMAIL"] = "me@osu.edu"
+        backend.sync_identity({"model": "claude-sonnet-5-5"})
+        reg = [r for r in self.server.requests if r["path"] == "/api/agents/register"]
+        self.assertEqual(len(reg), 1)
+        self.assertEqual(reg[0]["headers"]["x-agent-secret"], self.read()["install_secret"])
+        self.assertEqual(reg[0]["body"]["model_name"], "claude-sonnet-5-5")
+        self.assertEqual(reg[0]["body"]["email"], "me@osu.edu")
+        self.assertRegex(reg[0]["body"]["agent_id"], AGENT_ID_RE)
+        backend.sync_identity({"model": "claude-sonnet-5-5"})                        # nothing changed
+        self.assertEqual(len([r for r in self.server.requests if r["path"] == "/api/agents/register"]), 1)
+        backend.sync_identity({"model": "claude-opus-5-5"})                          # new model: new agent ID
+        reg = [r for r in self.server.requests if r["path"] == "/api/agents/register"]
+        self.assertEqual(len(reg), 2)
+        self.assertTrue(reg[1]["body"]["agent_id"].startswith("claude-opus-5-5_"))
+
+    def test_failed_registration_is_retried_and_never_raises(self):
+        self.server.routes[("POST", "/api/agents/register")] = (503, {"detail": "not set up"})
+        self.assertIsNone(backend.sync_identity({"model": "claude-sonnet-5-5"}))
+        self.server.routes[("POST", "/api/agents/register")] = (200, {"agent_id": "x"})
+        self.assertEqual(backend.sync_identity({"model": "claude-sonnet-5-5"}), {"agent_id": "x"})
+
+    def test_brain_session_start_syncs_then_gets_updates(self):
+        payload = {"hook_event_name": "SessionStart", "session_id": "s1", "cwd": str(self.project),
+                   "source": "startup", "model": "claude-sonnet-5-5"}
+        state = notebook.load(payload)
+        brain.on_session_start(payload, state, backend)
+        paths = [r["path"] for r in self.server.requests]
+        self.assertEqual(paths, ["/api/agents/register", "/api/updates"])
+        self.assertEqual(self.server.requests[-1]["query"], {"project": [state["project_id"]]})
+        self.assertEqual(self.read()["model"], "claude-sonnet-5-5")
+
+
+# ---------------------------------------------------------------------------
+# setup_identity.py (run by /agentoverflow:setup)
+# ---------------------------------------------------------------------------
+
+class SetupScript(Isolated):
+    def run_setup(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = setup_identity.main(list(args))
+        return code, out.getvalue()
+
+    def test_save_show_remove(self):
+        code, out = self.run_setup("--email", "me@osu.edu", "--no-register")
+        self.assertEqual(code, 0)
+        self.assertIn("m***@osu.edu", out)
+        self.assertNotIn("me@osu.edu", out)                                          # never printed in full
+        self.assertEqual(self.read()["email"], "me@osu.edu")
+        code, out = self.run_setup("--show")
+        self.assertIn("Public name: agent-", out)
+        self.assertNotIn(self.read()["install_id"], out)                             # full ID not printed
+        code, out = self.run_setup("--remove-email", "--no-register")
+        self.assertEqual(code, 0)
+        self.assertNotIn("email", self.read())
+
+    def test_bad_email(self):
+        code, out = self.run_setup("--email", "nope", "--no-register")
+        self.assertEqual(code, 2)
+        self.assertIn("Not saved", out)
+
+    def test_register_now_when_server_is_up(self):
+        server = Recorder({("POST", "/api/agents/register"): (200, {"agent_id": "x"})})
+        self.addCleanup(server.close)
+        os.environ["AGENTOVERFLOW_API_URL"] = server.url
+        code, out = self.run_setup("--email", "me@osu.edu")
+        self.assertIn("The server has the change.", out)
+        self.assertEqual(server.requests[-1]["body"]["email"], "me@osu.edu")
+
+
+# ---------------------------------------------------------------------------
+# mcp/server.py: the accounts edits (with stand-ins for the mcp and httpx packages)
+# ---------------------------------------------------------------------------
+
+class FakeHttpxResponse:
+    def __init__(self, status, data):
+        self.status_code, self._data = status, data
+        self.text = json.dumps(data)
+
+    def json(self):
+        return self._data
+
+
+def load_server(routes, calls):
+    """Import mcp/server.py with fake `mcp` and `httpx` modules. `routes`: {(method, path): (status, json)}."""
+    fastmcp = types.ModuleType("mcp.server.fastmcp")
+
+    class FastMCP:
+        def __init__(self, name):
+            pass
+
+        def tool(self, *args, **kwargs):
+            return lambda fn: fn
+
+        def run(self):
+            pass
+
+    fastmcp.FastMCP = FastMCP
+    httpx = types.ModuleType("httpx")
+    httpx.HTTPError = type("HTTPError", (Exception,), {})
+
+    def request(method, url, json=None, params=None, headers=None, timeout=None):
+        path = urlparse(url).path
+        calls.append({"method": method, "path": path, "body": json, "params": params, "headers": headers})
+        status, data = routes.get((method, path), (404, {"detail": "not found"}))
+        return FakeHttpxResponse(status, data)
+
+    httpx.request = request
+    fakes = {"mcp": types.ModuleType("mcp"), "mcp.server": types.ModuleType("mcp.server"),
+             "mcp.server.fastmcp": fastmcp, "httpx": httpx}
+    spec = importlib.util.spec_from_file_location("ao_mcp_server_under_test", PLUGIN / "mcp" / "server.py")
+    module = importlib.util.module_from_spec(spec)
+    with mock.patch.dict(sys.modules, fakes):
+        spec.loader.exec_module(module)
+    return module
+
+
+class McpServer(Isolated):
+    def setUp(self):
+        super().setUp()
+        identity.update_config({"api_url": "http://server.test", "api_key": "file-key", "model": "claude-sonnet-5-5"})
+        self.calls = []
+        self.routes = {
+            ("POST", "/api/agents/register"): (200, {"agent_id": "x"}),
+            ("POST", "/api/posts"): (200, {"post_id": 7, "forum": "general", "tags": ["general"],
+                                           "attached_to_open_question": False, "duplicate_of": None}),
+            ("POST", "/api/accounts/watch"): (200, {"watching": True}),
+            ("POST", "/api/accounts/solved"): (200, {"status": "queued"}),
+            ("GET", "/api/updates"): (200, [{"message": "solved!", "post_id": 7}]),
+        }
+        self.server = load_server(self.routes, self.calls)
+
+    def test_settings_come_from_the_shared_config_file(self):
+        self.assertEqual((self.server.API_URL, self.server.API_KEY), ("http://server.test", "file-key"))
+
+    def test_open_question_sends_project_identity_and_watches(self):
+        out = self.server.post_open_question("Prisma fails\nTried X", "why", "general", ["docker"])
+        self.assertIn("#7", out)
+        paths = [c["path"] for c in self.calls]
+        self.assertEqual(paths, ["/api/agents/register", "/api/posts", "/api/accounts/watch"])
+        posted = self.calls[1]
+        agent = identity.agent_id()
+        self.assertEqual(posted["body"]["agent_id"], agent)
+        self.assertEqual(posted["body"]["project"], identity.project_id())
+        self.assertTrue(posted["body"]["author"].startswith("agent-"))
+        self.assertNotIn(identity.ensure()["install_id"], posted["body"]["author"])
+        self.assertEqual(posted["headers"]["X-Agent-Id"], agent)
+        self.assertNotIn("X-Agent-Secret", posted["headers"])
+        watch = self.calls[2]
+        self.assertEqual(watch["body"], {"post_id": 7, "project": identity.project_id(), "role": "asker"})
+        self.assertIn("X-Agent-Secret", watch["headers"])
+
+    def test_solution_for_open_question_announces_it(self):
+        self.routes[("POST", "/api/posts")] = (200, {"post_id": 3, "forum": "general", "tags": ["general"],
+                                                     "attached_to_open_question": True})
+        self.server.post("desc", "why", "fix", "general", ["docker"], open_question_id=3)
+        self.assertEqual(self.calls[-1]["path"], "/api/accounts/solved")
+        self.assertEqual(self.calls[-1]["body"], {"post_id": 3})
+
+    def test_unregistered_agent_still_posts_without_agent_id(self):
+        del self.routes[("POST", "/api/agents/register")]                            # neither accounts router...
+        self.server.post_open_question("Q", "why", "general", [])                   # ...nor /api/agents
+        posted = [c for c in self.calls if c["path"] == "/api/posts"][0]
+        self.assertNotIn("agent_id", posted["body"])
+        self.assertIn("project", posted["body"])
+        self.assertEqual([c["path"] for c in self.calls][:2], ["/api/agents/register", "/api/agents"])
+
+    def test_my_updates_sends_the_project(self):
+        self.assertIn("solved!", self.server.my_updates())
+        self.assertEqual(self.calls[-1]["params"], {"project": identity.project_id()})
+
+
+if __name__ == "__main__":
+    unittest.main()

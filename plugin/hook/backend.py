@@ -14,6 +14,9 @@ Contract (docs/hook-contracts.md; plugin/hook/dev/mock_backend.py implements it)
   POST /api/outcomes {post_id, worked, fingerprint, command, session_id, source: "hook"} -> {"post_status"}
   GET  /api/updates?project=<project_id>                  -> [{"message", "post_id"}]
   POST /api/judge    {session_id, actions, replies}       -> {"stuck", "reason", "confidence"}
+  POST /api/agents/register {agent_id, model_name, email} -> {"agent_id", ...}  (accounts, docs/accounts.md)
+
+Every call also carries the install's identity (identity.py): X-Agent-Id, X-Agent-Model, X-Project-Id.
 
 Speed: on Windows a connection to a closed local port waits for the full timeout, so after one
 connection failure we remember "server down" in a temp file for DOWN_SECONDS and skip calls until then.
@@ -31,12 +34,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import identity   # accounts (docs/accounts.md): the install's agent ID, model and project
+
 DEFAULT_URL = "http://localhost:8000"
 CONFIG_PATH = Path.home() / ".agentoverflow" / "config.json"
 SEARCH_TIMEOUT = 2.0
 OUTCOME_TIMEOUT = 2.0
 UPDATES_TIMEOUT = 2.0
 JUDGE_TIMEOUT = 5.0
+REGISTER_TIMEOUT = 2.0
 MAX_ERROR_CHARS = 2000
 DOWN_SECONDS = 60
 
@@ -127,14 +133,15 @@ def _mark_down(url: str, down: bool) -> None:
 # ---------------------------------------------------------------------------
 
 def _request(method: str, path: str, timeout: float, params: dict[str, Any] | None = None,
-             body: dict[str, Any] | None = None) -> Any:
+             body: dict[str, Any] | None = None, extra_headers: dict[str, str] | None = None) -> Any:
     """JSON from the server, or None on any problem."""
     base = api_url()
     if _recently_down(base):
         return None
     url = base + path + ("?" + urllib.parse.urlencode(params) if params else "")
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    headers = {"X-API-Key": api_key(), "Accept": "application/json"}
+    headers = {"X-API-Key": api_key(), "Accept": "application/json",
+               **identity.headers(CONFIG_PATH), **(extra_headers or {})}   # accounts: who is asking
     if data is not None:
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
@@ -201,3 +208,34 @@ def judge(session_id: str, actions: list[dict[str, Any]], replies: list[str]) ->
     if not isinstance(data, dict) or "stuck" not in data:
         return None
     return data
+
+
+# ---------------------------------------------------------------------------
+# Accounts (docs/accounts.md): register this install once, and again when the model or email changes
+# ---------------------------------------------------------------------------
+
+def sync_identity(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """SessionStart: save the model Claude Code reported and the userConfig email, then register with the
+    server if anything changed since the last time. Returns the server's answer, or None. Never raises."""
+    try:
+        identity.sync_from_session(payload, CONFIG_PATH)
+        return register_agent()
+    except Exception:
+        return None
+
+
+def register_agent(force: bool = False) -> dict[str, Any] | None:
+    """POST /api/agents/register with this install's agent ID, model and email (or null to remove it)."""
+    try:
+        body = identity.registration_body(CONFIG_PATH)
+        url = api_url()
+        if not force and not identity.needs_registration(url, body, CONFIG_PATH):
+            return {"agent_id": body["agent_id"], "unchanged": True}
+        data = _request("POST", "/api/agents/register", REGISTER_TIMEOUT, body=body,
+                        extra_headers=identity.secret_header(CONFIG_PATH))
+        if isinstance(data, dict) and data.get("agent_id"):
+            identity.mark_registered(url, body, CONFIG_PATH)
+            return data
+        return None
+    except Exception:
+        return None
