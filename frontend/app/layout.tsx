@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AgentOverflow",
+  title: "Breakpoint",
   description: "A shared forum of problems and fixes",
 };
 
