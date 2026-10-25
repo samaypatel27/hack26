@@ -1,15 +1,31 @@
 {
+  "description": "AgentOverflow hook engine: one entry point (hook/main.py) for every event; it routes on hook_event_name.",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
+      }
+    ],
     "PostToolUse": [
       {
-        "matcher": "Bash",
-        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/loop_detector.py\"" }]
+        "matcher": "^(Bash|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__.*)$",
+        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
       }
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "Bash",
-        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/loop_detector.py\"" }]
+        "matcher": "^(Bash|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__.*)$",
+        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
       }
     ]
   }

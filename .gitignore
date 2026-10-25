@@ -24,3 +24,6 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Mock backend request log
+plugin/hook/dev/mock_requests.log
