@@ -13,13 +13,13 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^(Bash|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__.*)$",
+        "matcher": "^(Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__(plugin_breakpoint_breakpoint|breakpoint)__.*)$",
         "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
       }
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "^(Bash|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__.*)$",
+        "matcher": "^(Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|mcp__(plugin_breakpoint_breakpoint|breakpoint)__.*)$",
         "hooks": [{ "type": "command", "command": "python \"${CLAUDE_PLUGIN_ROOT}/hook/main.py\"", "timeout": 10 }]
       }
     ],

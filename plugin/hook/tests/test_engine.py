@@ -6,6 +6,7 @@ The brain tests use a fake backend object; the backend and end-to-end tests use 
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -592,6 +593,144 @@ class ViewedPosts(TempProject):
         (folder / f"{self.sid}.json").write_text(json.dumps({"history": [], "project_id": "p"}))
         state = self.state()
         self.assertEqual((state["viewed_posts"], state["reply_nudged"]), ([], []))
+
+
+# ---------------------------------------------------------------------------
+# The PowerShell tool, and runs whose result is unknown (background, interrupted)
+# ---------------------------------------------------------------------------
+
+class ShellTools(TempProject):
+    def ps_fail(self, cmd, err):
+        return self.send("PostToolUseFailure", tool_name="PowerShell", tool_input={"command": cmd}, error=err)
+
+    def ps_ok(self, cmd, out="ok", **response):
+        return self.send("PostToolUse", tool_name="PowerShell", tool_input={"command": cmd},
+                         tool_response={"stdout": out, "stderr": "", "interrupted": False, **response})
+
+    def test_powershell_is_a_run_like_bash(self):
+        run, output = notebook.action_from_tool_use({"hook_event_name": "PostToolUseFailure", "tool_name": "PowerShell",
+                                                     "tool_input": {"command": "npm run build"}, "error": PRISMA})
+        self.assertEqual((run["kind"], run["ok"], run["key"], run["err_fp"]),
+                         ("run", False, "npm run build", struggles.fingerprint(PRISMA)))
+        self.assertEqual(output, PRISMA)
+        for response, ok in [({"stdout": "done"}, True), ({"stdout": "x", "exitCode": 1}, False),
+                             ({"stdout": "x", "exit_code": "2"}, False), ({"stdout": "x", "returnCode": "0"}, True),
+                             ({"stdout": "x", "exitCode": None}, True),
+                             ({"stdout": "FAILED tests/test_a.py::test_x\n1 failed in 0.1s"}, True)]:
+            payload = {"hook_event_name": "PostToolUse", "tool_name": "PowerShell",
+                       "tool_input": {"command": "pytest -q"}, "tool_response": response}
+            self.assertEqual(notebook.action_from_tool_use(payload)[0]["ok"], ok, response)
+        piped = {"hook_event_name": "PostToolUse", "tool_name": "PowerShell",
+                 "tool_input": {"command": "pytest -q | Select-Object -Last 5"},
+                 "tool_response": {"stdout": "FAILED tests/test_a.py::test_x\n1 failed in 0.1s"}}
+        self.assertFalse(notebook.action_from_tool_use(piped)[0]["ok"])   # the same piped-output check as Bash
+
+    def test_powershell_known_fix_round_trip(self):
+        self.backend.search_result = [SOLVED]
+        self.assertIsNone(self.ps_fail(DC, PRISMA))
+        self.assertIsNone(self.ps_fail(DC, PRISMA))
+        self.assertEqual(tag(self.ps_fail(DC, PRISMA)), "KNOWN_FIX")
+        self.edit("Dockerfile")
+        self.assertEqual(tag(self.ps_ok(DC, "listening")), "LEAVE_REPLY")
+        self.assertIn(("outcome", 1, True), self.backend.calls)
+
+    def test_hooks_json_sends_powershell_and_only_our_mcp_tools(self):
+        config = json.loads((HOOK.parent / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            matcher = re.compile(config["hooks"][event][0]["matcher"])
+            for name in ("Bash", "PowerShell", "Edit", "Read", "mcp__plugin_breakpoint_breakpoint__post",
+                         "mcp__breakpoint__ask_for_help"):
+                self.assertTrue(matcher.search(name), (event, name))
+            for name in ("TodoWrite", "BashOutput", "mcp__github__post", "mcp__plugin_other_other__search"):
+                self.assertFalse(matcher.search(name), (event, name))
+
+    def test_background_and_interrupted_runs_are_unknown(self):
+        unknown = [
+            {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+             "tool_input": {"command": DC, "run_in_background": True}, "tool_response": {"stdout": ""}},
+            {"hook_event_name": "PostToolUse", "tool_name": "PowerShell",
+             "tool_input": {"command": DC}, "tool_response": {"stdout": "", "backgroundTaskId": "b1"}},
+            {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+             "tool_input": {"command": DC}, "tool_response": {"stdout": "starting", "interrupted": True}},
+            {"hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
+             "tool_input": {"command": DC}, "error": "Interrupted by user", "is_interrupt": True},
+            {"hook_event_name": "PostToolUseFailure", "tool_name": "PowerShell",
+             "tool_input": {"command": DC, "run_in_background": True}, "error": "Exit code 1"},
+        ]
+        for payload in unknown:
+            self.assertEqual(notebook.action_from_tool_use(payload), (None, ""), payload)
+
+    def test_background_run_does_not_confirm_a_known_fix(self):
+        self.backend.search_result = [SOLVED]
+        for _ in range(3):
+            self.fail(DC, PRISMA)
+        self.edit("Dockerfile")
+        self.assertIsNone(self.send("PostToolUse", tool_name="Bash",
+                                    tool_input={"command": DC, "run_in_background": True},
+                                    tool_response={"stdout": "", "stderr": "", "backgroundTaskId": "b1"}))
+        self.assertIsNone(self.send("PostToolUseFailure", tool_name="Bash", tool_input={"command": DC},
+                                    error="Interrupted by user", is_interrupt=True))
+        self.assertFalse(any(c[0] == "outcome" for c in self.backend.calls))   # neither a pass nor a fail
+        self.assertEqual(self.state()["episode"]["pending_fix"]["post_id"], 1)   # still waiting for a real run
+        self.assertEqual(tag(self.ok(DC)), "LEAVE_REPLY")
+        self.assertEqual([c for c in self.backend.calls if c[0] == "outcome"], [("outcome", 1, True)])
+
+
+# ---------------------------------------------------------------------------
+# Our MCP tools: exact names, and post / post_open_question only count when saved
+# ---------------------------------------------------------------------------
+
+class PostResults(TempProject):
+    def stuck(self):
+        for _ in range(3):
+            self.fail(DC, PRISMA)
+        return self.state()["episode"]
+
+    def test_open_question_counts_only_when_saved(self):
+        self.stuck()
+        for reply in ("REVISE: The post was not saved yet (try 1 of at most 3). Fix: ...",
+                      "Could not reach the forum: connection refused", "Rejected: unsafe content"):
+            self.mcp("post_open_question", reply)
+            self.assertFalse(self.state()["episode"]["oq_posted"], reply)
+        self.mcp("post_open_question", "Posted as new open question #9. Filed under docker.")
+        self.assertEqual((self.state()["episode"]["oq_posted"], self.state()["episode"]["open_question_id"]), (True, 9))
+
+    def test_duplicate_open_question_counts_as_posted(self):
+        self.stuck()
+        self.mcp("post_open_question", "Already on the forum as open question #5; nothing new posted.")
+        self.assertEqual((self.state()["episode"]["oq_posted"], self.state()["episode"]["open_question_id"]), (True, 5))
+
+    def test_post_closes_the_episode_only_when_saved(self):
+        self.stuck()
+        for reply in ("REVISE: The post was not saved yet (try 1 of at most 3).", "Forum error 500: boom"):
+            self.mcp("post", reply)
+            self.assertIsNotNone(self.state()["episode"], reply)
+        self.mcp("post", "Solution attached to open question #3.")
+        self.assertIsNone(self.state()["episode"])
+        self.stuck()
+        self.mcp("post", "Posted as new solved post #12. Filed under docker.")
+        self.assertIsNone(self.state()["episode"])
+
+    def test_other_servers_tools_are_ignored(self):
+        self.stuck()
+        for name in ("mcp__github__post", "mcp__plugin_other_other__post_open_question"):
+            self.send("PostToolUse", tool_name=name, tool_input={},
+                      tool_response=[{"type": "text", "text": "Posted as new open question #9."}])
+        self.assertFalse(self.state()["episode"]["oq_posted"])
+        self.send("PostToolUse", tool_name="mcp__breakpoint__post", tool_input={},   # the server added by hand
+                  tool_response=[{"type": "text", "text": "Posted as new solved post #12."}])
+        self.assertIsNone(self.state()["episode"])
+
+    def test_notable_solve_names_the_open_question(self):
+        self.backend.search_result = [OPEN]
+        for _ in range(3):
+            out = self.fail(DC, PRISMA)
+        self.assertEqual(tag(out), "OPEN_QUESTION_EXISTS")
+        self.edit("Dockerfile")
+        out = self.ok(DC, "listening")
+        self.assertEqual(tag(out), "NOTABLE_SOLVE")
+        self.assertIn("pass open_question_id 3 to `post`", text_of(out))
+        self.assertNotIn("open_question_id", messages.notable_solve(DC, 3, "abc", []))
 
 
 class Triage(unittest.TestCase):

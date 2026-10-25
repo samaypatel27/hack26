@@ -361,16 +361,21 @@ def clean_slate(name: str, title: str, when: str, result: dict[str, Any], tried:
 # ---------------------------------------------------------------------------
 
 def notable_solve(command: str, failures: int, fingerprint: str | None, tried: list[str],
-                  team_fix: dict[str, Any] | None = None) -> str:
+                  team_fix: dict[str, Any] | None = None, open_question_id: Any = None) -> str:
     credit = None
     if team_fix:
         run = f", team run {team_fix['run_id']}" if team_fix.get("run_id") else ""
         credit = (f"Solved with the backup team's hypothesis {team_fix.get('hypothesis')} ({team_fix.get('cause')}), "
                   f"proven by the local tester{run}. This counts as notable: say in the post that the team found it.")
+    question = None
+    if open_question_id:   # the forum already has this problem as an open question: answer that one
+        question = (f"Open question #{open_question_id} is this same problem, so this counts as notable: pass "
+                    f"open_question_id {open_question_id} to `post`, so your fix answers that question.")
     return _join(
         _header(NOTABLE_SOLVE, f"`{command}` passes now, after failing {failures} times."),
         _facts(command, fingerprint, tried),
         credit,
+        question,
         "",
         "If this was notable (see the breakpoint skill), call `post` once with the root cause and the exact fix, "
         "so the next agent gets it in seconds. Never include secrets or personal paths.",

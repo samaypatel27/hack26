@@ -25,8 +25,12 @@ starts with WINNER (noted as the episode's team_fix; NOTABLE_SOLVE credits the t
 NO_WINNER (-> POST_OPEN_QUESTION) or INCONCLUSIVE (-> TEAM_STATUS: try the ranked fixes yourself).
 A direct ask_for_help (not suggested by the hook) is tied to the command that is failing now, if any.
 
-A command that kept failing and now passes closes the episode: NOTABLE_SOLVE, or SUSPECT_FIX when
-the git diff shows the failure was hidden (|| true, skipped tests, ...) instead of fixed.
+A command that kept failing and now passes closes the episode: NOTABLE_SOLVE (with the open question's id when
+the forum has one, so the post answers it), or SUSPECT_FIX when the git diff shows the failure was hidden
+(|| true, skipped tests, ...) instead of fixed.
+
+Only our own MCP tools count (OUR_TOOL_PREFIXES), and `post` / `post_open_question` only when their reply says the
+post was saved: an error or a REVISE reply leaves the episode as it was.
 
 LEAVE_REPLY: only for a solution that was ALREADY POSTED on the forum, never for the team's or the tester's fixes
 (those get NOTABLE_SOLVE: a new post). It is sent when the command that was failing passes after either
@@ -74,6 +78,12 @@ LABEL_RE = re.compile(r"^\s*\[Community-posted[^\]]*\]\s*")
 TESTER_RESULT_RE = re.compile(r"^(WINNER|NO_WINNER|INCONCLUSIVE):[ \t]*(.*)$", re.MULTILINE)
 # A post's first line in the MCP `search` / `get_post` output (plugin/mcp/server.py format_post).
 POST_HEADER_RE = re.compile(r"^(SOLVED|OPEN QUESTION) post #(\d+) \|", re.MULTILINE)
+# How `post` / `post_open_question` say they saved it (plugin/mcp/server.py). Any other reply (an error, REVISE
+# feedback) means nothing was saved, even though Claude Code counts the call as a success.
+POSTED_RE = re.compile(r"^(?:Posted as new solved post|Solution attached to open question) #(\d+)")
+OQ_POSTED_RE = re.compile(r"^(?:Posted as new open question|Already on the forum as open question) #(\d+)")
+# Our own MCP tools: from the plugin (plugin/.mcp.json), or the same server added by hand under the name "breakpoint".
+OUR_TOOL_PREFIXES = ("mcp__plugin_breakpoint_breakpoint__", "mcp__breakpoint__")
 
 # Test and build commands: their pass is a "last_good" point even before anything failed.
 GOAL_COMMAND_RE = re.compile(r"\b(py\.?test|unittest|test|tests|jest|vitest|mocha|tsc|build|compile|cargo|mvn|"
@@ -242,12 +252,13 @@ def _after_run(payload: dict[str, Any], state: dict[str, Any], backend: Any,
         if failures >= NOTABLE_MIN_FAILURES or (team_fix and failures):
             fp = (_last_failed_run(history[:idx], key) or {}).get("err_fp")
             tried = list(episode["tried"]) if same_key else []
+            question = episode.get("open_question_id") if same_key else None   # kept before the episode closes
             if same_key:
                 state["episode"] = None
             findings = suspect_changes(notebook.project_dir(payload))
             if findings:
                 return messages.suspect_fix(run["cmd"], failures, fp, findings)
-            return messages.notable_solve(run["cmd"], failures, fp, tried, team_fix)
+            return messages.notable_solve(run["cmd"], failures, fp, tried, team_fix, question)
         if same_key and failures:
             state["episode"] = None   # fixed quickly: nothing worth saying
             return None
@@ -345,16 +356,30 @@ def _ask_judge(payload: dict[str, Any], state: dict[str, Any], backend: Any) -> 
     return [struggles.Signal("ai_judge", "strong", f"AI judge: {verdict.get('reason') or 'the agent looks stuck.'}")]
 
 
+def our_tool(tool_name: Any) -> str | None:
+    """The bare name of one of our MCP tools ("post", "search", ...), or None for any other tool."""
+    name = str(tool_name or "")
+    return next((name[len(p):] for p in OUR_TOOL_PREFIXES if name.startswith(p)), None)
+
+
+def _saved_id(payload: dict[str, Any], pattern: re.Pattern[str]) -> int | None:
+    """The post id when a post / post_open_question result says it was saved, else None."""
+    text = LABEL_RE.sub("", notebook.tool_response_text(payload).replace(messages.COMMUNITY_LABEL, ""), count=1)
+    match = pattern.match(text.lstrip())
+    return int(match.group(1)) if match else None
+
+
 def _after_mcp_tool(payload: dict[str, Any], state: dict[str, Any]) -> str | None:
-    """Track our own MCP tools: the team was called, an open question was posted, a fix was shared."""
-    name = str(payload.get("tool_name", "")).lower()
+    """Track our own MCP tools: the team was called, an open question was posted, a fix was shared.
+    Other servers' tools are ignored, even when they have the same name (another server's `post`)."""
+    name = our_tool(payload.get("tool_name"))
     episode = state.get("episode")
-    if "ask_for_help" in name or "check_help" in name:
-        return _after_team_tool(payload, state, "ask_for_help" in name)
-    if name.endswith("__search") or name.endswith("__get_post"):
-        _note_viewed(payload, state, name.endswith("__get_post"))
+    if name in ("ask_for_help", "check_help"):
+        return _after_team_tool(payload, state, name == "ask_for_help")
+    if name in ("search", "get_post"):
+        _note_viewed(payload, state, name == "get_post")
         return None
-    if name.endswith("__reply"):   # it already replied to that post: no LEAVE_REPLY for it later
+    if name == "reply":   # it already replied to that post: no LEAVE_REPLY for it later
         tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
         post_id = tool_input.get("post_id")
         if isinstance(post_id, int) and not isinstance(post_id, bool) \
@@ -363,9 +388,11 @@ def _after_mcp_tool(payload: dict[str, Any], state: dict[str, Any]) -> str | Non
             if post_id not in nudged:
                 nudged.append(post_id)
         return None
-    if "post_open_question" in name and episode:
-        episode["oq_posted"] = True
-    elif name.endswith("__post") and episode:
+    if name == "post_open_question" and episode:
+        question = _saved_id(payload, OQ_POSTED_RE)
+        if question is not None:   # an error or REVISE: not posted, so the reminders stay on
+            episode.update(oq_posted=True, open_question_id=question)
+    elif name == "post" and episode and _saved_id(payload, POSTED_RE) is not None:
         state["episode"] = None   # solved and shared
     return None
 

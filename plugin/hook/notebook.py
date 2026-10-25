@@ -47,8 +47,11 @@ VIEWED_LIMIT = 10      # viewed_posts entries kept
 CHECKPOINT_LIMIT = 20   # entries kept in the notes (checkpoints.py keeps the same number of git refs)
 REWIND_KIND = "rewind"  # history record written by rewind.py; struggles.py counts from the last one
 
+SHELL_TOOLS = {"Bash", "PowerShell"}   # both run a command; PowerShell is Claude Code's shell tool on Windows
 EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
 READ_TOOLS = {"Read", "Grep", "Glob"}
+EXIT_CODE_KEYS = ("exit_code", "exitCode", "returncode", "returnCode", "exitStatus")
+BACKGROUND_KEYS = ("backgroundTaskId", "background_task_id", "backgroundedByUser")
 
 # `pytest | tail` exits 0 even when pytest failed, so a piped command's output is checked too.
 PIPED_FAILURE_RE = re.compile(
@@ -283,8 +286,34 @@ def _text(value: Any) -> str:
     return str(value)
 
 
+def _true(value: Any) -> bool:
+    return value is True or str(value).lower() == "true"
+
+
+def result_unknown(payload: dict[str, Any]) -> bool:
+    """A command whose result we can't know: started in the background (it reports right away, before it ran),
+    or stopped by the user. Counting it as a pass could confirm a fix that never ran, so it is never recorded."""
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, dict) and _true(tool_input.get("run_in_background")):
+        return True
+    if _true(payload.get("is_interrupt")):   # PostToolUseFailure: the user stopped it
+        return True
+    response = payload.get("tool_response")
+    return isinstance(response, dict) and (_true(response.get("interrupted"))
+                                           or any(response.get(k) for k in BACKGROUND_KEYS))
+
+
+def _exit_code(response: dict[str, Any]) -> int:
+    """The exit code under whichever key the tool used; 0 when there is none (the event itself says it passed)."""
+    code = next((response[k] for k in EXIT_CODE_KEYS if response.get(k) is not None), 0)
+    try:
+        return int(code)
+    except (TypeError, ValueError):
+        return 1 if code else 0
+
+
 def bash_result(payload: dict[str, Any]) -> tuple[str, bool, str]:
-    """(command, passed?, output) for a Bash PostToolUse or PostToolUseFailure payload."""
+    """(command, passed?, output) for a Bash or PowerShell PostToolUse or PostToolUseFailure payload."""
     tool_input = payload.get("tool_input") or {}
     cmd = str(tool_input.get("command", "")) if isinstance(tool_input, dict) else ""
     if payload.get("hook_event_name") == "PostToolUseFailure":
@@ -294,8 +323,7 @@ def bash_result(payload: dict[str, Any]) -> tuple[str, bool, str]:
     if isinstance(response, dict):
         parts = [_text(response.get(k)) for k in ("stdout", "stderr", "output")]
         output = "\n".join(p for p in parts if p)
-        code = next((response[k] for k in ("exit_code", "exitCode", "returncode") if k in response), 0)
-        ok = not code
+        ok = not _exit_code(response)
     else:
         output, ok = _text(response), True
     if ok and looks_failed(cmd, output):
@@ -312,7 +340,9 @@ def action_from_tool_use(payload: dict[str, Any]) -> tuple[dict[str, Any] | None
     now = time.time()
     failed = payload.get("hook_event_name") == "PostToolUseFailure"
 
-    if tool == "Bash":
+    if tool in SHELL_TOOLS:
+        if result_unknown(payload):
+            return None, ""   # neither a pass nor a fail
         cmd, ok, output = bash_result(payload)
         return (run_record(cmd, ok, output, now), output) if cmd.strip() else (None, "")
     if tool in EDIT_TOOLS and not failed:   # a failed edit changed nothing
