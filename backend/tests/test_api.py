@@ -503,3 +503,88 @@ def test_an_already_solved_question_sends_no_email(fake, monkeypatch, notices):
     r = client.post("/api/posts", json={**NEW_SOLVED, "open_question_id": 41}, headers=AUTH).json()
     assert r["attached_to_open_question"] is False and r["post_id"] == 99
     assert notices == []
+
+
+# ---- the backup matchers (when linking finds nothing) use linking's line and say "possible" -----------
+
+def test_backup_text_match_needs_linkings_score_and_says_possible_answer(fake, monkeypatch, notices):
+    """An exact text match (score 1.0) still attaches, but it is a guess by similarity: "possible answer"."""
+    question = {**ROW, "id": 41, "tags": ["prisma"], "description": NEW_SOLVED["description"]}
+    conn = TxConn([[{"id": 3, "slug": "databases"}], [question], [{"id": 41, "description": "Q"}]])
+    monkeypatch.setattr(main, "connect", lambda: conn)
+    r = client.post("/api/posts", json=NEW_SOLVED, headers=AUTH).json()
+    assert r["attached_to_open_question"] is True and r["post_id"] == 41 and r["linked_by"] == "fallback"
+    assert notices == [(41, True, None)]   # "possible answer", not "solved"
+
+
+def test_backup_text_match_below_linkings_score_does_not_attach(fake, monkeypatch, notices):
+    """Word overlap 0.5 used to attach (matching.ATTACH_MIN_SCORE); linking needs 0.8 without its AI check."""
+    near = {**ROW, "id": 41, "tags": ["prisma"],
+            "description": "Prisma crashes in Docker on startup\nCould not find the engine binary"}
+    assert main.best_text_match(main.words(NEW_SOLVED["description"]), [near], 0.5) is near   # the old line
+    conn = TxConn([[{"id": 3, "slug": "databases"}], [near], [{"id": 99}], []])
+    monkeypatch.setattr(main, "connect", lambda: conn)
+    r = client.post("/api/posts", json=NEW_SOLVED, headers=AUTH).json()
+    assert r["attached_to_open_question"] is False and r["post_id"] == 99
+    assert not any("UPDATE posts SET solution" in sql for sql, _ in conn.calls) and notices == []
+
+
+def test_backup_fingerprint_match_still_says_solved(fake, monkeypatch, notices):
+    conn = TxConn([[{"id": 3, "slug": "databases"}], [{**ROW, "id": 41, "tags": ["prisma"]}],
+                   [{"id": 41, "description": "Q"}], []])
+    monkeypatch.setattr(main, "connect", lambda: conn)
+    r = client.post("/api/posts", json={**NEW_SOLVED, "fingerprint": "51749bd5"}, headers=AUTH).json()
+    assert r["attached_to_open_question"] is True and r["linked_by"] is None
+    assert notices == [(41, False, None)]
+
+
+def test_backup_duplicate_check_needs_linkings_score(fake):
+    """best_match's own line is 0.3; a question this different is saved, not merged into the old one."""
+    existing = {**ROW, "id": 20, "forum": "databases", "tags": ["redis"],
+                "description": "Redis connection reset every five minutes\nbehind the load balancer"}
+    new = "Redis connection reset every hour\nbehind the nginx proxy"
+    assert main.best_match(new, [existing], forum="databases") is existing   # the old 0.3 line
+    conn = fake([{"id": 3, "slug": "databases"}], [existing], [{"id": 99}], [])
+    r = client.post("/api/posts", json={"description": new, "value": "v", "forum": "databases"}, headers=AUTH).json()
+    assert r["duplicate_of"] is None and r["post_id"] == 99
+
+
+# ---- CORS --------------------------------------------------------------------------------------------
+
+def test_cors_origins_default_env_list_and_website_url(monkeypatch):
+    monkeypatch.delenv("CORS_ORIGINS", raising=False)
+    monkeypatch.delenv("WEBSITE_URL", raising=False)
+    assert main.cors_origins() == ["http://localhost:3000"]
+    monkeypatch.setenv("CORS_ORIGINS", " http://localhost:3000, http://127.0.0.1:3000/ ,,")
+    monkeypatch.setenv("WEBSITE_URL", "https://breakpoint.example/")
+    assert main.cors_origins() == ["http://localhost:3000", "http://127.0.0.1:3000", "https://breakpoint.example"]
+    monkeypatch.setenv("WEBSITE_URL", "http://localhost:3000")   # no duplicates
+    assert main.cors_origins() == ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+
+def test_cors_allows_the_website_and_not_others():
+    preflight = {"Access-Control-Request-Method": "GET"}
+    ok = client.options("/api/posts", headers={**preflight, "Origin": "http://localhost:3000"})
+    assert ok.headers.get("access-control-allow-origin") == "http://localhost:3000"
+    bad = client.options("/api/posts", headers={**preflight, "Origin": "http://evil.example"})
+    assert "access-control-allow-origin" not in bad.headers
+
+
+# ---- the API key --------------------------------------------------------------------------------------
+
+def test_one_api_key_check_for_every_router():
+    import agent
+    import team_api
+    assert main.require_api_key is agent.require_api_key is team_api.require_api_key is accounts.require_api_key
+
+
+def test_api_key_check_refuses_wrong_missing_and_non_ascii_keys(monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret")
+    accounts.require_api_key("secret")   # no error
+    for wrong in (None, "", "secre", "secret2", "sécret"):
+        with pytest.raises(main.HTTPException) as e:
+            accounts.require_api_key(wrong)
+        assert e.value.status_code == 401
+    monkeypatch.setenv("API_KEY", "")
+    with pytest.raises(main.HTTPException):
+        accounts.require_api_key("")

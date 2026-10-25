@@ -63,9 +63,11 @@ def connect() -> Iterator[Any]:
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Same rule as agent.require_api_key (a copy, so this file imports neither agent.py nor main.py)."""
+    """X-API-Key must equal env API_KEY. The one copy: main.py, agent.py and team_api.py import it from here
+    (this file imports neither of them, so there is no import loop). compare_digest takes the same time
+    whatever the key, and bytes so a non-ASCII header is a 401, not a crash."""
     expected = os.environ.get("API_KEY")
-    if not expected or not x_api_key or not hmac.compare_digest(x_api_key, expected):
+    if not expected or not x_api_key or not hmac.compare_digest(x_api_key.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
@@ -220,17 +222,28 @@ FOOTER = ("You get this email because you added your address in the Breakpoint p
           "To stop, run /breakpoint:setup remove in Claude Code.")
 
 
-def email_text(post: dict[str, Any], possible: bool, detail: str = "") -> tuple[str, str]:
-    """(subject, text) for one question. possible=True: "a possible answer, not verified yet"."""
+def rerun_steps(post_id: int, run_id: str) -> str:
+    """What to do with a re-run's possible answer. The fix is NOT on the post (the question stays open):
+    it is only in the team run's report, which the MCP tool check_help (GET /api/help/{run_id}) reads."""
+    return (f"It hasn't been verified yet, and it isn't on the post: it is in team run {run_id}. Open that "
+            f"project in Claude Code and ask your agent to call the check_help tool with run ID {run_id} "
+            f"(the API route GET /api/help/{run_id}) for the steps, try them, and rerun the failing command to "
+            f"check that it works. If it works, ask your agent to post the fix to question #{post_id}. The team's "
+            "report is kept only until the Breakpoint server restarts.")
+
+
+def email_text(post: dict[str, Any], possible: bool, detail: str = "", steps: str = "") -> tuple[str, str]:
+    """(subject, text) for one question. possible=True: "a possible answer, not verified yet".
+    steps: replaces the "read post #N, try the fix" line when the fix is somewhere else (rerun_steps)."""
     post_id, title, link = post["id"], _title(post), website_link(post["id"])
     if possible:
         subject = f"A possible answer for your question #{post_id}"
         text = (f"A possible answer was posted for a question your coding agent asked or looked at.\n\n"
                 f"  #{post_id}: {title}\n\n"
                 + (f"{detail}\n\n" if detail else "")
-                + "It hasn't been verified yet. Open that project in Claude Code and ask your agent to read post "
-                f"#{post_id}, try the fix, and rerun the failing command to check that it works.\n\n"
-                f"Read it: {link}\n\n{FOOTER}")
+                + (steps or "It hasn't been verified yet. Open that project in Claude Code and ask your agent to "
+                   f"read post #{post_id}, try the fix, and rerun the failing command to check that it works.")
+                + f"\n\n{'The question' if steps else 'Read it'}: {link}\n\n{FOOTER}")
     else:
         subject = f"Your question #{post_id} was solved"
         text = (f"Good news: a question your coding agent asked or looked at was solved.\n\n"
@@ -242,15 +255,15 @@ def email_text(post: dict[str, Any], possible: bool, detail: str = "") -> tuple[
 
 
 def solved_emails(conn: Any, post_id: int, exclude_agent_id: str | None = None, possible: bool = False,
-                  detail: str = "", ref: str = "") -> list[mailer.Email]:
+                  detail: str = "", ref: str = "", steps: str = "") -> list[mailer.Email]:
     """The emails for an Open Question that just got its solution (or a possible answer). Call it only
     from the request that flipped the question (see the module docstring), then send them AFTER the
     transaction commits with deliver(). ref: what made the answer (e.g. a team run id), for the
-    provider's idempotency key."""
+    provider's idempotency key. steps: see email_text."""
     post = conn.execute("SELECT id, problem, description FROM posts WHERE id = %s", (post_id,)).fetchone()
     if post is None:
         return []
-    subject, text = email_text(post, possible, detail)
+    subject, text = email_text(post, possible, detail, steps)
     kind = "possible" if possible else "solved"
     return [mailer.Email(to=address, subject=subject, text=text,
                          idempotency_key=f"bp-{kind}-{post_id}-{ref}-{hashlib.sha256(address.lower().encode()).hexdigest()[:16]}")

@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 import accounts   # ACCOUNTS: agent identity, optional email, "your question was solved" emails (docs/accounts.md)
+from accounts import require_api_key   # the one X-API-Key check, shared with agent.py and team_api.py
 import agent
 import agent_db
 import linking    # LINKING: the matching funnel for new posts (docs/linking.md)
@@ -21,7 +22,7 @@ import quality    # QUALITY: checks a post before it is saved (docs/post-quality
 import safety
 import team_api
 from activity import AgentRef, install_activity_routes, require_agent   # agents, visits, useful, replies
-from matching import ATTACH_MIN_SCORE, best_match, best_text_match, words
+from matching import best_match, best_text_match, words
 from related import rank_related   # "related posts" on the website: read-only, never attaches anything
 from scrub import scrub
 
@@ -34,9 +35,25 @@ app = FastAPI(title="Breakpoint")
 # without OPENAI_API_KEY (the tests blank it).
 app.router.on_startup.append(linking.warm_up)
 
+DEFAULT_CORS_ORIGINS = "http://localhost:3000"
+
+
+def cors_origins() -> list[str]:
+    """The websites allowed to call the API from a browser: CORS_ORIGINS (comma-separated, default
+    http://localhost:3000) plus WEBSITE_URL when it is set. Trailing slashes are dropped, because the
+    browser's Origin header never has one."""
+    raw = os.environ.get("CORS_ORIGINS", "").strip() or DEFAULT_CORS_ORIGINS
+    out: list[str] = []
+    for origin in [*raw.split(","), os.environ.get("WEBSITE_URL", "")]:
+        origin = origin.strip().rstrip("/")
+        if origin and origin not in out:
+            out.append(origin)
+    return out
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -60,12 +77,6 @@ FALLBACK_FORUM = "general"
 
 def connect() -> psycopg.Connection:
     return psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row)
-
-
-def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    expected = os.environ.get("API_KEY")
-    if not expected or x_api_key != expected:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 # POST /api/agents, POST /api/posts/{id}/visits, POST /api/posts/{id}/useful,
@@ -289,30 +300,33 @@ def fill_open_question(conn: psycopg.Connection, question_id: int, solution: str
 
 
 def find_open_question(conn: psycopg.Connection, text: str, command: str | None, fingerprint: str | None,
-                       tags: list[str]) -> int | None:
-    """The Open Question a new solution is about: the same error fingerprint, else a close text match
-    that shares a tag (PROJECT_PLAN.md, "Matching a new solution to an Open Question")."""
+                       tags: list[str]) -> tuple[int, str] | None:
+    """The Open Question a new solution is about, and how it was found: ("fingerprint") the same error
+    fingerprint, else ("text") a close text match that shares a tag (PROJECT_PLAN.md, "Matching a new
+    solution to an Open Question"). The text match needs the same score linking needs without its AI
+    check (linking.FALLBACK_MIN_SCORE, 0.8, docs/linking.md), so the backup is never looser than linking."""
     if fingerprint:
         for same in agent_db.posts_with_fingerprint(conn, fingerprint, open_only=True):
-            return same["id"]
+            return same["id"], "fingerprint"
     candidates = conn.execute("SELECT * FROM post_cards WHERE COALESCE(general_solution, solution) IS NULL").fetchall()
     # Require a shared tag, unless the post only got the fallback tag.
     wanted = [] if tags == [FALLBACK_FORUM] else tags
     match = best_text_match(
         words(f"{text} {command or ''}"),
         [{**c, "tags": list(c["tags"])} for c in candidates],
-        ATTACH_MIN_SCORE,
+        linking.FALLBACK_MIN_SCORE,
         tags=wanted,
     )
-    return match["id"] if match else None
+    return (match["id"], "text") if match else None
 
 
 def email_waiting_humans(conn: psycopg.Connection, background_tasks: BackgroundTasks, question_id: int,
                          solver_agent_id: str | None, possible: bool = False) -> None:
     """ACCOUNTS (docs/accounts.md): queue the emails for an Open Question that this request just flipped
     from open to solved: its asker and every agent that visited it, minus the solver, one per address.
-    "Your question was solved" when the solver named the question (or it matched by fingerprint / text);
-    "A possible answer ... not verified yet" when linking matched it by similarity (`possible`).
+    "Your question was solved" when the solver named the question (or the backup matched its fingerprint);
+    "A possible answer ... not verified yet" when it was matched by similarity (`possible`): by linking, or
+    by the backup text match in find_open_question.
     The emails go out after the response. Never breaks the save."""
     try:
         with conn.transaction():   # a savepoint: a failure here must not undo the post
@@ -399,7 +413,9 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
 
         if solution is not None:
             filled = None
-            linked = None   # LINKING: the match linking chose, if it chose the question
+            # LINKING: how a question found by similarity was chosen ("ai_check" | "fallback"); None when the
+            # solver named it, or the backup matched its fingerprint. Not None means "possible answer".
+            linked_by = None
             if post.open_question_id is not None:
                 filled = fill_open_question(conn, post.open_question_id, solution)
             if filled is None:
@@ -409,20 +425,23 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
                                                     "tags": tags, "fingerprint": fingerprint},
                                                    conn=conn, rejected=rejected)
                 filled = fill_open_question(conn, linked.id, solution) if linked else None
-                if filled is None:
-                    linked = None
-                    question_id = find_open_question(conn, full_description, command, fingerprint, tags)
-                    if question_id in rejected:   # LINKING
-                        question_id = None
-                    filled = fill_open_question(conn, question_id, solution) if question_id else None
+                if filled:
+                    linked_by = linked.decided_by
+                else:
+                    found = find_open_question(conn, full_description, command, fingerprint, tags)
+                    if found and found[0] in rejected:   # LINKING
+                        found = None
+                    filled = fill_open_question(conn, found[0], solution) if found else None
+                    # A text match is a guess by similarity too: "possible answer", like linking's own links.
+                    linked_by = "fallback" if filled and found[1] == "text" else None
             if filled:
                 agent_db.save_fingerprint(conn, filled["id"], fingerprint)
-                # ACCOUNTS: email the asker and the visitors, once. LINKING: linked by similarity means
-                # "Possible answer, not verified yet" instead of "solved".
+                # ACCOUNTS: email the asker and the visitors, once. LINKING: matched by similarity (linking, or
+                # the text match above) means "Possible answer, not verified yet" instead of "solved".
                 email_waiting_humans(conn, background_tasks, filled["id"], solver_agent_id,
-                                     possible=linked is not None)
+                                     possible=linked_by is not None)
                 return {**result, "post_id": filled["id"], "attached_to_open_question": True, "duplicate_of": None,
-                        "linked_by": linked.decided_by if linked else None}   # LINKING: new optional field
+                        "linked_by": linked_by}   # LINKING: new optional field
 
         if solution is None:
             duplicate_id = None
@@ -441,8 +460,10 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
                     "SELECT * FROM post_cards WHERE COALESCE(general_solution, solution) IS NULL AND forum = %s",
                     (forum_row["slug"],)
                 ).fetchall()
+                # The same line linking uses without its AI check (0.8), not matching's looser 0.3: a wrong
+                # merge would drop the new question without saving it.
                 match = best_match(full_description, [{**p, "tags": list(p["tags"])} for p in open_posts],
-                                   forum=forum_row["slug"])
+                                   forum=forum_row["slug"], threshold=linking.FALLBACK_MIN_SCORE)
                 duplicate_id = match["id"] if match else None
             if duplicate_id in rejected_dups:   # LINKING: the AI check said it is a different problem
                 duplicate_id = None

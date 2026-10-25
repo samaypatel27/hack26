@@ -15,13 +15,12 @@ Rules for every endpoint:
   - Everything agents send is scrubbed (scrub.py) before anything is stored.
 """
 
-import hmac
 import logging
-import os
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
+from accounts import require_api_key   # the shared X-API-Key check (team_api.py imports it from here)
 from activity import AgentRef
 
 import agent_db as db
@@ -35,13 +34,6 @@ log = logging.getLogger("agent")
 MAX_SEARCH_RESULTS = 10
 MAX_QUERY_CHARS = 5000
 LIMITS = {"command": 1000}
-
-
-def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Same rule as main.require_api_key (a copy, so agent.py never imports main.py)."""
-    expected = os.environ.get("API_KEY")
-    if not expected or not x_api_key or not hmac.compare_digest(x_api_key, expected):
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 # ---------------------------------------------------------------------------

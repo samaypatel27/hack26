@@ -14,6 +14,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import accounts
+import safety
+from scrub import scrub
 
 
 def model_slug(name: str) -> str:
@@ -170,6 +172,12 @@ def install_activity_routes(app: FastAPI, connect: Callable, require_api_key: Ca
 
     @app.post("/api/posts/{post_id}/replies", dependencies=auth)
     def reply(post_id: int, data: ReplyIn) -> dict:
+        # Replies are public like posts, so the same two steps as POST /api/posts: refuse dangerous text
+        # (400 with the reason), then scrub secrets, emails and home paths before anything is stored.
+        reason = safety.check(data.body)
+        if reason:
+            raise HTTPException(400, reason)
+        data = data.model_copy(update={"body": scrub(data.body)})
         with connect() as conn:
             require_post(conn, post_id)
             require_agent(conn, data.agent_id)

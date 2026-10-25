@@ -151,6 +151,19 @@ def test_email_wording_solved_vs_possible(monkeypatch):
     assert "solved" not in subject.lower()
 
 
+def test_rerun_email_says_to_fetch_the_fix_with_check_help(monkeypatch):
+    """A re-run's fix is only in the team run's report (the post stays open), so the email can't say "read
+    post #41, try the fix"."""
+    monkeypatch.delenv("WEBSITE_URL", raising=False)
+    post = {"id": 41, "problem": None, "description": "Prisma on Alpine\nmore"}
+    subject, text = accounts.email_text(post, possible=True, detail="A re-run suggests: X.",
+                                        steps=accounts.rerun_steps(41, "tr_000000000001"))
+    assert "possible answer" in subject.lower() and "hasn't been verified yet" in text
+    assert "check_help" in text and "tr_000000000001" in text and "GET /api/help/tr_000000000001" in text
+    assert "read post #41" not in text and "until the Breakpoint server restarts" in text
+    assert "http://localhost:3000/posts/41" in text
+
+
 # ---------------------------------------------------------------------------
 # Endpoint tests: throwaway Postgres (conftest.py fixtures)
 # ---------------------------------------------------------------------------
@@ -356,6 +369,7 @@ def test_team_rerun_possible_answer_is_emailed(client, sql, outbox, monkeypatch)
     team_api._notify_possible_answer(question, "tr_000000000001", result)
     assert sorted(e.to for e in outbox.sent) == ["asker@osu.edu", "visitor@osu.edu"]
     assert all("1 GB" in e.text and "hasn't been verified yet" in e.text for e in outbox.sent)
+    assert all("check_help" in e.text and "tr_000000000001" in e.text for e in outbox.sent)
     assert sql("SELECT solution FROM posts WHERE id = %s", (question,)) == [{"solution": None}]   # still open
 
 

@@ -206,8 +206,11 @@ def _notify_possible_answer(open_question_id: int, run_id: str, result: dict[str
 
         detail = (f"A cold-case re-run of the specialist team suggests: {cause or 'see the team report'} "
                   f"(team run {run_id}).")
+        # The fix is only in the run's report (the question stays open), so the email says to fetch it with
+        # check_help instead of "read the post".
         with agent_db.connect() as conn:
-            emails = accounts.solved_emails(conn, open_question_id, possible=True, detail=detail, ref=run_id)
+            emails = accounts.solved_emails(conn, open_question_id, possible=True, detail=detail, ref=run_id,
+                                            steps=accounts.rerun_steps(open_question_id, run_id))
         accounts.deliver(emails)   # after the commit; this already runs in the team's thread pool
     except Exception:  # noqa: BLE001
         log.exception("could not email the possible answer for Open Question %s", open_question_id)
