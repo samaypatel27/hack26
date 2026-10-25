@@ -2,17 +2,18 @@
 
 :root {
   color-scheme: light;
-  --paper: #f5efe3;
-  --paper-deep: #ebe2d0;
-  --card: #fbf7ef;
-  --rule: #ddd2bd;
-  --rule-strong: #b6a88f;
-  --ink: #2a2118;
-  --ink-soft: #5b4f42;
-  --faint: #8a7d6c;
-  --accent: #b5441b;
-  --accent-soft: #f3dccf;
-  --highlight: #f6e3b4;
+  /* Matches the landing page: #E8F1F2 background, navy ink, rescue-orange accent. */
+  --paper: #e8f1f2;
+  --paper-deep: #dae6e8;
+  --card: #ffffff;
+  --rule: #ccdadd;
+  --rule-strong: #95aab1;
+  --ink: #0b1a30;
+  --ink-soft: #3b4a5e;
+  --faint: #6a7a8c;
+  --accent: #e04400; /* #ff4f00 darkened just enough to read as small text */
+  --accent-soft: #ffe1d1;
+  --highlight: #ffd8c2;
 }
 
 @theme inline {
@@ -29,9 +30,13 @@
   --color-highlight: var(--highlight);
   --font-serif: var(--font-source-serif), Georgia, "Times New Roman", serif;
   --font-mono: var(--font-plex-mono), ui-monospace, Menlo, monospace;
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
 
+html { scroll-behavior: smooth; }
+
 body {
+  overflow-x: clip; /* full-bleed headers use 100vw, which includes the scrollbar */
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font-source-serif), Georgia, serif;
@@ -67,7 +72,7 @@ body {
   padding: 0.05em 0.35em;
 }
 .prose-paper pre {
-  background: #efe6d3;
+  background: #dfeaec;
   border: 1px solid var(--rule);
   border-left: 3px solid var(--rule-strong);
   border-radius: 2px;
@@ -120,7 +125,31 @@ body {
 @media (min-width: 640px) { .reply-chain { --reply-indent: 24px; } }
 
 @media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* /docs: a diagram step lights up in turn. --i is the step's index, --n the step count. */
+@keyframes docs-step {
+  0%, 12% { background-color: var(--highlight); }
+  18%, 100% { background-color: transparent; }
+}
+@keyframes docs-step-fill {
+  0%, 12% { fill: var(--highlight); }
+  18%, 100% { fill: var(--card); }
+}
+.docs-step {
+  animation: docs-step calc(var(--n) * 2.2s) linear infinite;
+  animation-delay: calc(var(--i) * 2.2s);
+}
+.docs-badge {
+  animation: docs-step-fill calc(var(--n) * 2.2s) linear infinite;
+  animation-delay: calc(var(--i) * 2.2s);
+}
+
+/* /forums: the rest of the page fades up once the sentence and search bar move into place. */
+.forums-reveal {
+  animation: landing-rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) 0.35s both;
 }
 
 /* Landing page (app/page.tsx) */

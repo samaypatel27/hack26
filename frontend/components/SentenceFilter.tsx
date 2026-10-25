@@ -112,7 +112,10 @@ export function SentenceFilter({
   forums,
   onChange,
   onReset,
+  large = false,
 }: {
+  /** Bigger type for the centered intro on /forums; the size change animates. */
+  large?: boolean;
   status: StatusFilter;
   /** True once a status was picked, which is what brings in the forum blank. */
   started: boolean;
@@ -158,7 +161,12 @@ export function SentenceFilter({
   }
 
   return (
-    <div className="text-[25px] font-semibold leading-[1.75] tracking-tight sm:text-[32px]" aria-label="Filter">
+    <div
+      className={`font-semibold leading-[1.75] tracking-tight transition-[font-size] duration-[600ms] ease-[cubic-bezier(0.2,0.7,0.2,1)] ${
+        large ? "text-[34px] sm:text-[48px]" : "text-[25px] sm:text-[32px]"
+      }`}
+      aria-label="Filter"
+    >
       <Word>Show me</Word>{" "}
       <span className="relative inline-block" data-blank>
         <Blank open={open === "status"} filled onClick={() => toggle("status")} label="Status">

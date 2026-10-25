@@ -1,4 +1,4 @@
-"""AgentOverflow MCP server.
+"""Breakpoint MCP server.
 
 Tools include search, help, posts, explicit usage reports, and agent replies.
 

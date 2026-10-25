@@ -4,46 +4,54 @@ import type { ConnectionState } from "@/lib/types";
 const TABS = [
   { id: "home", href: "/", label: "Home" },
   { id: "forums", href: "/forums", label: "Forums" },
+  { id: "docs", href: "/docs", label: "Docs" },
 ] as const;
 
 /**
- * Wordmark and page tabs. A note appears on the right only when the server can't be reached.
+ * The one top bar for every page: wordmark at the left edge, page tabs at the right.
+ * Render it outside a page's centred column, as the first thing on the page.
  * `active` says which tab to light; a post page counts as part of the forums.
+ * `overlay` lays the bar over the top of a full-screen hero instead of above it.
+ * A note appears beside the tabs only when the server can't be reached.
  */
 export function SiteHeader({
   active,
   connection,
+  overlay = false,
 }: {
   active?: (typeof TABS)[number]["id"];
   connection?: ConnectionState;
+  overlay?: boolean;
 }) {
   return (
-    <header className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 border-b-2 border-ink pb-2 pt-6">
-      <div className="flex flex-wrap items-baseline gap-x-7 gap-y-1">
-        <Link href="/" className="text-[23px] font-bold leading-none tracking-tight">
-          Agent<span className="font-normal italic">Overflow</span>
+    <header className={`z-10 border-b border-ink/10 ${overlay ? "absolute inset-x-0 top-0" : "relative"}`}>
+      <div className="flex w-full items-center justify-between gap-x-6 gap-y-2 px-6 py-4 sm:px-10">
+        <Link href="/" className="text-xl font-bold tracking-tight">
+          Breakpoint
         </Link>
-        <nav aria-label="Pages" className="flex gap-5 text-[15px]">
-          {TABS.map((t) => {
-            const on = active === t.id;
-            return (
-              <Link
-                key={t.id}
-                href={t.href}
-                aria-current={on ? "page" : undefined}
-                className={`underline-offset-[7px] ${
-                  on ? "font-semibold text-accent underline decoration-2" : "text-ink-soft hover:text-ink"
-                }`}
-              >
-                {t.label}
-              </Link>
-            );
-          })}
-        </nav>
+        <div className="flex items-center gap-x-6">
+          <span className="hidden font-mono text-xs text-accent sm:inline" role="status" aria-live="polite">
+            {connection === "offline" ? "can't reach the server, retrying" : ""}
+          </span>
+          <nav aria-label="Pages" className="flex items-center gap-5 font-sans text-sm sm:gap-7">
+            {TABS.map((t) => {
+              const on = active === t.id;
+              return (
+                <Link
+                  key={t.id}
+                  href={t.href}
+                  aria-current={on ? "page" : undefined}
+                  className={`underline-offset-[7px] transition ${
+                    on ? "font-semibold text-accent underline decoration-2" : "text-ink/70 hover:text-ink"
+                  }`}
+                >
+                  {t.label}
+                </Link>
+              );
+            })}
+          </nav>
+        </div>
       </div>
-      <span className="font-mono text-xs text-accent" role="status" aria-live="polite">
-        {connection === "offline" ? "can't reach the server, retrying" : ""}
-      </span>
     </header>
   );
 }
