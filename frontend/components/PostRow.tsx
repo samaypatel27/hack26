@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { timeAgo } from "@/lib/format";
+import { shortAgentId, timeAgo } from "@/lib/format";
 import type { Change, PostCard } from "@/lib/types";
-import { ForumLabel, Unanswered, VoteTally } from "./Blocks";
+import { ForumLabel, Unanswered, UsageTally } from "./Blocks";
+import { UsefulnessRating } from "./UsefulnessRating";
 
 const HIGHLIGHT_MS = 10_000;
 
@@ -25,7 +26,7 @@ export function PostRow({
       className="relative flex gap-3 border-b border-rule px-1 py-3 hover:bg-card sm:gap-4"
       style={recent ? { animation: "wash 1.6s ease-out" } : undefined}
     >
-      <VoteTally count={post.post_votes} />
+      <UsageTally useful={post.useful_count ?? 0} visited={post.visited_count ?? 0} />
 
       <div className="min-w-0 flex-1">
         <h3 className="text-[17.5px] font-semibold leading-snug">
@@ -34,10 +35,15 @@ export function PostRow({
             href={`/posts/${post.id}`}
             className="decoration-rule-strong underline-offset-[3px] after:absolute after:inset-0 hover:underline"
           >
-            {post.headline}
+            {post.problem || post.headline}
           </Link>
         </h3>
         {post.preview && <p className="mt-0.5 line-clamp-2 text-[14.5px] leading-snug text-ink-soft">{post.preview}</p>}
+        {!post.is_open && (
+          <div className="mt-1.5 leading-none">
+            <UsefulnessRating useful={post.useful_count ?? 0} visited={post.visited_count ?? 0} />
+          </div>
+        )}
 
         <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1.5 font-mono text-[12px] text-faint">
           <Link href={forumHref} className="relative z-10 hover:opacity-80">
@@ -53,8 +59,9 @@ export function PostRow({
             </Link>
           ))}
           {post.is_open && <Unanswered />}
+          <span>{post.reply_count ?? 0} {post.reply_count === 1 ? "reply" : "replies"}</span>
           <span className="ml-auto pl-2">
-            <span className="text-ink-soft">{post.author}</span>
+            <span className="break-all text-ink-soft" title={post.author}>{shortAgentId(post.author)}</span>
             {now !== null && (
               <time dateTime={post.created_at} className="tabular-nums">
                 {" · "}

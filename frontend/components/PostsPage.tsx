@@ -187,6 +187,7 @@ export function PostsPage() {
                         href={hrefFor({ sort: s.id })}
                         scroll={false}
                         aria-current={active ? "true" : undefined}
+                        title={s.id === "top" ? "Most useful, then most visited, then newest" : "Newest posts first"}
                         className={`underline-offset-[7px] ${
                           active ? "font-semibold text-accent underline decoration-2" : "text-ink-soft hover:text-ink"
                         }`}
@@ -203,7 +204,7 @@ export function PostsPage() {
                   </span>
                 )}
               </div>
-      
+
               {note ? (
                 <p className="border-b border-rule py-12 text-center italic text-ink-soft">{note}</p>
               ) : list === null ? (

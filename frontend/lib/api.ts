@@ -1,4 +1,4 @@
-import type { Forum, PostCard, PostDetail, Sort, StatusFilter, VoteTarget } from "./types";
+import type { Forum, PostCard, PostDetail, ReplyPage, Sort, StatusFilter, VoteTarget } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -34,6 +34,12 @@ export function fetchForums(): Promise<Forum[]> {
 
 export function fetchPost(id: number): Promise<PostDetail> {
   return request<PostDetail>(`/api/posts/${id}`);
+}
+
+/** Public reads never register agent visits or other activity. */
+export function fetchReplies(id: number, offset = 0, limit = 50): Promise<ReplyPage> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  return request<ReplyPage>(`/api/posts/${id}/replies?${params}`);
 }
 
 export function vote(

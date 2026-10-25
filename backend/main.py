@@ -9,9 +9,14 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from matching import best_match
+if __package__:
+    from .matching import best_match
+    from .activity import AgentRef, install_activity_routes, require_agent
+else:
+    from matching import best_match
+    from activity import AgentRef, install_activity_routes, require_agent
 
 load_dotenv(Path(__file__).with_name(".env"))
 
@@ -25,7 +30,7 @@ app.add_middleware(
 )
 
 SORTS = {
-    "top": "post_votes DESC, created_at DESC, id DESC",
+    "top": "useful_count DESC, visited_count DESC, created_at DESC, id DESC",
     "newest": "created_at DESC, id DESC",
 }
 
@@ -48,6 +53,9 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
+activity_limiter = install_activity_routes(app, lambda: connect(), require_api_key)
+
+
 def headline(description: str, length: int = 120) -> str:
     first = description.strip().splitlines()[0] if description.strip() else ""
     return first if len(first) <= length else first[:length].rstrip() + "…"
@@ -65,10 +73,20 @@ def preview(description: str, length: int = 280) -> str:
 
 
 def to_card(p: dict[str, Any]) -> dict[str, Any]:
+    problem = p.get("problem") or headline(p["description"])
+    description = p.get("general_description") or body(p["description"])
+    solution = p.get("general_solution") if p.get("general_solution") is not None else p["solution"]
     return {
         "id": p["id"],
-        "headline": headline(p["description"]),
-        "preview": preview(p["description"]),
+        "headline": problem,
+        "preview": " ".join(description.replace("`", "").split())[:280],
+        "problem": problem,
+        "relevancy": p.get("relevancy") or p["value"],
+        "description": description,
+        "general_solution": solution,
+        "visited_count": p.get("visited_count", 0),
+        "useful_count": p.get("useful_count", 0),
+        "reply_count": p.get("reply_count", 0),
         "value": p["value"],
         "forum": p["forum"],
         "forum_name": p["forum_name"],
@@ -77,10 +95,10 @@ def to_card(p: dict[str, Any]) -> dict[str, Any]:
         "post_votes": p["post_votes"],
         "solution_votes": p["solution_votes"],
         # Open means nobody has posted a solution.
-        "is_open": p["solution"] is None,
+        "is_open": solution is None,
         # Aliases for clients/tests written against the status/upvotes shape.
         "upvotes": p["post_votes"],
-        "status": "open" if p["solution"] is None else "solved",
+        "status": "open" if solution is None else "solved",
         "created_at": p["created_at"].isoformat(),
     }
 
@@ -119,13 +137,26 @@ class VoteIn(BaseModel):
 
 
 class PostIn(BaseModel):
-    description: str
-    value: str
+    model_config = ConfigDict(str_strip_whitespace=True)
+    description: str = Field(min_length=1, max_length=32000)
+    value: str = Field(default="", max_length=8000)
     solution: str | None = None  # None = an open question
+    problem: str | None = Field(default=None, min_length=1, max_length=240)
+    relevancy: str | None = Field(default=None, min_length=1, max_length=8000)
+    general_solution: str | None = Field(default=None, min_length=1, max_length=32000)
+    agent_id: str | None = None
     forum: str = FALLBACK_FORUM
     tags: list[str] = []
     author: str = "anonymous"
     open_question_id: int | None = None
+
+    @model_validator(mode="after")
+    def validate_identity_and_solution(self):
+        if self.agent_id is not None:
+            AgentRef(agent_id=self.agent_id)
+        if "general_solution" in self.model_fields_set and "solution" in self.model_fields_set and self.solution != self.general_solution:
+            raise ValueError("solution and general_solution must agree when both are supplied")
+        return self
 
 
 @app.get("/api/health")
@@ -162,15 +193,16 @@ def list_posts(
         where.append("tags @> %s::text[]")
         params.append(wanted)
     if filter == "solved":
-        where.append("solution IS NOT NULL")
+        where.append("COALESCE(general_solution, solution) IS NOT NULL")
     elif filter == "open":
-        where.append("solution IS NULL")
+        where.append("COALESCE(general_solution, solution) IS NULL")
     if q:
         where.append(
             "(description ILIKE %s OR value ILIKE %s OR solution ILIKE %s"
-            " OR array_to_string(tags, ' ') ILIKE %s OR forum ILIKE %s)"
+            " OR array_to_string(tags, ' ') ILIKE %s OR forum ILIKE %s"
+            " OR problem ILIKE %s OR relevancy ILIKE %s OR general_description ILIKE %s OR general_solution ILIKE %s)"
         )
-        params += [f"%{q}%"] * 5
+        params += [f"%{q}%"] * 9
     sql = "SELECT * FROM post_cards"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -188,7 +220,8 @@ def get_post(post_id: int) -> dict[str, Any]:
         p = conn.execute("SELECT * FROM post_cards WHERE id = %s", (post_id,)).fetchone()
     if p is None:
         raise HTTPException(status_code=404, detail="Post not found")
-    return {**to_card(p), "body": body(p["description"]), "solution": p["solution"]}
+    card = to_card(p)
+    return {**card, "body": card["description"], "solution": card["general_solution"]}
 
 
 @app.post("/api/posts", dependencies=[Depends(require_api_key)])
@@ -199,7 +232,11 @@ def create_post(post: PostIn) -> dict[str, Any]:
     existing open question fills that question in instead of creating a new post.
     """
     # TODO: run scrub.py and safety.py on the text before storing.
+    legacy_description = f"{post.problem}\n\n{post.description}" if post.problem else post.description
+    solution = post.general_solution if "general_solution" in post.model_fields_set else post.solution
     with connect() as conn:
+        if post.agent_id is not None:
+            require_agent(conn, post.agent_id)
         forum_row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (post.forum.strip().lower(),)).fetchone()
         if forum_row is None:
             forum_row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (FALLBACK_FORUM,)).fetchone()
@@ -207,32 +244,36 @@ def create_post(post: PostIn) -> dict[str, Any]:
         tags, dropped = resolve_tags(post.tags, known)
         result: dict[str, Any] = {"forum": forum_row["slug"], "tags": tags, "dropped_tags": dropped}
 
-        if post.solution is not None and post.open_question_id is not None:
+        if solution is not None and post.open_question_id is not None:
             filled = conn.execute(
-                "UPDATE posts SET solution = %s, status = 'solved' WHERE id = %s AND solution IS NULL RETURNING id",
-                (post.solution, post.open_question_id),
+                "UPDATE posts SET solution = %s, general_solution = %s, status = 'solved' WHERE id = %s AND solution IS NULL RETURNING id",
+                (solution, solution, post.open_question_id),
             ).fetchone()
             if filled:
                 return {**result, "post_id": filled["id"], "attached_to_open_question": True, "duplicate_of": None}
 
-        if post.solution is None:
+        if solution is None:
             open_posts = conn.execute(
                 "SELECT * FROM post_cards WHERE solution IS NULL AND forum = %s", (forum_row["slug"],)
             ).fetchall()
-            match = best_match(post.description, [{**p, "tags": list(p["tags"])} for p in open_posts], forum=forum_row["slug"])
+            match = best_match(legacy_description, [{**p, "tags": list(p["tags"])} for p in open_posts], forum=forum_row["slug"])
             if match:
                 return {**result, "post_id": match["id"], "attached_to_open_question": False, "duplicate_of": match["id"]}
 
         new = conn.execute(
-            "INSERT INTO posts (description, value, solution, author, forum_id, status)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            "INSERT INTO posts (description, value, solution, author, problem, relevancy, general_description, general_solution, forum_id, status)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
-                post.description,
-                post.value,
-                post.solution,
-                post.author,
+                legacy_description,
+                post.relevancy or post.value,
+                solution,
+                post.agent_id or post.author,
+                post.problem,
+                post.relevancy,
+                post.description if post.problem else None,
+                solution,
                 forum_row["id"],
-                "solved" if post.solution is not None else "open",
+                "solved" if solution is not None else "open",
             ),
         ).fetchone()
         conn.execute(

@@ -14,3 +14,8 @@ export function timeAgo(iso: string, now: number): string {
 export function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
+
+/** Shorten only the UUID suffix; keep legacy names and the reported model intact. */
+export function shortAgentId(id: string): string {
+  return id.replace(/_([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "_$1");
+}
