@@ -12,8 +12,8 @@ client = TestClient(main.app)
 
 def test_related_returns_shared_tags_and_both_statuses_without_writes(fake):
     rows = [
-        {**ROW, "id": 8, "tags": ["cors", "fastapi"]},
-        {**ROW, "id": 9, "solution": "Fix", "tags": ["cors"]},
+        {**ROW, "id": 8, "description": "FastAPI preflight rejected\nCheck allowed origins", "tags": ["cors", "fastapi"]},
+        {**ROW, "id": 9, "description": "CORS headers missing\nCheck proxy headers", "solution": "Fix", "tags": ["cors"]},
     ]
     conn = fake([ROW], rows, rows)
     response = client.get("/api/posts/7/related")

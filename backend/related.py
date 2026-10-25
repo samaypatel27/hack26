@@ -16,20 +16,25 @@ GENERIC_WORDS = {
 }
 
 
-def keywords(post: dict[str, Any]) -> set[str]:
+def question_text(post: dict[str, Any]) -> str:
     legacy = post.get("description") or ""
     lines = legacy.strip().splitlines()
     title = post.get("problem") or (lines[0] if lines else "")
     detail = post.get("general_description") or "\n".join(lines[1:])
-    return {word for word in words(f"{title}\n{detail}") if len(word) > 2 and word not in GENERIC_WORDS}
+    return f"{title}\n{detail}"
+
+
+def keywords(post: dict[str, Any]) -> set[str]:
+    return {word for word in words(question_text(post)) if len(word) > 2 and word not in GENERIC_WORDS}
 
 
 def rank_related(source: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     source_words = keywords(source)
     source_tags = set(source.get("tags") or [])
+    source_text = " ".join(question_text(source).casefold().split())
     ranked = []
     for post in candidates:
-        if post["id"] == source["id"]:
+        if post["id"] == source["id"] or " ".join(question_text(post).casefold().split()) == source_text:
             continue
         candidate_words = keywords(post)
         candidate_tags = set(post.get("tags") or [])

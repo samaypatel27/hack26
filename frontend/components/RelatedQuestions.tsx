@@ -6,7 +6,7 @@ import { usePoll } from "@/lib/usePoll";
 
 export function RelatedQuestions({ postId }: { postId: number }) {
   const related = usePoll(`related:${postId}`, () => fetchRelatedPosts(postId));
-  const posts = related.loading ? null : related.data;
+  const posts = related.loading ? null : related.data?.filter((post) => post.id !== postId);
 
   return (
     <section className="min-w-0 p-4" aria-labelledby="related-questions-heading">
