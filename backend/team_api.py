@@ -38,7 +38,7 @@ MAX_RERUN = 25
 class _State:
     """What the endpoints use. Tests replace these; None means "use the real thing"."""
     clients: config.Clients | None = None
-    search_fn: Any = gate.forum_search
+    search_fn: Any = staticmethod(gate.forum_search)   # staticmethod: read through STATE, a plain function gets `self`
     open_questions_fn: Any = None   # (ids | "all", limit) -> list of Open Question posts
     notify_fn: Any = None           # (open_question_id, message) -> None
     executor: ThreadPoolExecutor | None = None
