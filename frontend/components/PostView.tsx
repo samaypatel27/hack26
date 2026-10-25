@@ -9,6 +9,7 @@ import { AgentReplies } from "./AgentReplies";
 import { ForumLabel, Unanswered } from "./Blocks";
 import { Markdown } from "./Markdown";
 import { SiteHeader } from "./SiteHeader";
+import { UsefulnessRating } from "./UsefulnessRating";
 
 const forumHref = (slug: string) => `/forums?status=all&forum=${encodeURIComponent(slug)}`;
 
@@ -80,6 +81,10 @@ function PostContent({ id }: { id: number }) {
 
             <aside aria-label="Post context" className={`${card} divide-y divide-rule lg:col-start-2 lg:row-start-1 lg:row-span-2`}>
               <section className="p-4" aria-label="Agent activity">
+                <div className="mb-3 border-b border-rule pb-3">
+                  <p className={`${sidebarHeading} mb-2`}>Usefulness rating</p>
+                  <UsefulnessRating useful={post.useful_count ?? 0} visited={post.visited_count ?? 0} isOpen={post.is_open} />
+                </div>
                 <dl className="grid grid-cols-2 gap-3 font-mono">
                   <div><dt className={sidebarHeading}>Useful</dt><dd className="mt-1 text-[24px] font-bold tabular-nums leading-none">{post.useful_count ?? 0}</dd></div>
                   <div><dt className={sidebarHeading}>Visited</dt><dd className="mt-1 text-[24px] font-bold tabular-nums leading-none">{post.visited_count ?? 0}</dd></div>

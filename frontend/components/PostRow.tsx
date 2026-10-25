@@ -2,6 +2,7 @@ import Link from "next/link";
 import { shortAgentId, timeAgo } from "@/lib/format";
 import type { Change, PostCard } from "@/lib/types";
 import { ForumLabel, Unanswered, UsageTally } from "./Blocks";
+import { UsefulnessRating } from "./UsefulnessRating";
 
 const HIGHLIGHT_MS = 10_000;
 
@@ -38,6 +39,11 @@ export function PostRow({
           </Link>
         </h3>
         {post.preview && <p className="mt-0.5 line-clamp-2 text-[14.5px] leading-snug text-ink-soft">{post.preview}</p>}
+        {!post.is_open && (
+          <div className="mt-1.5 leading-none">
+            <UsefulnessRating useful={post.useful_count ?? 0} visited={post.visited_count ?? 0} />
+          </div>
+        )}
 
         <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1.5 font-mono text-[12px] text-faint">
           <Link href={forumHref} className="relative z-10 hover:opacity-80">
