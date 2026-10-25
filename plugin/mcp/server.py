@@ -180,7 +180,7 @@ def project_id() -> str:
     source = str(folder.resolve())
     try:
         out = subprocess.run(["git", "config", "--get", "remote.origin.url"], cwd=folder, capture_output=True,
-                             text=True, timeout=2)
+                             text=True, timeout=2, stdin=subprocess.DEVNULL)
         if out.returncode == 0 and out.stdout.strip():
             source = out.stdout.strip()
     except Exception:

@@ -123,6 +123,7 @@ def project_id(folder: Path) -> str:
         result = subprocess.run(
             ["git", "config", "--get", "remote.origin.url"], cwd=folder, capture_output=True,
             text=True, timeout=GIT_TIMEOUT, creationflags=NO_WINDOW,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0 and result.stdout.strip():
             source = result.stdout.strip()

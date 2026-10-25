@@ -42,7 +42,7 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # no console flash on W
 def _run(args: list[str], cwd: Path) -> str:
     """A command's stdout, or "" on any problem (missing tool, timeout, non-zero exit)."""
     try:
-        out = subprocess.run(args, cwd=cwd, capture_output=True, timeout=CASE_TIMEOUT, creationflags=NO_WINDOW)
+        out = subprocess.run(args, cwd=cwd, capture_output=True, timeout=CASE_TIMEOUT, creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
     except Exception:
         return ""
     return out.stdout.decode("utf-8", errors="replace").strip() if out.returncode == 0 else ""
@@ -51,7 +51,7 @@ def _run(args: list[str], cwd: Path) -> str:
 def _git_ignored(project: Path, rel: str) -> bool:
     try:
         out = subprocess.run(["git", "check-ignore", "-q", rel], cwd=project, capture_output=True,
-                             timeout=CASE_TIMEOUT, creationflags=NO_WINDOW)
+                             timeout=CASE_TIMEOUT, creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
         return out.returncode == 0
     except Exception:
         return False

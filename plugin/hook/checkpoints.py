@@ -64,8 +64,8 @@ def _git(cwd: Path, args: list[str], timeout: float, index: str | None = None,
         env.pop("GIT_INDEX_FILE", None)
     try:
         result = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, timeout=timeout,
-                                input=stdin.encode("utf-8") if stdin is not None else None,
-                                creationflags=NO_WINDOW)
+                                creationflags=NO_WINDOW,
+                                **({"input": stdin.encode("utf-8")} if stdin is not None else {"stdin": subprocess.DEVNULL}))
     except subprocess.TimeoutExpired as exc:
         raise GitError(f"`git {args[0]}` took longer than {timeout:g}s") from exc
     except OSError as exc:

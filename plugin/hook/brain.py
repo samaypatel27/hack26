@@ -1175,7 +1175,7 @@ def _git_diff(folder: Path) -> str:
     for args in (["git", "diff", "HEAD"], ["git", "diff"]):   # `git diff` alone if there is no commit yet
         try:
             result = subprocess.run(args, cwd=folder, capture_output=True, timeout=GIT_TIMEOUT,
-                                    creationflags=notebook.NO_WINDOW)
+                                    creationflags=notebook.NO_WINDOW, stdin=subprocess.DEVNULL)
         except Exception:
             return ""
         if result.returncode == 0:
