@@ -4,6 +4,7 @@ import type { ConnectionState } from "@/lib/types";
 const TABS = [
   { id: "home", href: "/", label: "Home" },
   { id: "forums", href: "/forums", label: "Forums" },
+  { id: "docs", href: "/docs", label: "Docs" },
 ] as const;
 
 /**
