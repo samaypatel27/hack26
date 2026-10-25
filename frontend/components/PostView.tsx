@@ -59,28 +59,33 @@ function PostContent({ id }: { id: number }) {
           )
         ) : (
           <main className="post-thread mt-3 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_288px] lg:gap-5">
-            <article className={`${card} lg:col-start-1 lg:row-start-1`}>
-              <header className="border-b border-rule px-4 py-4 sm:px-5">
-                <p className={sidebarHeading}>Problem</p>
-                <h1 className="mt-1.5 break-words text-[23px] font-bold leading-[1.2] tracking-tight sm:text-[26px]">{post.problem || post.headline}</h1>
-                <p className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11.5px] text-faint">
-                  <Link href={forumHref(post.forum)} className="hover:opacity-80"><ForumLabel name={post.forum_name} /></Link>
-                  <span className="break-all" title={post.author}><span className="text-ink-soft">{shortAgentId(post.author)}</span> · <time dateTime={post.created_at}>{asked}</time></span>
-                  {post.is_open && <Unanswered />}
-                </p>
-                {Boolean(error) && <p role="status" className="mt-2 text-[13px] italic text-ink-soft">Couldn&apos;t refresh this post. Showing the last loaded version and retrying.</p>}
-              </header>
-              <section className="px-4 py-4 sm:px-5">
-                <SectionHeading>Description</SectionHeading>
-                <div className="mt-2">{post.description || post.body ? <Markdown text={post.description || post.body} /> : <p className="text-sm italic text-ink-soft">No details given.</p>}</div>
-              </section>
-              <section className="rounded-b-lg border-t border-rule bg-paper-deep/25 px-4 py-4 sm:px-5">
-                <SectionHeading>General solution</SectionHeading>
-                <div className="mt-2">{solution ? <Markdown text={solution} /> : <p className="text-sm italic text-ink-soft">No general solution yet. This question remains open.</p>}</div>
-              </section>
-            </article>
+            <div className="contents lg:flex lg:min-w-0 lg:flex-col lg:gap-5">
+              <article className={`${card} order-1 lg:order-none`}>
+                <header className="border-b border-rule px-4 py-4 sm:px-5">
+                  <p className={sidebarHeading}>Problem</p>
+                  <h1 className="mt-1.5 break-words text-[23px] font-bold leading-[1.2] tracking-tight sm:text-[26px]">{post.problem || post.headline}</h1>
+                  <p className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11.5px] text-faint">
+                    <Link href={forumHref(post.forum)} className="hover:opacity-80"><ForumLabel name={post.forum_name} /></Link>
+                    <span className="break-all" title={post.author}><span className="text-ink-soft">{shortAgentId(post.author)}</span> · <time dateTime={post.created_at}>{asked}</time></span>
+                    {post.is_open && <Unanswered />}
+                  </p>
+                  {Boolean(error) && <p role="status" className="mt-2 text-[13px] italic text-ink-soft">Couldn&apos;t refresh this post. Showing the last loaded version and retrying.</p>}
+                </header>
+                <section className="px-4 py-4 sm:px-5">
+                  <SectionHeading>Description</SectionHeading>
+                  <div className="mt-2">{post.description || post.body ? <Markdown text={post.description || post.body} /> : <p className="text-sm italic text-ink-soft">No details given.</p>}</div>
+                </section>
+                <section className="rounded-b-lg border-t border-rule bg-paper-deep/25 px-4 py-4 sm:px-5">
+                  <SectionHeading>General solution</SectionHeading>
+                  <div className="mt-2">{solution ? <Markdown text={solution} /> : <p className="text-sm italic text-ink-soft">No general solution yet. This question remains open.</p>}</div>
+                </section>
+              </article>
+              <div className="order-3 min-w-0 lg:order-none">
+                <AgentReplies postId={post.id} />
+              </div>
+            </div>
 
-            <aside aria-label="Post context" className={`${card} divide-y divide-rule lg:col-start-2 lg:row-start-1 lg:row-span-2`}>
+            <aside aria-label="Post context" className={`${card} order-2 divide-y divide-rule lg:order-none`}>
               <section className="p-4" aria-label="Agent activity">
                 <div className="mb-3 border-b border-rule pb-3">
                   <p className={`${sidebarHeading} mb-2`}>Usefulness rating</p>
@@ -107,9 +112,6 @@ function PostContent({ id }: { id: number }) {
               <RelatedQuestions postId={post.id} />
             </aside>
 
-            <div className="min-w-0 lg:col-start-1 lg:row-start-2">
-              <AgentReplies postId={post.id} />
-            </div>
           </main>
         )}
       </div>
