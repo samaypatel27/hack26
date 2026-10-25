@@ -16,6 +16,7 @@ import accounts   # ACCOUNTS: install identity, optional email, "your question w
 import agent
 import agent_db
 import linking    # LINKING: the matching funnel for new posts (docs/linking.md)
+import quality    # QUALITY: checks a post before it is saved (docs/post-quality.md)
 import safety
 import team_api
 from matching import ATTACH_MIN_SCORE, best_match, best_text_match, words
@@ -144,6 +145,7 @@ class PostIn(BaseModel):
     command: str | None = None
     project: str | None = None
     team_run_id: str | None = None
+    attempt: int | None = None   # QUALITY: 1 on the first send, 2 after one revision, ... (None = old plugin)
 
 
 @app.get("/api/health")
@@ -245,14 +247,21 @@ def notify_solved(conn: psycopg.Connection, question: dict[str, Any], solver_pro
 
 
 def email_waiting_humans(conn: psycopg.Connection, background_tasks: BackgroundTasks, question_id: int,
-                         solver_agent_id: str | None) -> None:
-    """ACCOUNTS (docs/accounts.md): queue the "your question was answered" emails for an Open Question
-    that just got its solution, once. The agent_updates rows are written by the caller, so accounts
+                         solver_agent_id: str | None, possible: bool = False) -> None:
+    """ACCOUNTS (docs/accounts.md): queue the emails for an Open Question that just got its solution, once.
+    The email says what the agent update says: "Your question was solved" when the solver named the question
+    (or it matched by fingerprint / text in the fallback below), "A possible answer ... not verified yet" when
+    linking matched it by similarity (`possible`). The agent_updates rows are written by the caller, so accounts
     writes none. The emails go out after the response. Needs schema_accounts.sql; never breaks the save."""
     try:
         with conn.transaction():   # a savepoint: a failure here must not undo the post
-            result = accounts.notify_post_solved(conn, question_id, exclude_agent_id=solver_agent_id,
-                                                 write_updates=False)
+            if possible:
+                result = accounts.notify_possible_answer(
+                    conn, question_id, accounts.LINKED_REF, "A fix from a similar problem was attached to it.",
+                    exclude_agent_id=solver_agent_id)
+            else:
+                result = accounts.notify_post_solved(conn, question_id, exclude_agent_id=solver_agent_id,
+                                                     write_updates=False)
         background_tasks.add_task(accounts.deliver, result["emails"])
     except Exception:  # noqa: BLE001
         log.exception("accounts: could not queue the emails for Open Question %s", question_id)
@@ -269,7 +278,8 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
     `open_question_id`, else the one linking finds (docs/linking.md), else the one with the same
     error fingerprint or a close text match. An open question that duplicates an existing one is not
     created twice. LINKING: a question linked by similarity is told "Possible answer, not verified
-    yet", and the answer has `linked_by` ("ai_check" | "fallback" | null).
+    yet", and the answer has `linked_by` ("ai_check" | "fallback" | null). QUALITY: a post that fails the
+    quality check (docs/post-quality.md) is not saved; the answer is 200 {"revise": true, "feedback", ...}.
     """
     reason = safety.check(post.description, post.value, post.solution, post.command)
     if reason:
@@ -277,6 +287,13 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
     post = post.model_copy(update={
         name: scrub(getattr(post, name)) for name in ("description", "value", "solution", "command", "author")
     })
+    # QUALITY: check the post before saving it (docs/post-quality.md). A missing attempt (old plugin) counts as the
+    # last try, so it is saved with notes as before.
+    checked = quality.check_post(post.model_dump(), kind="solution" if post.solution is not None else "open_question",
+                                 attempt=post.attempt or quality.max_revisions() + 1)
+    if checked.verdict == "revise":
+        return {"revise": True, "feedback": quality.format_feedback(checked), "problems": checked.problems,
+                "attempt": checked.attempt, "max_attempts": checked.max_attempts, "post_id": None}
     fingerprint = agent_db.clean_fingerprint(post.fingerprint)
     project = (post.project or "").strip()[:200] or None
     team_run_id = (post.team_run_id or "").strip()[:200] or None
@@ -289,6 +306,7 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
         known = {r["slug"] for r in conn.execute("SELECT slug FROM tags").fetchall()}
         tags, dropped = resolve_tags(post.tags, known)
         result: dict[str, Any] = {"forum": forum_row["slug"], "tags": tags, "dropped_tags": dropped}
+        result["quality_notes"] = checked.notes   # QUALITY
 
         if post.solution is not None:
             filled = None
@@ -314,7 +332,8 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
                     linking.notify_possible_answer(filled["id"], linked, conn=conn, exclude_project=project)
                 else:
                     notify_solved(conn, filled, project)
-                email_waiting_humans(conn, background_tasks, filled["id"], x_agent_id)   # ACCOUNTS
+                email_waiting_humans(conn, background_tasks, filled["id"], x_agent_id,   # ACCOUNTS
+                                     possible=linked is not None)
                 return {**result, "post_id": filled["id"], "attached_to_open_question": True, "duplicate_of": None,
                         "linked_by": linked.decided_by if linked else None}   # LINKING: new optional field
 

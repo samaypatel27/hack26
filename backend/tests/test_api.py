@@ -1,11 +1,16 @@
 """API tests with a fake connection: no database needed."""
 
+import contextlib
+import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+import accounts
 import main
+import quality
 
 ROW = {
     "id": 7,
@@ -279,3 +284,146 @@ def test_votes_are_rate_limited_per_ip():
     assert not main.allow_vote("1.2.3.4", now=100.0)
     assert main.allow_vote("5.6.7.8", now=100.0)
     assert main.allow_vote("1.2.3.4", now=100.0 + main.VOTE_WINDOW_S + 1)
+
+
+# ---- the quality check (docs/post-quality.md) -----------------------------------------------------
+
+GOOD_SOLVED = {
+    "description": (
+        "Prisma works locally but crashes in Docker with a missing query engine\n"
+        "I was running `docker compose up` for a Node API that uses Prisma. Locally it worked, but in the "
+        "container it failed at startup with:\n"
+        "PrismaClientInitializationError: Query engine library for current platform \"linux-musl\" could not be found.\n"
+        "I tried reinstalling @prisma/client inside the container: same error, because the generated engine was "
+        "still the one copied from my Mac. I also tried `prisma generate` locally before building: no change."
+    ),
+    "value": "The error blames Prisma, but the real cause is the Docker base image's OS, so reinstalling never helps.",
+    "solution": (
+        "Add `binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"]` to the generator block in schema.prisma "
+        "and run `prisma generate` inside the Dockerfile after `npm ci`. This works because Alpine uses musl, so "
+        "Prisma needs an engine built for that platform instead of the one generated on the host."
+    ),
+    "forum": "databases",
+    "tags": ["prisma"],   # one tag: a note, never a reason to revise
+}
+
+
+class FakeReviewer:
+    """Stands in for anthropic.Anthropic in quality.py: a canned review, and a record of the calls."""
+
+    def __init__(self, answer):
+        self.calls = []
+        self.messages = SimpleNamespace(create=self._create)
+        self.answer = answer
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=json.dumps(self.answer))],
+                               usage=SimpleNamespace(input_tokens=100, output_tokens=20))
+
+
+@pytest.fixture
+def rules_only(monkeypatch):
+    monkeypatch.setenv("QUALITY_AI", "0")
+    monkeypatch.delenv("QUALITY_MAX_ATTEMPTS", raising=False)
+
+
+def test_weak_post_on_the_first_try_is_sent_back_and_not_saved(fake, rules_only):
+    conn = fake()
+    r = client.post("/api/posts", json={**NEW_SOLVED, "attempt": 1}, headers=AUTH)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["revise"] is True and data["post_id"] is None
+    assert data["feedback"].startswith("REVISE:") and "attempt=2" in data["feedback"]
+    assert data["problems"] and data["attempt"] == 1 and data["max_attempts"] == 3
+    assert conn.calls == []   # nothing was read or written
+
+
+def test_the_ai_review_can_send_a_post_back(fake, monkeypatch):
+    monkeypatch.delenv("QUALITY_AI", raising=False)
+    monkeypatch.delenv("QUALITY_MAX_ATTEMPTS", raising=False)
+    reviewer = FakeReviewer({"verdict": "revise", "problems": ["Explain the general lesson."],
+                             "scores": {"completeness": 0.7, "cause_and_fix": 0.6, "generality": 0.2, "clarity": 0.8}})
+    monkeypatch.setattr(quality, "make_client", lambda: reviewer)   # never the real API
+    conn = fake()
+    data = client.post("/api/posts", json={**GOOD_SOLVED, "attempt": 1}, headers=AUTH).json()
+    assert data["revise"] is True and "Explain the general lesson." in data["feedback"]
+    assert len(reviewer.calls) == 1 and conn.calls == []
+
+
+def test_good_post_is_saved_with_quality_notes(fake, rules_only):
+    conn = fake([{"id": 3, "slug": "databases"}], KNOWN_TAGS, [], [{"id": 99}], [])
+    data = client.post("/api/posts", json={**GOOD_SOLVED, "attempt": 1}, headers=AUTH).json()
+    assert data["post_id"] == 99 and not data.get("revise")
+    assert data["quality_notes"] and any("tag" in n.lower() for n in data["quality_notes"])
+    assert any("INSERT INTO posts" in sql for sql, _ in conn.calls)
+
+
+def test_post_without_attempt_is_still_saved_with_notes(fake, rules_only):
+    """Old plugins send no `attempt`: it counts as the last try, so even a weak post is saved, as before."""
+    conn = fake([{"id": 3, "slug": "databases"}], KNOWN_TAGS, [], [{"id": 99}], [])
+    data = client.post("/api/posts", json=NEW_SOLVED, headers=AUTH).json()
+    assert data["post_id"] == 99 and not data.get("revise")
+    assert data["quality_notes"]   # the problems it still has, as notes
+    assert any("INSERT INTO posts" in sql for sql, _ in conn.calls)
+
+
+# ---- who hears "solved" and who hears "possible answer" -------------------------------------------
+
+class TxConn(FakeConn):
+    def transaction(self):
+        return contextlib.nullcontext()
+
+
+@pytest.fixture
+def notices(monkeypatch):
+    """Record which accounts notice (email) create_post queues, and the linking agent update."""
+    seen = []
+    monkeypatch.setattr(main.accounts, "notify_post_solved",
+                        lambda conn, post_id, **kw: seen.append(("solved", post_id)) or {"emails": []})
+    monkeypatch.setattr(main.accounts, "notify_possible_answer",
+                        lambda conn, post_id, ref, detail, **kw: seen.append(("possible", post_id, ref)) or {"emails": []})
+    monkeypatch.setattr(main.linking, "notify_possible_answer",
+                        lambda question_id, match, **kw: seen.append(("update: possible", question_id)) or 1)
+    monkeypatch.setenv("QUALITY_AI", "0")
+    return seen
+
+
+def test_named_open_question_gets_the_solved_email(fake, monkeypatch, notices):
+    conn = TxConn([[{"id": 3, "slug": "databases"}], KNOWN_TAGS, [{"id": 41, "description": "Q"}]])
+    monkeypatch.setattr(main, "connect", lambda: conn)
+    r = client.post("/api/posts", json={**NEW_SOLVED, "open_question_id": 41}, headers=AUTH).json()
+    assert r["attached_to_open_question"] is True and r["linked_by"] is None
+    assert notices == [("solved", 41)]
+
+
+def test_question_linked_by_similarity_gets_the_possible_answer_email(fake, monkeypatch, notices):
+    conn = TxConn([[{"id": 3, "slug": "databases"}], KNOWN_TAGS, [{"id": 41, "description": "Q"}]])
+    monkeypatch.setattr(main, "connect", lambda: conn)
+    monkeypatch.setattr(main.linking, "link_new_solution",
+                        lambda post, conn=None, rejected=None: SimpleNamespace(id=41, decided_by="ai_check"))
+    r = client.post("/api/posts", json=NEW_SOLVED, headers=AUTH).json()
+    assert r["attached_to_open_question"] is True and r["linked_by"] == "ai_check"
+    assert notices == [("update: possible", 41), ("possible", 41, accounts.LINKED_REF)]
+
+
+def test_possible_answer_email_says_not_verified_yet(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(accounts, "tables_ready", lambda conn: True)
+    monkeypatch.setattr(accounts, "_post", lambda conn, post_id: {"id": post_id, "description": "Prisma on Alpine"})
+    monkeypatch.setattr(accounts, "notify_watchers", lambda conn, post_id, kind, update, subject, text, **kw:
+                        sent.update(kind=kind, subject=subject, text=text, ref=kw.get("ref")) or {"emails": []})
+    accounts.notify_possible_answer(object(), 41, accounts.LINKED_REF, "A fix from a similar problem was attached to it.")
+    assert sent["kind"] == "possible_answer" and sent["ref"] == "link"
+    assert "A possible answer was posted for the question" in sent["text"]
+    assert "hasn't been verified yet" in sent["text"] and "/posts/41" in sent["text"]
+    assert "possible answer" in sent["subject"].lower()
+
+
+def test_solved_announce_after_a_similarity_link_sends_nothing(monkeypatch):
+    """The plugin may still call POST /api/accounts/solved after a linked attach: no "solved" email then."""
+    monkeypatch.setattr(accounts, "tables_ready", lambda conn: True)
+    monkeypatch.setattr(accounts, "_post", lambda conn, post_id: {"id": post_id, "description": "Q", "solution": "fix"})
+    conn = FakeConn([[{"?column?": 1}]])   # the possible-answer notice for this post exists
+    assert accounts.notify_post_solved(conn, 41)["status"] == "possible_answer"
+    assert "accounts_notices" in conn.calls[0][0] and conn.calls[0][1] == (41, accounts.LINKED_REF)
