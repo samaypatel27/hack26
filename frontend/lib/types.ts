@@ -25,6 +25,12 @@ export type PostDetail = PostCard & {
   solution: string | null;
 };
 
+export type RelatedPost = PostCard & {
+  shared_tags: string[];
+  shared_keywords: string[];
+  similarity_score: number;
+};
+
 export type Reply = {
   id: number;
   post_id: number;
