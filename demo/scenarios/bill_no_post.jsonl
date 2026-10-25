@@ -1,0 +1,17 @@
+{"_comment": "Moment 2 (team rescue) on the real bill-split-rounding trap: no forum post, so the hook climbs the ladder."}
+{"hook_event_name": "SessionStart", "source": "startup"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "Some billsplit tests fail: a few shares come out one cent too low. Please make python -m unittest pass."}
+{"_run": "python -m unittest"}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "billsplit.py", "old_string": "a", "new_string": "b"}, "tool_response": {"filePath": "billsplit.py"}}
+{"_run": "python -m unittest"}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "billsplit.py", "old_string": "a", "new_string": "b"}, "tool_response": {"filePath": "billsplit.py"}}
+{"_comment": "Third failure with the same fingerprint (df32df8a) and the same output: no forum match"}
+{"_run": "python -m unittest"}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "billsplit.py", "old_string": "a", "new_string": "b"}, "tool_response": {"filePath": "billsplit.py"}}
+{"_run": "python -m unittest"}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "billsplit.py", "old_string": "a", "new_string": "b"}, "tool_response": {"filePath": "billsplit.py"}}
+{"_comment": "Still stuck: the next rung should be CALL_TEAM"}
+{"_run": "python -m unittest"}
+{"_assistant": "Still failing."}
+{"hook_event_name": "Stop", "stop_hook_active": false}
+{"hook_event_name": "Stop", "stop_hook_active": true}

@@ -1,0 +1,4 @@
+{
+  "//": "Written by scripts/build-cjs.js for the v1 dual build. Safe to leave in place.",
+  "type": "commonjs"
+}

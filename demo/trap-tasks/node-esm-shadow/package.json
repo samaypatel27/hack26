@@ -1,0 +1,14 @@
+{
+  "name": "slugkit",
+  "version": "2.0.0",
+  "description": "Tiny helpers for URL slugs and page titles.",
+  "type": "module",
+  "exports": "./src/index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

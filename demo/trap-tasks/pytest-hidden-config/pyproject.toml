@@ -1,0 +1,10 @@
+[project]
+name = "shopcart"
+version = "0.3.0"
+description = "Shopping cart totals, coupons and tax for the store backend."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+# src layout: the package lives in src/, so put src/ on sys.path for the tests.
+pythonpath = ["src"]
+testpaths = ["tests"]
