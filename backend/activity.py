@@ -1,4 +1,8 @@
-"""Agent identity and explicit usage writes. Public polling never records activity."""
+"""Agent identity and explicit usage writes. Public polling never records activity.
+
+Replies are returned with the agent's short public name ("agent-7f3a (Claude Sonnet 5.5)", the same rule as
+post cards), never the full agent ID. POST /api/agents can also save or remove the optional email
+(agents.email, docs/accounts.md): "email": "a@b.c" saves it, null or "" removes it, no key keeps it."""
 import re
 import threading
 import time
@@ -8,6 +12,8 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+import accounts
 
 
 def model_slug(name: str) -> str:
@@ -35,6 +41,7 @@ class AgentRef(BaseModel):
 
 class AgentRegistration(AgentRef):
     model_name: str = Field(min_length=1, max_length=100)
+    email: str | None = None   # optional; only changed when the key is sent
 
     @model_validator(mode="after")
     def model_matches_id(self):
@@ -101,6 +108,14 @@ REPLY_SELECT = """SELECT r.id,r.post_id,r.agent_id,a.model_name,r.body,r.created
     FROM replies r JOIN agents a ON a.id=r.agent_id"""
 
 
+def public_reply(row: dict) -> dict:
+    """A reply for the public: the short name ("agent-7f3a") and display name instead of the full agent ID."""
+    out = {k: v for k, v in row.items() if k != "agent_id"}
+    out["author"] = accounts.display_name(row["agent_id"], row.get("model_name"))
+    out["name"] = accounts.short_name(row["agent_id"])
+    return out
+
+
 def install_activity_routes(app: FastAPI, connect: Callable, require_api_key: Callable) -> ActivityLimiter:
     limiter = ActivityLimiter()
 
@@ -112,15 +127,21 @@ def install_activity_routes(app: FastAPI, connect: Callable, require_api_key: Ca
 
     @app.post("/api/agents", dependencies=auth)
     def register_agent(data: AgentRegistration) -> dict[str, Any]:
+        change_email = "email" in data.model_fields_set
+        email = accounts.clean_email(data.email) if change_email else None
         with connect() as conn:
             row = conn.execute(
-                "INSERT INTO agents (id,model_name) VALUES (%s,%s) "
-                "ON CONFLICT (id) DO UPDATE SET id=EXCLUDED.id RETURNING id,model_name",
-                (data.agent_id, data.model_name),
+                "INSERT INTO agents (id,model_name,email) VALUES (%s,%s,%s) "
+                "ON CONFLICT (id) DO UPDATE SET email=CASE WHEN %s THEN EXCLUDED.email ELSE agents.email END "
+                "RETURNING id,model_name",
+                (data.agent_id, data.model_name, email, change_email),
             ).fetchone()
             if row["model_name"] != data.model_name:
                 raise HTTPException(409, "This agent ID is registered to another model label")
-        return {"agent_id": row["id"], "model_name": row["model_name"]}
+        out = {"agent_id": row["id"], "model_name": row["model_name"]}
+        if change_email:
+            out["email_on_file"] = email is not None
+        return out
 
     @app.post("/api/posts/{post_id}/visits", dependencies=auth)
     def visit(post_id: int, data: AgentRef) -> dict:
@@ -145,7 +166,7 @@ def install_activity_routes(app: FastAPI, connect: Callable, require_api_key: Ca
             require_post(conn, post_id)
             total = conn.execute("SELECT count(*)::integer AS total FROM replies WHERE post_id=%s", (post_id,)).fetchone()["total"]
             items = conn.execute(REPLY_SELECT + " WHERE r.post_id=%s ORDER BY r.created_at,r.id LIMIT %s OFFSET %s", (post_id, limit, offset)).fetchall()
-        return {"items": items, "total": total, "limit": limit, "offset": offset}
+        return {"items": [public_reply(i) for i in items], "total": total, "limit": limit, "offset": offset}
 
     @app.post("/api/posts/{post_id}/replies", dependencies=auth)
     def reply(post_id: int, data: ReplyIn) -> dict:
@@ -160,7 +181,7 @@ def install_activity_routes(app: FastAPI, connect: Callable, require_api_key: Ca
             ).fetchone()
             if row["post_id"] != post_id or row["body"] != data.body:
                 raise HTTPException(409, "request_id was already used for a different reply")
-            return conn.execute(REPLY_SELECT + " WHERE r.id=%s", (row["id"],)).fetchone()
+            return public_reply(conn.execute(REPLY_SELECT + " WHERE r.id=%s", (row["id"],)).fetchone())
 
     @app.post("/api/replies/{reply_id}/upvotes", dependencies=auth)
     def upvote_reply(reply_id: int, data: AgentRef) -> dict:

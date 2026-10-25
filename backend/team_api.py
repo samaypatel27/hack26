@@ -186,42 +186,29 @@ def _load_open_questions(ids: list[int] | str, limit: int) -> list[dict[str, Any
 
 
 def _notify_possible_answer(open_question_id: int, run_id: str, result: dict[str, Any]) -> None:
-    """Tell the Open Question's owner (GET /api/updates) that a re-run found a possible answer. Never raises."""
+    """Tell the people waiting on the Open Question (its asker and the agents that visited it) by email that
+    a re-run found a possible answer, not verified yet. Never raises. A run finishes once, so each run
+    sends its emails once."""
     top = (result.get("hypotheses") or [{}])[0]
     models = result.get("models") or {}
-    message = (f"A cold-case re-run ({models.get('chair') or models.get('docs')}) found a possible answer for your "
-               f"Open Question #{open_question_id}, not verified yet: {top.get('cause', '')[:200]} "
-               f"(team run {run_id}; call check_help with that id for the steps, try them, and post the fix if it works).")
+    cause = top.get("cause", "")[:300]
+    message = (f"A cold-case re-run ({models.get('chair') or models.get('docs')}) found a possible answer for "
+               f"Open Question #{open_question_id}, not verified yet: {cause[:200]} (team run {run_id}; call "
+               f"check_help with that id for the steps, try them, and post the fix if it works).")
     try:
         if STATE.notify_fn is not None:
             STATE.notify_fn(open_question_id, message)
             return
         if not os.environ.get("DATABASE_URL"):
             return
-        import agent_db
-
-        with agent_db.connect() as conn:
-            for project in agent_db.watchers(conn, open_question_id):
-                agent_db.add_update(conn, project, message, open_question_id)
-    except Exception:  # noqa: BLE001
-        log.exception("could not queue the possible-answer update for Open Question %s", open_question_id)
-        return
-    _email_possible_answer(open_question_id, run_id, top.get("cause", "")[:300])
-
-
-def _email_possible_answer(open_question_id: int, run_id: str, cause: str) -> None:
-    """ACCOUNTS (docs/accounts.md): email the humans waiting on the Open Question, once per team run.
-    The agent_updates rows were written above, so accounts writes none. Needs schema_accounts.sql;
-    without it nothing is sent. Never raises."""
-    try:
         import accounts
         import agent_db
 
         detail = (f"A cold-case re-run of the specialist team suggests: {cause or 'see the team report'} "
                   f"(team run {run_id}).")
         with agent_db.connect() as conn:
-            result = accounts.notify_possible_answer(conn, open_question_id, run_id, detail, write_updates=False)
-        accounts.deliver(result["emails"])   # after the commit; this already runs in the team's thread pool
+            emails = accounts.solved_emails(conn, open_question_id, possible=True, detail=detail, ref=run_id)
+        accounts.deliver(emails)   # after the commit; this already runs in the team's thread pool
     except Exception:  # noqa: BLE001
         log.exception("could not email the possible answer for Open Question %s", open_question_id)
 
@@ -262,8 +249,8 @@ def rerun(raw: Any = Body(default=None)) -> dict[str, Any]:
         "skipped": skipped,
         "models": config.models_for(overrides),
         "note": ("Each finished run is a 'Possible answer', not 'Solved (verified)': the server can't run the "
-                 "reproduction. The owner is told through GET /api/updates; their agent tries the fix, and the "
-                 "hook records the outcome."),
+                 "reproduction. The asker and the agents that visited the question get an email (if they gave "
+                 "one); their agent tries the fix, and the hook records the outcome."),
     }
 
 

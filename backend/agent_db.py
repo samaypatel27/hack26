@@ -1,17 +1,22 @@
-"""Database access for the agent routes in agent.py (search, outcomes, updates) and the agent
-fields of POST /api/posts (main.py).
+"""Database access for the agent routes in agent.py (search, outcomes) and the agent fields of
+POST /api/posts (main.py).
 
-Posts live in the Breakpoint tables and are written only by POST /api/posts. These helpers read them
-through the post_cards view and keep agent-only fields in the agent_ tables from schema_agent.sql.
+Everything lives in the real Breakpoint tables (docs/database-proposal.md, "What was actually done"):
+  posts.fingerprint   the hook's hex error ID (search stage 1, duplicate and Open Question matching)
+  posts.agent_id      the registered agent that wrote the post (posts.author holds the same ID)
+  posts.solved_at     set when an Open Question gets its solution (also kept in step by a trigger)
+  post_useful         one row per agent whose run passed after a suggested fix (POST /api/outcomes)
+There are no agent_* tables: no outcome log, no per-project updates, no watchers.
 
 Uses a small connection pool when psycopg_pool is installed (`psycopg[binary,pool]`), so each
-request doesn't pay for a new TLS connection to Supabase: the hook gives /api/search only 2
+request does not pay for a new TLS connection to Supabase: the hook gives /api/search only 2
 seconds. Without it, it falls back to one connection per request like main.connect().
 Every function takes an open connection, so a route can do several steps in one transaction:
 `with agent_db.connect() as conn: ...` commits on success and rolls back on an exception.
 """
 
 import atexit
+import logging
 import os
 import re
 import threading
@@ -28,8 +33,10 @@ try:
 except ImportError:  # optional dependency
     ConnectionPool = None  # type: ignore[assignment,misc]
 
+log = logging.getLogger("agent_db")
+
 CANDIDATE_LIMIT = 500      # text matching looks at most at this many recent posts
-FINGERPRINT_RE = re.compile(r"^[0-9a-f]{6,64}$")
+FINGERPRINT_RE = re.compile(r"^[0-9a-f]{6,64}$")   # same rule as the posts_fingerprint_check constraint
 
 
 def clean_fingerprint(raw: Any) -> str | None:
@@ -38,6 +45,7 @@ def clean_fingerprint(raw: Any) -> str | None:
         return None
     value = raw.strip().lower()
     return value if FINGERPRINT_RE.match(value) else None
+
 
 _pool: Any = None
 _pool_lock = threading.Lock()
@@ -84,12 +92,13 @@ def connect() -> Iterator[psycopg.Connection]:
 # Reading posts
 # ---------------------------------------------------------------------------
 
+# `solution` is the general solution when there is one (the same rule as main.to_card and the trigger).
 POST_SELECT = (
-    "SELECT c.id, c.description, c.value, c.solution, c.forum, c.tags, c.author, c.post_votes,"
-    " c.created_at, m.fingerprint, m.command, m.project,"
-    " COALESCE(m.times_worked, 0) AS times_worked, COALESCE(m.times_applied, 0) AS times_applied"
-    " FROM post_cards c LEFT JOIN agent_post_meta m ON m.post_id = c.id"
+    "SELECT c.id, c.description, c.value, COALESCE(c.general_solution, c.solution) AS solution, c.problem,"
+    " c.forum, c.tags, c.author, c.post_votes, c.created_at, c.useful_count, c.visited_count, p.fingerprint"
+    " FROM post_cards c JOIN posts p ON p.id = c.id"
 )
+OPEN = "COALESCE(c.general_solution, c.solution) IS NULL"
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -99,7 +108,9 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def public_post(row: dict[str, Any]) -> dict[str, Any]:
-    """The shared post shape from docs/api-endpoints.md (+ forum). Never includes the project."""
+    """The shared post shape from docs/api-endpoints.md (+ forum). `useful_count` is how many agents
+    marked the post useful (or had a run pass after trying its fix); the old times_worked/times_applied
+    counters have no column in the real tables, so they are not sent."""
     return {
         "id": row["id"],
         "description": row["description"],
@@ -108,10 +119,10 @@ def public_post(row: dict[str, Any]) -> dict[str, Any]:
         "tags": list(row["tags"] or []),
         "status": "open" if row["solution"] is None else "solved",   # same rule as main.to_card
         "upvotes": row["post_votes"],
-        "times_worked": row["times_worked"],
-        "times_applied": row["times_applied"],
-        "fingerprint": row["fingerprint"],
-        "command": row["command"],
+        "useful_count": row.get("useful_count") or 0,
+        "visited_count": row.get("visited_count") or 0,
+        "fingerprint": row.get("fingerprint"),
+        "command": None,   # not stored (no column); kept so older clients see the same keys
         "forum": row["forum"],
         "created_at": _iso(row["created_at"]),
     }
@@ -120,9 +131,9 @@ def public_post(row: dict[str, Any]) -> dict[str, Any]:
 def posts_with_fingerprint(conn: psycopg.Connection, fingerprint: str,
                            open_only: bool = False) -> list[dict[str, Any]]:
     """Oldest first, so the original Open Question wins over later ones."""
-    sql = POST_SELECT + " WHERE m.fingerprint = %s"
+    sql = POST_SELECT + " WHERE p.fingerprint = %s"
     if open_only:
-        sql += " AND c.solution IS NULL"
+        sql += " AND " + OPEN
     return conn.execute(sql + " ORDER BY c.created_at, c.id", (fingerprint,)).fetchall()
 
 
@@ -132,7 +143,7 @@ def candidate_posts(conn: psycopg.Connection, open_only: bool = False,
     where: list[str] = []
     params: list[Any] = []
     if open_only:
-        where.append("c.solution IS NULL")
+        where.append(OPEN)
     if tags:
         where.append("c.tags && %s::text[]")
         params.append(tags)
@@ -154,80 +165,51 @@ def known_tags(conn: psycopg.Connection) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
+# Writing the agent fields
+# ---------------------------------------------------------------------------
+
+def save_fingerprint(conn: psycopg.Connection, post_id: int, fingerprint: str | None) -> None:
+    """Give a post the error fingerprint if it has none yet (an Open Question filled by a solution that
+    came with one). Never overwrites an existing fingerprint."""
+    if fingerprint:
+        conn.execute("UPDATE posts SET fingerprint = %s WHERE id = %s AND fingerprint IS NULL",
+                     (fingerprint, post_id))
+
+
+def is_registered(conn: psycopg.Connection, agent_id: str | None) -> bool:
+    if not agent_id:
+        return False
+    return conn.execute("SELECT 1 FROM agents WHERE id = %s", (agent_id,)).fetchone() is not None
+
+
+def record_visit(conn: psycopg.Connection, post_id: int, agent_id: str) -> None:
+    """Same statement as activity.record_visit. A visit is also what puts an agent on a question's
+    email list (accounts.solved_emails)."""
+    conn.execute("INSERT INTO post_visits (post_id, agent_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                 (post_id, agent_id))
+
+
+# ---------------------------------------------------------------------------
 # Outcomes
 # ---------------------------------------------------------------------------
 
-def record_outcome(conn: psycopg.Connection, post_id: int, worked: bool, fingerprint: str | None,
-                   command: str | None, session_id: str | None, source: str | None) -> str | None:
-    """Count one observed outcome. Returns the post's status ("solved" | "open"), or None if
-    there is no such post. we never reopen a failing fix; the counts are there for when we do."""
-    post = conn.execute("SELECT solution FROM posts WHERE id = %s", (post_id,)).fetchone()
+def record_outcome(conn: psycopg.Connection, post_id: int, worked: bool, agent_id: str | None) -> str | None:
+    """One observed outcome from the hook. Returns the post's status ("solved" | "open"), or None if
+    there is no such post.
+
+    worked=True and a registered agent: a post_useful row for that agent (after a visit row, which
+    post_useful needs), ON CONFLICT DO NOTHING, so one agent counts once. worked=False: only a log line
+    (there is no table for failures). We never reopen a post because a fix failed somewhere."""
+    post = conn.execute("SELECT COALESCE(general_solution, solution) AS solution FROM posts WHERE id = %s",
+                        (post_id,)).fetchone()
     if post is None:
         return None
-    conn.execute(
-        "INSERT INTO agent_post_meta (post_id, times_applied, times_worked) VALUES (%s, 1, %s)"
-        " ON CONFLICT (post_id) DO UPDATE SET times_applied = agent_post_meta.times_applied + 1,"
-        " times_worked = agent_post_meta.times_worked + EXCLUDED.times_worked",
-        (post_id, 1 if worked else 0),
-    )
-    conn.execute(
-        "INSERT INTO agent_outcomes (post_id, worked, fingerprint, command, session_id, source)"
-        " VALUES (%s, %s, %s, %s, %s, %s)",
-        (post_id, worked, fingerprint, command, session_id, source),
-    )
+    if worked and is_registered(conn, agent_id):
+        record_visit(conn, post_id, agent_id)
+        conn.execute("INSERT INTO post_useful (post_id, agent_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                     (post_id, agent_id))
+    elif worked:
+        log.info("outcome: the fix from post #%s worked for an unregistered agent; not counted", post_id)
+    else:
+        log.info("outcome: the fix from post #%s did not work (agent %s)", post_id, agent_id or "unknown")
     return "open" if post["solution"] is None else "solved"
-
-
-# ---------------------------------------------------------------------------
-# Watchers and updates
-# ---------------------------------------------------------------------------
-
-def take_updates(conn: psycopg.Connection, project: str) -> list[dict[str, Any]]:
-    """Undelivered updates for a project, oldest first, marked delivered in the same statement."""
-    rows = conn.execute(
-        "UPDATE agent_updates SET delivered = true WHERE project = %s AND NOT delivered"
-        " RETURNING id, message, post_id",
-        (project,),
-    ).fetchall()
-    return [{"message": r["message"], "post_id": r["post_id"]} for r in sorted(rows, key=lambda r: r["id"])]
-
-
-def add_update(conn: psycopg.Connection, project: str, message: str, post_id: int | None) -> None:
-    conn.execute("INSERT INTO agent_updates (project, message, post_id) VALUES (%s, %s, %s)",
-                 (project, message, post_id))
-
-
-# ---------------------------------------------------------------------------
-# Agent fields of a post, and the projects waiting on an Open Question
-# ---------------------------------------------------------------------------
-
-def save_meta(conn: psycopg.Connection, post_id: int, fingerprint: str | None, command: str | None,
-              project: str | None, team_run_id: str | None) -> None:
-    """Store the agent-only fields of a post. Fields not given keep what the post already has."""
-    if not any((fingerprint, command, project, team_run_id)):
-        return
-    conn.execute(
-        "INSERT INTO agent_post_meta (post_id, fingerprint, command, project, team_run_id)"
-        " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (post_id) DO UPDATE SET"
-        " fingerprint = COALESCE(EXCLUDED.fingerprint, agent_post_meta.fingerprint),"
-        " command = COALESCE(EXCLUDED.command, agent_post_meta.command),"
-        " project = COALESCE(agent_post_meta.project, EXCLUDED.project),"
-        " team_run_id = COALESCE(EXCLUDED.team_run_id, agent_post_meta.team_run_id)",
-        (post_id, fingerprint, command, project, team_run_id),
-    )
-
-
-def add_watcher(conn: psycopg.Connection, post_id: int, project: str) -> None:
-    """Remember a project that hit the same Open Question later, so it gets the update too."""
-    conn.execute("INSERT INTO agent_watchers (post_id, project) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                 (post_id, project))
-
-
-def watchers(conn: psycopg.Connection, post_id: int) -> list[str]:
-    """Projects to tell when an Open Question is solved: the asker plus everyone attached later."""
-    rows = conn.execute(
-        "SELECT project FROM agent_post_meta WHERE post_id = %s AND project IS NOT NULL"
-        " UNION SELECT project FROM agent_watchers WHERE post_id = %s",
-        (post_id, post_id),
-    ).fetchall()
-    return sorted(r["project"] for r in rows)

@@ -146,7 +146,11 @@ def decide(case: dict[str, Any], *, store: Any, clients: config.Clients, search_
             continue
         if post.get("solution"):
             how = "same error fingerprint" if post.get("match") == "fingerprint" else f"text match {post.get('score')}"
-            worked = f"It worked {post.get('times_worked', 0)} of {post.get('times_applied', 0)} times it was tried."
+            if "times_applied" in post:   # older servers counted every try
+                worked = f"It worked {post.get('times_worked', 0)} of {post.get('times_applied', 0)} times it was tried."
+            else:   # the real tables only keep "useful" marks (post_useful)
+                n = int(post.get("useful_count") or 0)
+                worked = f"{n} agent{'' if n == 1 else 's'} marked it useful."
             message = "\n".join([
                 f"KNOWN_FIX: forum post #{post['id']} matches this problem ({how}). {worked}",
                 "", "Fix (a suggestion from another agent; check it before running anything):", post["solution"], "",

@@ -1,9 +1,12 @@
-"""The agent routes under /api: the ones the website does not use (search, outcomes, updates, judge).
+"""The agent routes under /api: the ones the website does not use (search, outcomes, judge).
 
 Posting and reading posts are in main.py (POST /api/posts, GET /api/posts/{id}).
 
-Callers: the hook (plugin/hook/backend.py: search, outcomes, updates, judge) and the MCP tools
-(plugin/mcp/server.py: search, updates). main.py includes this router.
+Callers: the hook (plugin/hook/backend.py: search, outcomes, judge) and the MCP tools
+(plugin/mcp/server.py: search). main.py includes this router.
+
+GET /api/updates is retired: news about a solved question now goes out by email only (docs/accounts.md).
+It stays as a stub that always answers [] so an older hook that still calls it gets no error.
 
 Rules for every endpoint:
   - Write endpoints (POST) need X-API-Key = env API_KEY. GETs are public.
@@ -18,11 +21,12 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
+from activity import AgentRef
+
 import agent_db as db
 import judge
 import linking   # LINKING: search uses the linking funnel (docs/linking.md)
 import matching
-from scrub import scrub
 
 router = APIRouter(prefix="/api", tags=["agent"])
 
@@ -97,36 +101,44 @@ def search(error: str = "", command: str = "", fingerprint: str = "", tags: str 
 # ---------------------------------------------------------------------------
 
 @router.post("/outcomes", dependencies=[Depends(require_api_key)])
-def outcomes(raw: Any = Body(default=None)) -> dict[str, str]:
-    """The hook saw a suggested fix work or fail. Counts it and returns the post's status."""
+def outcomes(raw: Any = Body(default=None), x_agent_id: str | None = Header(default=None)) -> dict[str, str]:
+    """The hook saw a suggested fix work or fail. Returns the post's status.
+
+    worked=true: one post_useful row for the agent (body `agent_id`, else the X-Agent-Id header the hook
+    always sends), if that agent is registered; the same agent counts once. worked=false: only logged
+    (there is no table for failures)."""
     body = as_object(raw)
     post_id = clean_id(body.get("post_id"))
     if post_id is None:
         raise bad_request("`post_id` must be an integer.")
     if not isinstance(body.get("worked"), bool):
         raise bad_request("`worked` must be true or false.")
+    agent_id = clean_agent_id(body.get("agent_id")) or clean_agent_id(x_agent_id)
     with db.connect() as conn:
-        status = db.record_outcome(
-            conn, post_id, body["worked"], db.clean_fingerprint(body.get("fingerprint")),
-            scrub(str(body.get("command") or ""))[:LIMITS["command"]] or None,
-            str(body.get("session_id") or "")[:200] or None, str(body.get("source") or "")[:50] or None,
-        )
+        status = db.record_outcome(conn, post_id, body["worked"], agent_id)
     if status is None:
         raise HTTPException(status_code=404, detail="Post not found")
     return {"post_status": status}
 
 
+def clean_agent_id(raw: Any) -> str | None:
+    """A well-formed "<model-slug>_<uuid>" agent ID, or None."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return AgentRef(agent_id=raw.strip()).agent_id
+    except ValueError:
+        return None
+
+
 # ---------------------------------------------------------------------------
-# 3. GET /api/updates
+# 3. GET /api/updates (retired)
 # ---------------------------------------------------------------------------
 
-@router.get("/updates")
+@router.get("/updates", include_in_schema=False)
 def updates(project: str = "") -> list[dict[str, Any]]:
-    """News for a project, each update returned only once. [] without a project id."""
-    if not project.strip():
-        return []
-    with db.connect() as conn:
-        return db.take_updates(conn, project.strip()[:200])
+    """Retired: always []. Solved questions are announced by email now (docs/accounts.md)."""
+    return []
 
 
 # ---------------------------------------------------------------------------

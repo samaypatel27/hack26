@@ -2,7 +2,6 @@ fastapi
 uvicorn
 anthropic
 python-dotenv
-psycopg[binary]
 psycopg[binary,pool]
 pytest
 openai
