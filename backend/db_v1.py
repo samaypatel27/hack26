@@ -1,8 +1,7 @@
-"""Database access for the /v1 API.
+"""Database access for the /v1 API (search, outcomes, updates).
 
-Agent posts live in the Breakpoint tables (posts, post_tags, read through the post_cards view),
-written with the same statements as POST /api/posts in main.py, so they appear on the website.
-Agent-only fields live in the v1_ tables from schema_v1.sql.
+Posts live in the Breakpoint tables and are written only by /api (main.py). /v1 reads them through
+the post_cards view and keeps agent-only fields in the v1_ tables from schema_v1.sql.
 
 Uses a small connection pool when psycopg_pool is installed (`psycopg[binary,pool]`), so each
 request doesn't pay for a new TLS connection to Supabase: the hook gives /v1/search only 2
@@ -28,8 +27,6 @@ except ImportError:  # optional dependency
     ConnectionPool = None  # type: ignore[assignment,misc]
 
 CANDIDATE_LIMIT = 500      # text matching looks at most at this many recent posts
-MAX_TAGS = 4               # same as main.MAX_TAGS
-FALLBACK_FORUM = "general" # same as main.FALLBACK_FORUM
 
 _pool: Any = None
 _pool_lock = threading.Lock()
@@ -109,15 +106,6 @@ def public_post(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_post(conn: psycopg.Connection, post_id: int) -> dict[str, Any] | None:
-    return conn.execute(POST_SELECT + " WHERE c.id = %s", (post_id,)).fetchone()
-
-
-def lock_post(conn: psycopg.Connection, post_id: int) -> bool:
-    """Lock a post row for this transaction. False if it doesn't exist."""
-    return conn.execute("SELECT id FROM posts WHERE id = %s FOR UPDATE", (post_id,)).fetchone() is not None
-
-
 def posts_with_fingerprint(conn: psycopg.Connection, fingerprint: str,
                            open_only: bool = False) -> list[dict[str, Any]]:
     """Oldest first, so the original Open Question wins over later ones."""
@@ -143,103 +131,8 @@ def candidate_posts(conn: psycopg.Connection, open_only: bool = False,
     return conn.execute(sql, params).fetchall()
 
 
-def list_posts(conn: psycopg.Connection, status: str | None, q: str | None, limit: int) -> list[dict[str, Any]]:
-    """Newest first. Same filters as GET /api/posts: status by solution, q over text, tags and forum."""
-    where: list[str] = []
-    params: list[Any] = []
-    if status == "solved":
-        where.append("c.solution IS NOT NULL")
-    elif status == "open":
-        where.append("c.solution IS NULL")
-    if q:
-        where.append("(c.description ILIKE %s OR c.value ILIKE %s OR c.solution ILIKE %s"
-                     " OR array_to_string(c.tags, ' ') ILIKE %s OR c.forum ILIKE %s)")
-        params += [f"%{q}%"] * 5
-    sql = POST_SELECT + (" WHERE " + " AND ".join(where) if where else "")
-    sql += " ORDER BY c.created_at DESC, c.id DESC LIMIT %s"
-    params.append(limit)
-    return conn.execute(sql, params).fetchall()
-
-
-# ---------------------------------------------------------------------------
-# Writing posts (same statements as POST /api/posts in main.py)
-# ---------------------------------------------------------------------------
-
 def known_tags(conn: psycopg.Connection) -> set[str]:
     return {r["slug"] for r in conn.execute("SELECT slug FROM tags").fetchall()}
-
-
-def resolve_tags(requested: list[str], known: set[str]) -> tuple[list[str], list[str]]:
-    """Same rule as main.resolve_tags: known tags only, de-duplicated, at most MAX_TAGS.
-    Returns (kept, dropped); with nothing valid left, the post gets the general tag."""
-    kept: list[str] = []
-    dropped: list[str] = []
-    for raw in requested:
-        slug = raw.strip().lower()
-        if not slug:
-            continue
-        if slug in known and slug not in kept and len(kept) < MAX_TAGS:
-            kept.append(slug)
-        else:
-            dropped.append(slug)
-    return (kept or [FALLBACK_FORUM], dropped)
-
-
-def resolve_forum(conn: psycopg.Connection, requested: str | None, tags: list[str]) -> dict[str, Any]:
-    """{id, slug} of the requested forum, else the first tag that names a forum, else general."""
-    for slug in [requested] + tags + [FALLBACK_FORUM]:
-        if slug:
-            row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (slug.strip().lower(),)).fetchone()
-            if row:
-                return row
-    # Same as seed.py: make sure the general forum exists.
-    return conn.execute(
-        "INSERT INTO forums (slug, name) VALUES (%s, 'General')"
-        " ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug RETURNING id, slug",
-        (FALLBACK_FORUM,),
-    ).fetchone()
-
-
-def insert_post(conn: psycopg.Connection, fields: dict[str, Any], forum_id: int) -> int:
-    """A new post (solved, or an Open Question when solution is None) plus its v1 metadata."""
-    solution = fields.get("solution")
-    post_id = conn.execute(
-        "INSERT INTO posts (description, value, solution, author, forum_id, status)"
-        " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-        (fields["description"], fields["value"], solution, fields["author"], forum_id,
-         "solved" if solution is not None else "open"),
-    ).fetchone()["id"]
-    conn.execute(
-        "INSERT INTO post_tags (post_id, tag_id) SELECT %s, id FROM tags WHERE slug = ANY(%s)",
-        (post_id, fields["tags"]),
-    )
-    conn.execute(
-        "INSERT INTO v1_post_meta (post_id, fingerprint, command, project, team_run_id)"
-        " VALUES (%s, %s, %s, %s, %s)",
-        (post_id, fields.get("fingerprint"), fields.get("command"), fields.get("project"),
-         fields.get("team_run_id")),
-    )
-    return post_id
-
-
-def fill_open_question(conn: psycopg.Connection, post_id: int, solution: str,
-                       fingerprint: str | None, command: str | None) -> bool:
-    """Fill in an Open Question's solution (same UPDATE as main.create_post). The question's
-    description and value stay as the asker wrote them. False if it was already solved."""
-    filled = conn.execute(
-        "UPDATE posts SET solution = %s, status = 'solved' WHERE id = %s AND solution IS NULL RETURNING id",
-        (solution, post_id),
-    ).fetchone()
-    if not filled:
-        return False
-    conn.execute(
-        "INSERT INTO v1_post_meta (post_id, fingerprint, command) VALUES (%s, %s, %s)"
-        " ON CONFLICT (post_id) DO UPDATE SET"
-        " fingerprint = COALESCE(v1_post_meta.fingerprint, EXCLUDED.fingerprint),"
-        " command = COALESCE(v1_post_meta.command, EXCLUDED.command)",
-        (post_id, fingerprint, command),
-    )
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -270,30 +163,6 @@ def record_outcome(conn: psycopg.Connection, post_id: int, worked: bool, fingerp
 # ---------------------------------------------------------------------------
 # Watchers and updates
 # ---------------------------------------------------------------------------
-
-def add_watcher(conn: psycopg.Connection, post_id: int, project: str) -> None:
-    conn.execute(
-        "INSERT INTO v1_watchers (post_id, project) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-        (post_id, project),
-    )
-
-
-def watchers(conn: psycopg.Connection, post_id: int) -> list[str]:
-    """Projects to tell about this post: the original asker plus everyone who asked the same question."""
-    rows = conn.execute(
-        "SELECT project FROM v1_post_meta WHERE post_id = %s AND project IS NOT NULL"
-        " UNION SELECT project FROM v1_watchers WHERE post_id = %s",
-        (post_id, post_id),
-    ).fetchall()
-    return sorted(r["project"] for r in rows)
-
-
-def add_update(conn: psycopg.Connection, project: str, message: str, post_id: int | None) -> None:
-    conn.execute(
-        "INSERT INTO v1_updates (project, message, post_id) VALUES (%s, %s, %s)",
-        (project, message, post_id),
-    )
-
 
 def take_updates(conn: psycopg.Connection, project: str) -> list[dict[str, Any]]:
     """Undelivered updates for a project, oldest first, marked delivered in the same statement."""
