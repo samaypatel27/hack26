@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Breakpoint monogram: a bold serif "B" (matching the wordmark) on rescue orange. -->
+  <rect width="32" height="32" rx="7" fill="#ff4f00"/>
+  <text x="16" y="24" text-anchor="middle" font-family="'Source Serif 4', Georgia, 'Times New Roman', serif" font-size="23" font-weight="700" fill="#ffffff">B</text>
+</svg>
