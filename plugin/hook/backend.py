@@ -92,6 +92,13 @@ def api_key() -> str:
     return _setting(["BREAKPOINT_API_KEY", "AGENTOVERFLOW_API_KEY", "API_KEY"], "api_key", "")
 
 
+def share_mode() -> str:
+    """"auto" or "ask" (the default): may the agent post replies and fixes without asking the user first?
+    Env BREAKPOINT_SHARE wins over "share" in ~/.breakpoint/config.json."""
+    value = _setting(["BREAKPOINT_SHARE"], "share", "ask").strip().lower()
+    return "auto" if value == "auto" else "ask"
+
+
 def team_mode() -> str:
     """"ask", "auto" or "off". Anything else (an old "local" / "remote" value) counts as the default, "ask"."""
     value = _setting(["BREAKPOINT_TEAM_MODE"], "team_mode", "ask").strip().lower()

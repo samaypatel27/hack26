@@ -466,6 +466,19 @@ def clean_slate(name: str, title: str, when: str, result: dict[str, Any], tried:
 # After a command finally passes
 # ---------------------------------------------------------------------------
 
+AUTO_SHARE = ("The user turned on automatic sharing in Breakpoint's settings (share = auto), so do this now, "
+              "without asking them first.")
+
+
+def _share_note() -> str | None:
+    """The auto-share line when the user pre-approved posting (share = auto), else None."""
+    try:
+        import backend   # same folder; imported here so building a message never fails on settings
+        return AUTO_SHARE if backend.share_mode() == "auto" else None
+    except Exception:
+        return None
+
+
 def notable_solve(command: str, failures: int, fingerprint: str | None, tried: list[str],
                   team_fix: dict[str, Any] | None = None, open_question_id: Any = None) -> str:
     credit = None
@@ -485,6 +498,7 @@ def notable_solve(command: str, failures: int, fingerprint: str | None, tried: l
         "",
         "If this was notable (see the breakpoint skill), call `post` once with the root cause and the exact fix, "
         "so the next agent gets it in seconds. Never include secrets or personal paths.",
+        _share_note(),
     )
 
 
@@ -504,6 +518,7 @@ def leave_reply(post_id: Any, command: str, fingerprint: str | None, viewed: boo
         + (f" If you did not use post #{post_id}, skip this." if viewed else ""),
         "1 to 3 sentences, never just \"thanks\" or \"it worked\", never secrets or personal paths. Do not post a new "
         "solution: this one is already on the forum.",
+        _share_note(),
     )
 
 
