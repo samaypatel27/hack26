@@ -123,16 +123,19 @@ def test_post_detail_splits_body_from_headline(fake):
 # ---- tags ----------------------------------------------------------------------------------------
 
 
-def test_resolve_tags_drops_unknown_dedupes_and_caps():
-    known = {"docker", "prisma", "ci", "git", "npm"}
-    kept, dropped = main.resolve_tags(["Docker", "docker", "nope", "prisma", "ci", "git", "npm"], known)
-    assert kept == ["docker", "prisma", "ci", "git"]
-    assert dropped == ["docker", "nope", "npm"]
+def test_resolve_tags_accepts_new_tags_normalizes_dedupes_and_caps():
+    kept, dropped = main.resolve_tags(["Audio", "audio", "Signal Integrity", "3d_art", "cad", "mixing"])
+    assert kept == ["audio", "signal-integrity", "3d-art", "cad"]
+    assert dropped == ["audio", "mixing"]
 
 
 def test_resolve_tags_falls_back_to_general():
-    assert main.resolve_tags(["nope"], {"docker"})[0] == ["general"]
-    assert main.resolve_tags([], {"docker"})[0] == ["general"]
+    assert main.resolve_tags(["<invalid>", "x" * 49])[0] == ["general"]
+    assert main.resolve_tags([])[0] == ["general"]
+
+
+def test_tags_support_technical_names_and_general_is_only_a_fallback():
+    assert main.resolve_tags(["general", "C++", "C#", "Node.js"])[0] == ["c++", "c#", "node.js"]
 
 
 # ---- posting -------------------------------------------------------------------------------------
@@ -155,35 +158,36 @@ def test_posting_requires_the_api_key(fake):
 
 
 def test_new_solved_post_resolves_forum_and_tags(fake):
-    conn = fake([{"id": 3, "slug": "databases"}], KNOWN_TAGS, [{"id": 99}], [])
+    conn = fake([{"id": 3, "slug": "databases"}], [{"id": 99}], [])
     r = client.post("/api/posts", json=NEW_SOLVED, headers=AUTH).json()
     assert r["post_id"] == 99 and r["forum"] == "databases"
-    assert r["tags"] == ["prisma", "docker"] and r["dropped_tags"] == ["bogus"]
-    insert_sql, insert_params = conn.calls[3 - 1]
+    assert r["tags"] == ["prisma", "docker", "bogus"] and r["dropped_tags"] == []
+    insert_sql, insert_params = conn.calls[1]
     assert "INSERT INTO posts" in insert_sql
     assert insert_params[-2:] == (3, "solved")
-    tag_sql, tag_params = conn.calls[3]
-    assert "INSERT INTO post_tags" in tag_sql and tag_params == (99, ["prisma", "docker"])
+    tag_sql, tag_params = conn.calls[2]
+    assert "INSERT INTO tags" in tag_sql and "INSERT INTO post_tags" in tag_sql and "INSERT INTO forum_tags" in tag_sql
+    assert tag_params == (["prisma", "docker", "bogus"], 99, 3)
 
 
 def test_unknown_forum_falls_back_to_general(fake):
-    conn = fake([], [{"id": 12, "slug": "general"}], KNOWN_TAGS, [{"id": 5}], [])
+    conn = fake([], [{"id": 12, "slug": "general"}], [{"id": 5}], [])
     r = client.post("/api/posts", json={**NEW_SOLVED, "forum": "no-such-forum"}, headers=AUTH).json()
     assert r["forum"] == "general"
     assert conn.calls[1][1] == ("general",)
 
 
 def test_solution_fills_in_an_open_question(fake):
-    conn = fake([{"id": 3, "slug": "databases"}], KNOWN_TAGS, [{"id": 41}])
+    conn = fake([{"id": 3, "slug": "databases"}], [{"id": 41}])
     r = client.post("/api/posts", json={**NEW_SOLVED, "open_question_id": 41}, headers=AUTH).json()
     assert r["attached_to_open_question"] is True and r["post_id"] == 41
-    assert "UPDATE posts SET solution" in conn.calls[2][0]
+    assert "UPDATE posts SET solution" in conn.calls[1][0]
 
 
 def test_open_question_duplicate_in_the_same_forum_is_not_created_twice(fake):
     existing = {**ROW, "id": 20, "forum": "databases", "tags": ["redis"],
                 "description": "Redis connection reset every five minutes\nConnection reset by peer behind the load balancer."}
-    conn = fake([{"id": 3, "slug": "databases"}], KNOWN_TAGS, [existing])
+    conn = fake([{"id": 3, "slug": "databases"}], [existing])
     r = client.post(
         "/api/posts",
         json={"description": "Redis connection reset every five minutes\nConnection reset by peer behind the load balancer.",

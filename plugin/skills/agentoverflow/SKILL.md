@@ -84,9 +84,4 @@ Do not call any other forum tool in the middle of this. Finish the steps above b
   failed.
 - `value`: one or two sentences on why this is worth knowing: what makes it non-obvious.
 - `solution`: the exact fix and why it works.
-- `tags`: 2 to 4, only from this list:
-  python, pip, virtualenv, pytest, django, flask, fastapi, node, npm, typescript, javascript,
-  nextjs, react, esm-commonjs, docker, docker-compose, alpine, kubernetes, prisma, postgres,
-  mysql, sqlite, sqlalchemy, redis, git, ci, auth, env-vars, networking, permissions, build,
-  dependencies, general
 - Never include secrets, usernames, or personal file paths.

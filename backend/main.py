@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -105,16 +106,15 @@ def to_card(p: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def resolve_tags(requested: list[str], known: set[str]) -> tuple[list[str], list[str]]:
-    """Keep known tags (any forum's), de-duplicated, at most MAX_TAGS. Returns (kept, dropped).
-    With nothing valid left, the post gets the general tag."""
+def resolve_tags(requested: list[str]) -> tuple[list[str], list[str]]:
+    """Normalize an extensible tag vocabulary; general is only an empty-tag fallback."""
     kept: list[str] = []
     dropped: list[str] = []
     for raw in requested:
-        slug = raw.strip().lower()
-        if not slug:
+        slug = re.sub(r"[\s_]+", "-", raw.strip().lower()).strip("-")
+        if not slug or slug == FALLBACK_FORUM:
             continue
-        if slug in known and slug not in kept and len(kept) < MAX_TAGS:
+        if re.fullmatch(r"[a-z0-9][a-z0-9.+#-]{0,47}", slug) and slug not in kept and len(kept) < MAX_TAGS:
             kept.append(slug)
         else:
             dropped.append(slug)
@@ -148,7 +148,7 @@ class PostIn(BaseModel):
     general_solution: str | None = Field(default=None, min_length=1, max_length=32000)
     agent_id: str | None = None
     forum: str = FALLBACK_FORUM
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list, max_length=32)
     author: str = "anonymous"
     open_question_id: int | None = None
 
@@ -252,7 +252,7 @@ def related_posts(post_id: int) -> list[dict[str, Any]]:
 def create_post(post: PostIn) -> dict[str, Any]:
     """Create a solved post (solution given) or an open question (no solution).
 
-    An unknown forum falls back to "general"; unknown tags are dropped. A solution for an
+    An unknown forum falls back to "general"; valid new tags are registered. A solution for an
     existing open question fills that question in instead of creating a new post.
     """
     # TODO: run scrub.py and safety.py on the text before storing.
@@ -264,8 +264,7 @@ def create_post(post: PostIn) -> dict[str, Any]:
         forum_row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (post.forum.strip().lower(),)).fetchone()
         if forum_row is None:
             forum_row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (FALLBACK_FORUM,)).fetchone()
-        known = {r["slug"] for r in conn.execute("SELECT slug FROM tags").fetchall()}
-        tags, dropped = resolve_tags(post.tags, known)
+        tags, dropped = resolve_tags(post.tags)
         result: dict[str, Any] = {"forum": forum_row["slug"], "tags": tags, "dropped_tags": dropped}
 
         if solution is not None and post.open_question_id is not None:
@@ -301,8 +300,15 @@ def create_post(post: PostIn) -> dict[str, Any]:
             ),
         ).fetchone()
         conn.execute(
-            "INSERT INTO post_tags (post_id, tag_id) SELECT %s, id FROM tags WHERE slug = ANY(%s)",
-            (new["id"], tags),
+            """WITH registered_tags AS (
+                INSERT INTO tags(slug) SELECT unnest(%s::text[])
+                ON CONFLICT(slug) DO UPDATE SET slug=EXCLUDED.slug RETURNING id
+            ), post_links AS (
+                INSERT INTO post_tags(post_id,tag_id) SELECT %s,id FROM registered_tags
+                ON CONFLICT DO NOTHING RETURNING tag_id
+            )
+            INSERT INTO forum_tags(forum_id,tag_id) SELECT %s,id FROM registered_tags
+            ON CONFLICT DO NOTHING""", (tags, new["id"], forum_row["id"]),
         )
     return {**result, "post_id": new["id"], "attached_to_open_question": False, "duplicate_of": None}
 

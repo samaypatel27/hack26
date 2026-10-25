@@ -33,7 +33,7 @@ def database(monkeypatch):
         admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     try:
         with connect() as conn:
-            for table in ("forums", "posts", "tags", "post_tags"):
+            for table in ("forums", "posts", "tags", "post_tags", "forum_tags"):
                 conn.execute(sql.SQL("CREATE TABLE {}.{} (LIKE public.{} INCLUDING ALL)").format(
                     sql.Identifier(schema), sql.Identifier(table), sql.Identifier(table)))
             # Production may already have the additive content columns on repeat test runs.
@@ -102,7 +102,7 @@ def test_new_posts_and_legacy_reads_share_the_contract(database):
     auth = {"X-API-Key": "integration-test"}
     created = client.post("/api/posts", json={"problem": "Shared symptom", "description": "Reusable explanation",
         "relevancy": "Applies when a proxy is active", "general_solution": "Check the proxy", "tags": []}, headers=auth)
-    # Insert a known fallback tag first: create_post resolves unknown tags to general.
+    # Missing tags still use the general fallback.
     assert created.status_code == 200
     detail = client.get(f"/api/posts/{created.json()['post_id']}").json()
     assert detail["problem"] == "Shared symptom" and detail["description"] == "Reusable explanation"
@@ -119,3 +119,43 @@ def test_rate_limit_window_is_bounded():
     assert all(limiter.allow("test", now=100) for _ in range(120))
     assert not limiter.allow("test", now=100)
     assert limiter.allow("test", now=161)
+
+
+def test_new_tags_are_registered_once_and_associated_with_the_forum(database):
+    connect, _ = database
+    client = TestClient(main.app)
+    auth = {"X-API-Key": "integration-test"}
+    for title in ("Sensor drift", "Oscilloscope calibration"):
+        r = client.post("/api/posts", json={"problem": title, "description": "Measured analogue offset",
+            "general_solution": "Check the return path", "tags": ["Signal Integrity", "electronics"]}, headers=auth)
+        assert r.status_code == 200
+        assert r.json()["tags"] == ["signal-integrity", "electronics"]
+        detail = client.get(f"/api/posts/{r.json()['post_id']}").json()
+        assert detail["tags"] == ["electronics", "signal-integrity"]
+    with connect() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM tags WHERE slug IN ('electronics','signal-integrity')").fetchone()["n"] == 2
+        assert conn.execute("SELECT count(*) AS n FROM forum_tags ft JOIN tags t ON t.id=ft.tag_id WHERE t.slug IN ('electronics','signal-integrity')").fetchone()["n"] == 2
+
+
+def test_starter_tag_sync_repairs_exact_samples_and_is_repeatable(database):
+    from seed import SAMPLES
+    from seed_tags import seed_sql
+    connect, other_id = database
+    title, _, detail, _, expected_tags, _ = SAMPLES[0]
+    description = f"[Demo] {title}\n\n{detail}\n\nIllustrative sample: votes and outcomes are synthetic, not observed agent activity."
+    with connect() as conn:
+        schema = conn.execute("SELECT current_schema() AS name").fetchone()["name"]
+        forum = conn.execute("SELECT forum_id FROM posts WHERE id=%s", (other_id,)).fetchone()["forum_id"]
+        demo_id = conn.execute("INSERT INTO posts(description,value,forum_id) VALUES (%s,'demo',%s) RETURNING id", (description, forum)).fetchone()["id"]
+        for post_id in (demo_id, other_id):
+            conn.execute("INSERT INTO post_tags(post_id,tag_id) SELECT %s,id FROM tags WHERE slug='general'", (post_id,))
+    query = seed_sql().replace("public.", schema + ".")
+    for _ in range(2):
+        with connect() as conn:
+            conn.execute(query)
+    with connect() as conn:
+        tags = conn.execute("SELECT t.slug FROM post_tags pt JOIN tags t ON t.id=pt.tag_id WHERE pt.post_id=%s ORDER BY t.slug", (demo_id,)).fetchall()
+        assert [t["slug"] for t in tags] == sorted(expected_tags)
+        assert conn.execute("SELECT t.slug FROM post_tags pt JOIN tags t ON t.id=pt.tag_id WHERE pt.post_id=%s", (other_id,)).fetchone()["slug"] == "general"
+        assert conn.execute("SELECT count(*) AS n FROM forum_tags ft JOIN tags t ON t.id=ft.tag_id WHERE t.slug=ANY(%s)", (expected_tags,)).fetchone()["n"] == 3
+        assert conn.execute("SELECT description FROM posts WHERE id=%s", (demo_id,)).fetchone()["description"] == description
