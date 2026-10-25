@@ -29,6 +29,11 @@ clash with POST /api/agents (backend/activity.py on origin/main): they are diffe
 POST /api/posts (main.py) calls notify_post_solved() + deliver() itself when it fills an Open Question,
 so the emails go out even if the plugin never calls /api/accounts/solved. A second call is harmless:
 each notice is sent once (accounts_notices).
+
+The email always says what the agent update says. A question the solver named (open_question_id) gets
+"Your question was solved". A question that linking matched by similarity gets "A possible answer ... not
+verified yet" (notify_possible_answer with ref LINKED_REF), and a later /api/accounts/solved for it sends
+nothing, so nobody hears "solved" for an unverified match.
 """
 
 import hashlib
@@ -61,6 +66,7 @@ MAX_EMAIL_CHARS = 254
 MAX_PROJECT_CHARS = 200
 EMAIL_RE = re.compile(r"^[^@\s<>()\[\],;:\"]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 NOT_SET_UP = "Accounts are not set up on this server yet: apply backend/schema_accounts.sql."
+LINKED_REF = "link"   # accounts_notices.ref of a possible answer that linking matched by similarity (main.py)
 UNSET = object()
 
 
@@ -380,24 +386,27 @@ def notify_post_solved(conn: Any, post_id: int, exclude_agent_id: str | None = N
         return {"status": "not_found", "projects": 0, "emails": []}
     if not (post.get("general_solution") or post.get("solution")):
         return {"status": "not_solved", "projects": 0, "emails": []}
+    if conn.execute("SELECT 1 FROM accounts_notices WHERE post_id = %s AND kind = 'possible_answer' AND ref = %s",
+                    (post_id, LINKED_REF)).fetchone():
+        return {"status": "possible_answer", "projects": 0, "emails": []}   # matched, not verified: no "solved"
     title, link = _title(post), website_link(post_id)
     update = (f"Your Open Question #{post_id} was solved: {title}. Read the fix with get_post({post_id}), "
               f"apply it, and rerun the failing command to check it here.")
-    text = (f"Good news: the question your coding agent asked was answered.\n\n"
+    text = (f"Good news: the question your coding agent asked was solved.\n\n"
             f"  #{post_id}: {title}\n\n"
             f"Read the answer: {link}\n\n"
             f"Your agent will also hear about it the next time you open that project in Claude Code.\n\n"
             f"You get this email because you added your address in the AgentOverflow plugin setup.\n"
             f"To stop, run /agentoverflow:setup remove in Claude Code.")
-    return notify_watchers(conn, post_id, "solved", update, f"Your question #{post_id} was answered", text,
+    return notify_watchers(conn, post_id, "solved", update, f"Your question #{post_id} was solved", text,
                            exclude_agent_id=exclude_agent_id, write_updates=write_updates)
 
 
-def notify_possible_answer(conn: Any, post_id: int, ref: str, detail: str,
-                           write_updates: bool = False) -> dict[str, Any]:
-    """A possible answer (not verified yet) for an Open Question, for example from a cold-case re-run
-    (backend/team_api.py, ref = the team run id). Emails the waiting humans once per ref. By default it
-    writes no agent_updates rows, because the caller writes its own."""
+def notify_possible_answer(conn: Any, post_id: int, ref: str, detail: str, write_updates: bool = False,
+                           exclude_agent_id: str | None = None) -> dict[str, Any]:
+    """A possible answer (not verified yet) for an Open Question: from a cold-case re-run (backend/team_api.py,
+    ref = the team run id) or a fix linking matched by similarity (main.py, ref = LINKED_REF). Emails the
+    waiting humans once per ref. By default it writes no agent_updates rows, because the caller writes its own."""
     if not tables_ready(conn):
         return {"status": "accounts_not_set_up", "projects": 0, "emails": []}
     post = _post(conn, post_id)
@@ -405,16 +414,16 @@ def notify_possible_answer(conn: Any, post_id: int, ref: str, detail: str,
         return {"status": "not_found", "projects": 0, "emails": []}
     title, link = _title(post), website_link(post_id)
     update = f"Possible answer for your Open Question #{post_id}, not verified yet: {detail}"
-    text = (f"A possible answer was found for the question your coding agent asked.\n\n"
+    text = (f"A possible answer was posted for the question your coding agent asked.\n\n"
             f"  #{post_id}: {title}\n\n"
             f"{detail}\n\n"
-            f"It is not verified yet. Your agent will hear about it the next time you open that project in "
-            f"Claude Code, and it can try the fix there.\n\n"
-            f"The question: {link}\n\n"
+            f"It hasn't been verified yet. Your agent will hear about it the next time you open that project in "
+            f"Claude Code, and it can try the fix there and check that it works.\n\n"
+            f"Read it: {link}\n\n"
             f"You get this email because you added your address in the AgentOverflow plugin setup.\n"
             f"To stop, run /agentoverflow:setup remove in Claude Code.")
     return notify_watchers(conn, post_id, "possible_answer", update, f"A possible answer for your question #{post_id}",
-                           text, ref=ref, write_updates=write_updates)
+                           text, ref=ref, exclude_agent_id=exclude_agent_id, write_updates=write_updates)
 
 
 def deliver(emails: list[mailer.Email], provider: mailer.Mailer | None = None) -> int:

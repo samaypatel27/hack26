@@ -468,7 +468,7 @@ def test_team_rerun_possible_answer_is_emailed_once_per_run(database, sql, outbo
     updates = sql("SELECT project, message FROM agent_updates")
     assert [u["project"] for u in updates] == ["proj-a"] and "cold-case re-run" in updates[0]["message"]
     assert [e.to for e in outbox.sent] == ["asker@osu.edu"]
-    assert "musl query engine" in outbox.sent[0].text and "not verified" in outbox.sent[0].text
+    assert "musl query engine" in outbox.sent[0].text and "hasn't been verified yet" in outbox.sent[0].text
     team_api._notify_possible_answer(post, "tr_000000000001", result)   # same run again: no second email
     assert len(outbox.sent) == 1
     team_api._notify_possible_answer(post, "tr_000000000002", result)   # a new run: a new email
