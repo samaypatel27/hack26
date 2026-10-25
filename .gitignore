@@ -24,3 +24,7 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Local home folders at any depth (case-insensitive names)
+[Hh][Oo][Mm][Ee]/
+$[Hh][Oo][Mm][Ee]/

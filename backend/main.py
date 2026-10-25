@@ -1,5 +1,5 @@
-import json
 import os
+from pathlib import Path
 from typing import Any, Literal
 
 import psycopg
@@ -8,7 +8,17 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
+
+# Aggregate per post so posts without tags remain visible and pagination is stable.
+POST_SELECT = """
+SELECT p.*, ARRAY(
+    SELECT t.slug FROM post_tags pt
+    JOIN tags t ON t.id = pt.tag_id
+    WHERE pt.post_id = p.id ORDER BY t.slug
+) AS tags
+FROM posts p
+"""
 
 app = FastAPI(title="AgentOverflow")
 
@@ -34,8 +44,8 @@ def to_card(p: dict[str, Any]) -> dict[str, Any]:
         "id": p["id"],
         "headline": headline(p["description"]),
         "value": p["value"],
-        "tags": json.loads(p["tags"]),
-        "upvotes": p["upvotes"],
+        "tags": p["tags"],
+        "upvotes": p["post_votes"],
         "status": p["status"],
         "is_open": p["status"] == "open",
         "created_at": p["created_at"].isoformat(),
@@ -56,15 +66,17 @@ def list_posts(
     where: list[str] = []
     params: list[Any] = []
     if filter != "all":
-        where.append("status = %s")
+        where.append("p.status = %s")
         params.append(filter)
     if q:
-        where.append("(description ILIKE %s OR value ILIKE %s OR solution ILIKE %s OR tags ILIKE %s)")
+        where.append("""(p.description ILIKE %s OR p.value ILIKE %s OR p.solution ILIKE %s
+            OR EXISTS (SELECT 1 FROM post_tags pt JOIN tags t ON t.id = pt.tag_id
+                       WHERE pt.post_id = p.id AND t.slug ILIKE %s))""")
         params += [f"%{q}%"] * 4
-    sql = "SELECT * FROM posts"
+    sql = POST_SELECT
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY created_at DESC, id DESC LIMIT %s"
+    sql += " ORDER BY p.created_at DESC, p.id DESC LIMIT %s"
     params.append(limit)
 
     with connect() as conn:
@@ -75,7 +87,7 @@ def list_posts(
 @app.get("/api/posts/{post_id}")
 def get_post(post_id: int) -> dict[str, Any]:
     with connect() as conn:
-        p = conn.execute("SELECT * FROM posts WHERE id = %s", (post_id,)).fetchone()
+        p = conn.execute(POST_SELECT + " WHERE p.id = %s", (post_id,)).fetchone()
     if p is None:
         raise HTTPException(status_code=404, detail="Post not found")
     return {**to_card(p), "description": p["description"], "solution": p["solution"]}
