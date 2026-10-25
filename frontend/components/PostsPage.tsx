@@ -131,105 +131,106 @@ export function PostsPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[1120px] px-4 pb-16 sm:px-6">
+    <>
       <SiteHeader active="forums" connection={posts.connection} />
+      <div className="mx-auto w-full max-w-[1120px] px-4 pb-16 sm:px-6">
+        <main className={revealed ? "mt-8" : "flex min-h-[calc(100svh-8rem)] flex-col justify-center pb-16"}>
+          <div ref={sentenceRef} className={`w-fit max-w-full ${revealed ? "" : "mx-auto text-center"}`}>
+            <SentenceFilter
+              large={!revealed}
+              status={status}
+              started={view.status !== null}
+              forum={view.forum}
+              tags={view.tags}
+              forums={forums.data}
+              onChange={onFilterChange}
+              onReset={() => go(pathname)}
+            />
+          </div>
+          {revealed && current?.description && <p className="forums-reveal mt-1 italic text-ink-soft">{current.description}</p>}
 
-      <main className={revealed ? "mt-8" : "flex min-h-[calc(100svh-8rem)] flex-col justify-center pb-16"}>
-        <div ref={sentenceRef} className={`w-fit max-w-full ${revealed ? "" : "mx-auto text-center"}`}>
-          <SentenceFilter
-            large={!revealed}
-            status={status}
-            started={view.status !== null}
-            forum={view.forum}
-            tags={view.tags}
-            forums={forums.data}
-            onChange={onFilterChange}
-            onReset={() => go(pathname)}
-          />
-        </div>
-        {revealed && current?.description && <p className="forums-reveal mt-1 italic text-ink-soft">{current.description}</p>}
-
-        <form
-          ref={searchRef}
-          onSubmit={onSearch}
-          role="search"
-          className={`mx-auto flex w-full transition-[max-width,margin] duration-[600ms] ease-[cubic-bezier(0.2,0.7,0.2,1)] ${
-            revealed ? "mt-6 max-w-full" : "mt-8 max-w-[44rem]"
-          }`}
-        >
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search these, or paste the error you're staring at"
-            aria-label="Search posts"
-            className={`min-w-0 flex-1 rounded-l-[2px] border border-r-0 border-rule-strong bg-card px-3 font-mono text-ink outline-none transition-[padding,font-size] duration-[600ms] ease-[cubic-bezier(0.2,0.7,0.2,1)] placeholder:text-faint focus:border-ink ${
-              revealed ? "py-2 text-[13.5px]" : "py-3.5 text-[16px]"
+          <form
+            ref={searchRef}
+            onSubmit={onSearch}
+            role="search"
+            className={`mx-auto flex w-full transition-[max-width,margin] duration-[600ms] ease-[cubic-bezier(0.2,0.7,0.2,1)] ${
+              revealed ? "mt-6 max-w-full" : "mt-8 max-w-[44rem]"
             }`}
-          />
-          <button
-            type="submit"
-            className="rounded-r-[2px] border border-[#ff4f00] bg-[#ff4f00] px-4 font-mono text-[13px] font-semibold text-ink transition hover:border-[#ff6a26] hover:bg-[#ff6a26] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
           >
-            Enter ↵
-          </button>
-        </form>
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search these, or paste the error you're staring at"
+              aria-label="Search posts"
+              className={`min-w-0 flex-1 rounded-l-[2px] border border-r-0 border-rule-strong bg-card px-3 font-mono text-ink outline-none transition-[padding,font-size] duration-[600ms] ease-[cubic-bezier(0.2,0.7,0.2,1)] placeholder:text-faint focus:border-ink ${
+                revealed ? "py-2 text-[13.5px]" : "py-3.5 text-[16px]"
+              }`}
+            />
+            <button
+              type="submit"
+              className="rounded-r-[2px] border border-[#ff4f00] bg-[#ff4f00] px-4 font-mono text-[13px] font-semibold text-ink transition hover:border-[#ff6a26] hover:bg-[#ff6a26] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+            >
+              Enter ↵
+            </button>
+          </form>
 
-        {revealed && (
-          <div className="forums-reveal">
-            <div className="mt-4 flex items-end justify-between gap-3 border-b border-ink pb-1.5">
-              <nav aria-label="Sort posts" className="flex gap-5 text-[15px]">
-                {SORTS.map((s) => {
-                  const active = view.sort === s.id;
-                  return (
-                    <Link
-                      key={s.id}
-                      href={hrefFor({ sort: s.id })}
-                      scroll={false}
-                      aria-current={active ? "true" : undefined}
-                      className={`underline-offset-[7px] ${
-                        active ? "font-semibold text-accent underline decoration-2" : "text-ink-soft hover:text-ink"
-                      }`}
-                    >
-                      {s.label}
-                    </Link>
-                  );
-                })}
-              </nav>
-              {list && (
-                <span className="font-mono text-[12px] tabular-nums text-faint">
-                  {plural(list.length, "post")}
-                  {q && " found"}
-                </span>
+          {revealed && (
+            <div className="forums-reveal">
+              <div className="mt-4 flex items-end justify-between gap-3 border-b border-ink pb-1.5">
+                <nav aria-label="Sort posts" className="flex gap-5 text-[15px]">
+                  {SORTS.map((s) => {
+                    const active = view.sort === s.id;
+                    return (
+                      <Link
+                        key={s.id}
+                        href={hrefFor({ sort: s.id })}
+                        scroll={false}
+                        aria-current={active ? "true" : undefined}
+                        className={`underline-offset-[7px] ${
+                          active ? "font-semibold text-accent underline decoration-2" : "text-ink-soft hover:text-ink"
+                        }`}
+                      >
+                        {s.label}
+                      </Link>
+                    );
+                  })}
+                </nav>
+                {list && (
+                  <span className="font-mono text-[12px] tabular-nums text-faint">
+                    {plural(list.length, "post")}
+                    {q && " found"}
+                  </span>
+                )}
+              </div>
+      
+              {note ? (
+                <p className="border-b border-rule py-12 text-center italic text-ink-soft">{note}</p>
+              ) : list === null ? (
+                <ul aria-busy="true" aria-label="Loading posts">
+                  {Array.from({ length: 7 }, (_, i) => (
+                    <PostRowSkeleton key={i} i={i} />
+                  ))}
+                </ul>
+              ) : (
+                // While a new filter loads, the previous results stay, slightly dimmed, so nothing flashes.
+                <ul className={posts.loading ? "opacity-50 transition-opacity" : "transition-opacity"} aria-busy={posts.loading}>
+                  {list.map((p) => (
+                    <PostRow
+                      key={p.id}
+                      post={p}
+                      now={posts.now}
+                      change={changes[p.id]}
+                      forumHref={hrefFor({ status: view.status ?? "all", forum: p.forum, tags: [] })}
+                      tagHref={(t) => hrefFor({ status: view.status ?? "all", forum: p.forum, tags: [t] })}
+                    />
+                  ))}
+                </ul>
               )}
             </div>
-    
-            {note ? (
-              <p className="border-b border-rule py-12 text-center italic text-ink-soft">{note}</p>
-            ) : list === null ? (
-              <ul aria-busy="true" aria-label="Loading posts">
-                {Array.from({ length: 7 }, (_, i) => (
-                  <PostRowSkeleton key={i} i={i} />
-                ))}
-              </ul>
-            ) : (
-              // While a new filter loads, the previous results stay, slightly dimmed, so nothing flashes.
-              <ul className={posts.loading ? "opacity-50 transition-opacity" : "transition-opacity"} aria-busy={posts.loading}>
-                {list.map((p) => (
-                  <PostRow
-                    key={p.id}
-                    post={p}
-                    now={posts.now}
-                    change={changes[p.id]}
-                    forumHref={hrefFor({ status: view.status ?? "all", forum: p.forum, tags: [] })}
-                    tagHref={(t) => hrefFor({ status: view.status ?? "all", forum: p.forum, tags: [t] })}
-                  />
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </main>
-    </div>
+          )}
+        </main>
+      </div>
+    </>
   );
 }

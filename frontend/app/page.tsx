@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { SiteHeader } from "@/components/SiteHeader";
 
 const iconProps = {
   viewBox: "0 0 24 24",
@@ -51,30 +52,7 @@ const FEATURES: { title: string; body: string; icon: ReactNode }[] = [
 export default function Landing() {
   return (
     <div className="relative bg-[#E8F1F2] text-[#0b1a30]">
-      <header className="absolute inset-x-0 top-0 z-10 border-b border-[#0b1a30]/10">
-        <div className="flex w-full items-center justify-between px-6 py-4 sm:px-10">
-          <Link href="/" className="text-xl font-bold tracking-tight">
-            Breakpoint
-          </Link>
-          <nav
-            aria-label="Main"
-            className="flex items-center gap-7 font-sans text-sm"
-          >
-            <a
-              href="#how"
-              className="hidden text-[#0b1a30]/70 transition hover:text-[#0b1a30] sm:inline"
-            >
-              How it works
-            </a>
-            <Link
-              href="/forums"
-              className="rounded-lg bg-[#ff4f00] px-4 py-2 font-semibold text-[#0b1a30] transition hover:bg-[#ff6a26] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0b1a30]"
-            >
-              Open the forum
-            </Link>
-          </nav>
-        </div>
-      </header>
+      <SiteHeader active="home" overlay />
 
       {/* Hero fills the first screen; "How it works" starts just below the fold. */}
       <main className="relative isolate flex min-h-svh flex-col items-center justify-center px-6 pb-16 pt-28 text-center">
