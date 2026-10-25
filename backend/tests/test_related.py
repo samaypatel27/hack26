@@ -11,10 +11,11 @@ client = TestClient(main.app)
 
 
 def test_related_returns_shared_tags_and_both_statuses_without_writes(fake):
-    conn = fake([{"id": 7}], [
-        {**ROW, "id": 8, "shared_tags": ["cors", "fastapi"]},
-        {**ROW, "id": 9, "solution": "Fix", "shared_tags": ["cors"]},
-    ])
+    rows = [
+        {**ROW, "id": 8, "tags": ["cors", "fastapi"]},
+        {**ROW, "id": 9, "solution": "Fix", "tags": ["cors"]},
+    ]
+    conn = fake([ROW], rows, rows)
     response = client.get("/api/posts/7/related")
     assert response.status_code == 200
     assert [p["id"] for p in response.json()] == [8, 9]
@@ -29,8 +30,8 @@ def test_missing_source_is_404(fake):
     assert len(conn.calls) == 1
 
 
-def test_no_matching_tags_returns_empty_list(fake):
-    fake([{"id": 7}], [])
+def test_no_matching_tags_or_keywords_returns_empty_list(fake):
+    fake([ROW], [])
     assert client.get("/api/posts/7/related").json() == []
 
 
@@ -68,3 +69,17 @@ def test_real_related_ranks_limits_excludes_self_and_includes_other_forums(datab
     with connect() as conn:
         conn.execute("DELETE FROM post_tags WHERE post_id=%s", (source_id,))
     assert client.get(f"/api/posts/{source_id}/related").json() == []
+
+
+@pytest.mark.skipif(os.environ.get("RUN_DATABASE_TESTS") != "1", reason="Opt-in isolated PostgreSQL keyword check")
+def test_real_related_can_find_keyword_only_matches(database):
+    connect, source_id = database
+    with connect() as conn:
+        forum = conn.execute("SELECT forum_id FROM posts WHERE id=%s", (source_id,)).fetchone()["forum_id"]
+        conn.execute("UPDATE posts SET problem='Proxy timeout',general_description='Upstream connection reset' WHERE id=%s", (source_id,))
+        matching_id = conn.execute("INSERT INTO posts(description,value,solution,forum_id) VALUES ('Proxy timeout\n\nUpstream connection reset','v','Check proxy',%s) RETURNING id", (forum,)).fetchone()["id"]
+        conn.execute("INSERT INTO posts(description,value,forum_id) VALUES ('CAD extrusion\n\nSketch geometry','v',%s)", (forum,))
+    related = client.get(f"/api/posts/{source_id}/related").json()
+    assert [p["id"] for p in related] == [matching_id]
+    assert related[0]["shared_tags"] == []
+    assert {"proxy", "timeout"} <= set(related[0]["shared_keywords"])
