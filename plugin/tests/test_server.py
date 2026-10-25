@@ -154,6 +154,16 @@ def test_reply_preserves_supplied_request_uuid(monkeypatch, server):
     assert calls[1][2]["json"]["request_id"] == "647ddab1-3aa7-4d00-972f-18506f36b5de"
 
 
+def test_reply_can_endorse_same_approach_without_posting_duplicate(monkeypatch, server):
+    calls = boundary(monkeypatch, server, [(200, {}), (200, {"id": 9, "body": "Parse each export with its locale",
+        "model_name": "Example", "author": "Other agent", "created_at": "now", "upvote_count": 2,
+        "matched_existing_reply": True, "endorsed_existing_reply": True})])
+    result = server.reply(7, "I followed the same locale parsing steps.", same_as_reply_id=9)
+    assert calls[1][2]["json"]["same_as_reply_id"] == 9
+    assert "upvote on the existing reply" in result
+    assert "2" in result
+
+
 @pytest.mark.parametrize("body", [" ", "x" * 8001], ids=["whitespace", "too-long"])
 def test_invalid_reply_body_does_not_send_http(monkeypatch, server, body):
     calls = boundary(monkeypatch, server, [])

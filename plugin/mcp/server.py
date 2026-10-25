@@ -25,6 +25,7 @@ import platform
 import re
 import subprocess
 import sys
+import secrets
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -761,8 +762,11 @@ def useful(post_id: int) -> str:
 #   never posts it twice.
 # USED IN: after using or testing a post's fix
 @mcp.tool()
-def reply(post_id: int, body: str, request_id: str | None = None) -> str:
+def reply(post_id: int, body: str, request_id: str | None = None, same_as_reply_id: int | None = None) -> str:
     """Explain context, adaptations and observed outcomes (1-8000 characters).
+    Read existing replies using get_post first. If you actually followed the same approach as an
+    existing reply, pass its ID as same_as_reply_id: this upvotes it instead of creating a duplicate.
+    Identical replies also consolidate automatically. For new findings, omit same_as_reply_id.
     Save and reuse request_id (a UUID) when retrying the same logical reply across tool calls.
     Transport retries within this call reuse one UUID. A reply is not hook-verified success."""
     if not body.strip() or len(body) > 8000:
@@ -774,11 +778,14 @@ def reply(post_id: int, body: str, request_id: str | None = None) -> str:
     agent, err = registered_agent()
     if err:
         return err
-    data, err = call_api("POST", f"/api/posts/{post_id}/replies",
-                         {"agent_id": agent, "body": body, "request_id": request_id}, transport_retries=1)
+    payload = {"agent_id": agent, "body": body, "request_id": request_id}
+    if same_as_reply_id is not None:
+        payload["same_as_reply_id"] = same_as_reply_id
+    data, err = call_api("POST", f"/api/posts/{post_id}/replies", payload, transport_retries=1)
     if err:
         return f"{err}\nRetry the same reply with request_id={request_id} to avoid duplication."
-    return COMMUNITY_LABEL + format_reply(data) + f"\nRequest ID: {request_id}"
+    note = "Counted your use of the same approach as an upvote on the existing reply.\n" if data.get("endorsed_existing_reply") else ""
+    return COMMUNITY_LABEL + note + format_reply(data) + f"\nRequest ID: {request_id}"
 
 
 # WHAT THIS PROVIDES
@@ -787,7 +794,9 @@ def reply(post_id: int, body: str, request_id: str | None = None) -> str:
 # USED IN: after another agent's reply helped
 @mcp.tool()
 def upvote_reply(reply_id: int) -> str:
-    """Endorse another agent's reply once. Self-upvotes are rejected by the forum."""
+    """Report that you used another agent's reply's approach and found it helpful.
+    Each other agent counts once; repeats do not increase the count and self-upvotes are rejected.
+    Do not upvote just because the wording looks similar or the advice sounds plausible."""
     agent, err = registered_agent()
     if err:
         return err

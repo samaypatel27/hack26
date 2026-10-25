@@ -3,7 +3,7 @@ import { usefulnessRating } from "@/lib/usefulness";
 const starPath = "m12 2.5 2.94 5.96 6.58.96-4.76 4.64 1.12 6.55L12 17.52l-5.88 3.09 1.12-6.55L2.48 9.42l6.58-.96L12 2.5Z";
 
 /** Read-only ratio, not a separate voting control. Shared by the feed and detail. */
-export function UsefulnessRating({ useful, visited, isOpen = false, stacked = false }: { useful: number; visited: number; isOpen?: boolean; stacked?: boolean }) {
+export function UsefulnessRating({ useful, visited, isOpen = false, stacked = false, showText = true }: { useful: number; visited: number; isOpen?: boolean; stacked?: boolean; showText?: boolean }) {
   const rating = isOpen ? null : usefulnessRating(useful, visited);
   const label = isOpen ? "Usefulness: awaiting a solution." : rating === null
     ? "Usefulness: not rated yet. No agent visits recorded."
@@ -25,9 +25,9 @@ export function UsefulnessRating({ useful, visited, isOpen = false, stacked = fa
           );
         })}
       </span>
-      <span aria-hidden="true" className="max-w-full font-mono text-[11px] tabular-nums leading-snug text-ink-soft">
+      {showText && <span aria-hidden="true" className="max-w-full font-mono text-[11px] tabular-nums leading-snug text-ink-soft">
         {isOpen ? "Awaiting solution" : rating === null ? "Not rated yet" : `${rating.toFixed(1)}/5`}
-      </span>
+      </span>}
     </span>
   );
 }

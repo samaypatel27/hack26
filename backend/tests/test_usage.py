@@ -77,6 +77,15 @@ def test_registers_agent_with_immutable_model(db):
     assert r.status_code == 200 and r.json()["agent_id"] == AGENT
 
 
+def test_registers_model_and_numeric_identifier(db):
+    agent_id = "GPT-6.1-Sol-12345678"
+    db([{"id": agent_id, "model_name": "GPT-6.1-Sol"}])
+    r = client.post("/api/agents", json={"agent_id": agent_id, "model_name": "GPT-6.1-Sol"}, headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["agent_id"] == agent_id
+    assert client.post("/api/agents", json={"agent_id": agent_id, "model_name": "Claude Opus"}, headers=AUTH).status_code == 422
+
+
 @pytest.mark.parametrize("payload", [
     {"agent_id": "random", "model_name": "test-model"},
     {"agent_id": AGENT, "model_name": "different-model"},
@@ -122,7 +131,7 @@ def test_reply_rejects_empty_or_huge_content(db, body):
 
 
 def test_reply_creation_returns_attributed_reply(db):
-    db([{"id": 7}], [{"id": OTHER}], [], [{"id": 3, "post_id": 7, "body": REPLY["body"]}], [REPLY])
+    db([{"id": 7}], [{"id": OTHER}], [], [], [], [{"id": 3, "post_id": 7, "body": REPLY["body"]}], [REPLY])
     r = client.post("/api/posts/7/replies", json={"agent_id": OTHER, "body": REPLY["body"], "request_id": str(uuid4())}, headers=AUTH)
     assert r.status_code == 200 and r.json()["model_name"] == "test-model"
 
@@ -131,6 +140,36 @@ def test_reply_request_id_reuse_with_different_body_is_conflict(db):
     db([{"id": 7}], [{"id": OTHER}], [], [{"id": 3, "post_id": 7, "body": "Different"}])
     r = client.post("/api/posts/7/replies", json={"agent_id": OTHER, "body": REPLY["body"], "request_id": str(uuid4())}, headers=AUTH)
     assert r.status_code == 409
+
+
+@pytest.mark.parametrize("same_as", [None, 3])
+def test_same_approach_endorses_existing_reply_instead_of_creating_another(db, same_as):
+    existing = {**REPLY, "upvote_count": 2}
+    conn = db([{"id": 7}], [{"id": AGENT}], [], [], [existing], [], [existing])
+    payload = {"agent_id": AGENT, "body": REPLY["body"], "request_id": str(uuid4())}
+    if same_as is not None:
+        payload.update(same_as_reply_id=same_as, body="I followed that same approach in my project.")
+    result = client.post("/api/posts/7/replies", json=payload, headers=AUTH)
+    assert result.status_code == 200
+    assert result.json()["id"] == 3 and result.json()["upvote_count"] == 2
+    assert result.json()["endorsed_existing_reply"] is True
+    assert not any("INSERT INTO replies " in query for query, _ in conn.calls)
+    vote = next(query for query, _ in conn.calls if "INSERT INTO reply_upvotes" in query)
+    assert "ON CONFLICT DO NOTHING" in vote
+
+
+def test_cannot_endorse_a_reply_from_another_post(db):
+    db([{"id": 7}], [{"id": AGENT}], [], [], [])
+    result = client.post("/api/posts/7/replies", json={"agent_id": AGENT, "body": "Same approach",
+        "request_id": str(uuid4()), "same_as_reply_id": 99}, headers=AUTH)
+    assert result.status_code == 404
+
+
+def test_cannot_endorse_own_reply_through_reply_endpoint(db):
+    db([{"id": 7}], [{"id": OTHER}], [], [], [REPLY])
+    result = client.post("/api/posts/7/replies", json={"agent_id": OTHER, "body": "Same approach",
+        "request_id": str(uuid4()), "same_as_reply_id": 3}, headers=AUTH)
+    assert result.status_code == 409
 
 
 def test_dangerous_reply_is_rejected_before_anything_is_stored(db):
@@ -144,11 +183,11 @@ def test_dangerous_reply_is_rejected_before_anything_is_stored(db):
 def test_reply_secrets_are_scrubbed_before_saving(db):
     raw = r"Set api_key=abcd1234efgh, mail me at someone@osu.edu, see C:\Users\harsh\proj\app.py"
     clean = main.scrub(raw)
-    conn = db([{"id": 7}], [{"id": OTHER}], [], [{"id": 3, "post_id": 7, "body": clean}], [{**REPLY, "body": clean}])
+    conn = db([{"id": 7}], [{"id": OTHER}], [], [], [], [{"id": 3, "post_id": 7, "body": clean}], [{**REPLY, "body": clean}])
     r = client.post("/api/posts/7/replies", json={"agent_id": OTHER, "body": raw, "request_id": str(uuid4())},
                     headers=AUTH)
     assert r.status_code == 200   # the 409 check compares the scrubbed body, so a retry is not a conflict
-    insert_sql, insert_params = conn.calls[3]
+    insert_sql, insert_params = conn.calls[5]
     assert "INSERT INTO replies" in insert_sql and insert_params[2] == clean
     assert all(s not in clean for s in ("abcd1234efgh", "someone@osu.edu", "harsh"))
 

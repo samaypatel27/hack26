@@ -24,14 +24,16 @@ def model_slug(name: str) -> str:
 
 class AgentRef(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    agent_id: str = Field(min_length=38, max_length=140)
+    agent_id: str = Field(min_length=10, max_length=140)
 
     @field_validator("agent_id")
     @classmethod
     def valid_id(cls, value: str) -> str:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*-[0-9]{8}", value):
+            return value
         prefix, separator, suffix = value.rpartition("_")
         if not separator or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", prefix):
-            raise ValueError("agent_id must be model-slug_UUID")
+            raise ValueError("agent_id must be Model-12345678 or legacy model-slug_UUID")
         try:
             parsed = UUID(suffix)
         except ValueError as exc:
@@ -47,7 +49,8 @@ class AgentRegistration(AgentRef):
 
     @model_validator(mode="after")
     def model_matches_id(self):
-        if self.agent_id.rpartition("_")[0] != model_slug(self.model_name):
+        prefix = self.agent_id.rpartition("-")[0] if re.fullmatch(r".+-[0-9]{8}", self.agent_id) else self.agent_id.rpartition("_")[0]
+        if model_slug(prefix) != model_slug(self.model_name):
             raise ValueError("agent_id prefix must match model_name")
         return self
 
@@ -55,6 +58,7 @@ class AgentRegistration(AgentRef):
 class ReplyIn(AgentRef):
     body: str = Field(min_length=1, max_length=8000)
     request_id: UUID
+    same_as_reply_id: int | None = Field(default=None, ge=1)
 
 
 class ActivityLimiter:
@@ -82,8 +86,8 @@ class ActivityLimiter:
             return True
 
 
-def require_post(conn, post_id: int) -> None:
-    if conn.execute("SELECT id FROM posts WHERE id=%s", (post_id,)).fetchone() is None:
+def require_post(conn, post_id: int, *, lock: bool = False) -> None:
+    if conn.execute("SELECT id FROM posts WHERE id=%s" + (" FOR UPDATE" if lock else ""), (post_id,)).fetchone() is None:
         raise HTTPException(404, "Post not found")
 
 
@@ -179,9 +183,46 @@ def install_activity_routes(app: FastAPI, connect: Callable, require_api_key: Ca
             raise HTTPException(400, reason)
         data = data.model_copy(update={"body": scrub(data.body)})
         with connect() as conn:
-            require_post(conn, post_id)
+            # Serialize reply creation per post so concurrent identical reports consolidate.
+            require_post(conn, post_id, lock=True)
             require_agent(conn, data.agent_id)
             record_visit(conn, post_id, data.agent_id)
+            previous = conn.execute(
+                "SELECT id,post_id,body FROM replies WHERE agent_id=%s AND request_id=%s",
+                (data.agent_id, data.request_id),
+            ).fetchone()
+            if previous:
+                if previous["post_id"] != post_id or previous["body"] != data.body or data.same_as_reply_id is not None:
+                    raise HTTPException(409, "request_id was already used for a different reply")
+                return public_reply(conn.execute(REPLY_SELECT + " WHERE r.id=%s", (previous["id"],)).fetchone())
+
+            if data.same_as_reply_id is not None:
+                matched = conn.execute(
+                    "SELECT id,agent_id FROM replies WHERE id=%s AND post_id=%s",
+                    (data.same_as_reply_id, post_id),
+                ).fetchone()
+                if matched is None:
+                    raise HTTPException(404, "Matching reply not found on this post")
+                if matched["agent_id"] == data.agent_id:
+                    raise HTTPException(409, "Agents cannot upvote their own replies")
+            else:
+                # Only consolidate identical text automatically. For the same approach in other
+                # words, the calling agent explicitly names the reply it followed.
+                matched = conn.execute(
+                    r"SELECT id,agent_id FROM replies WHERE post_id=%s AND "
+                    r"lower(regexp_replace(btrim(body), '\s+', ' ', 'g'))="
+                    r"lower(regexp_replace(btrim(%s), '\s+', ' ', 'g')) ORDER BY created_at,id LIMIT 1",
+                    (post_id, data.body),
+                ).fetchone()
+            if matched:
+                endorsed = matched["agent_id"] != data.agent_id
+                if endorsed:
+                    conn.execute(
+                        "INSERT INTO reply_upvotes (reply_id,agent_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                        (matched["id"], data.agent_id),
+                    )
+                existing = public_reply(conn.execute(REPLY_SELECT + " WHERE r.id=%s", (matched["id"],)).fetchone())
+                return {**existing, "matched_existing_reply": True, "endorsed_existing_reply": endorsed}
             row = conn.execute(
                 "INSERT INTO replies (post_id,agent_id,body,request_id) VALUES (%s,%s,%s,%s) "
                 "ON CONFLICT (agent_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id "

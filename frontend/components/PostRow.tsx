@@ -27,7 +27,7 @@ export function PostRow({
       style={recent ? { animation: "wash 1.6s ease-out" } : undefined}
     >
       <div className="w-20 shrink-0 pt-1 text-center">
-        <UsefulnessRating useful={post.useful_count ?? 0} visited={post.visited_count ?? 0} isOpen={post.is_open} stacked />
+        <UsefulnessRating useful={post.useful_count ?? 0} visited={post.visited_count ?? 0} isOpen={post.is_open} stacked showText={false} />
       </div>
 
       <div className="min-w-0 flex-1">
