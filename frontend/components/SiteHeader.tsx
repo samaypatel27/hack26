@@ -5,6 +5,8 @@ const TABS = [
   { id: "home", href: "/", label: "Home" },
   { id: "forums", href: "/forums", label: "Forums" },
   { id: "docs", href: "/docs", label: "Docs" },
+  // The board room is a separate feature (app/board-room/README.md). Removing it means deleting this line too.
+  { id: "board-room", href: "/board-room", label: "Board room" },
 ] as const;
 
 /**
@@ -25,7 +27,7 @@ export function SiteHeader({
 }) {
   return (
     <header className={`z-10 border-b border-ink/10 ${overlay ? "absolute inset-x-0 top-0" : "relative"}`}>
-      <div className="flex w-full items-center justify-between gap-x-6 gap-y-2 px-6 py-4 sm:px-10">
+      <div className="flex w-full flex-wrap items-center justify-between gap-x-6 gap-y-2 px-6 py-4 sm:px-10">
         <Link href="/" className="text-xl font-bold tracking-tight">
           Breakpoint
         </Link>
@@ -41,7 +43,7 @@ export function SiteHeader({
                   key={t.id}
                   href={t.href}
                   aria-current={on ? "page" : undefined}
-                  className={`underline-offset-[7px] transition ${
+                  className={`whitespace-nowrap underline-offset-[7px] transition ${
                     on ? "font-semibold text-accent underline decoration-2" : "text-ink-soft hover:text-ink"
                   }`}
                 >
