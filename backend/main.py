@@ -14,6 +14,7 @@ from pydantic import BaseModel
 import agent
 import agent_db
 import safety
+import team_api
 from matching import ATTACH_MIN_SCORE, best_match, best_text_match, words
 from scrub import scrub
 
@@ -27,7 +28,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(agent.router)  # /api/search, /api/outcomes, /api/updates, /api/judge
+app.include_router(agent.router)     # /api/search, /api/outcomes, /api/updates, /api/judge
+app.include_router(team_api.router)  # /api/help, /api/help/{run_id}, /api/rerun
 
 SORTS = {
     "top": "post_votes DESC, created_at DESC, id DESC",

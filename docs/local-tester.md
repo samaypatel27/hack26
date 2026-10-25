@@ -35,7 +35,7 @@ agent ─▶ asks the user ("may I test the fixes in copies? a few minutes, uses
    no  ─▶ agent tries the ranked fixes itself, in order, rerunning the check after each
    yes ─▶ agent runs: python ".../plugin/tester/test_fixes.py" --project "..." --session <id> --run-id run-1 --check '<cmd>'
             (Bash, foreground, timeout 600000; Claude Code's permission prompt is a second yes)
-tester ─▶ GET /v1/help/run-1 (the report) ─▶ one copy per hypothesis (up to 3, in parallel) + one untouched baseline copy
+tester ─▶ GET /api/help/run-1 (the report) ─▶ one copy per hypothesis (up to 3, in parallel) + one untouched baseline copy
             each copy: claude -p applies the steps ─▶ the tester captures the diff ─▶ the tester reruns the check
          ─▶ prints "WINNER: hypothesis 2 (<cause>)" + the diff, or "NO_WINNER: 3 hypotheses tried", or "INCONCLUSIVE: ..."
 hook (sees the tester's Bash result; it is not counted as a struggling run)
@@ -61,7 +61,7 @@ The hook never posts and never runs the tester. It only tells the agent which to
 | `plugin/hook/brain.py` | changed | Parses `ask_for_help` / `check_help` results (`TEAM_*`, `KNOWN_FIX`, `TRY_FIRST`) after stripping the community label; recognizes the tester command in Bash and reads its first line; the Open Question rule now needs a real team run that gave up; a direct `ask_for_help` is tied to the command failing right now |
 | `plugin/hook/notebook.py` | changed | New episode fields (`team_run_id`, `team_status`, `team_report_idx`, `tester_offered`, `team_fix`); MCP results shaped `{"content": [...]}` are read as text |
 | `plugin/skills/agentoverflow/SKILL.md` | changed | Sections "Team replies", `TEST_FIXES`, `TEAM_STATUS`; `CALL_TEAM` shortened |
-| `plugin/hook/dev/mock_backend.py`, `mock_data.json` | changed | Fake `POST /v1/help` (`KNOWN_FIX` for a known fingerprint, else `TEAM_STARTED: run-1`) and `GET /v1/help/{run_id}` (first `TEAM_WORKING` with events, then `TEAM_REPORT` with a canned 3-hypothesis report); `--selftest` checks them |
+| `plugin/hook/dev/mock_backend.py`, `mock_data.json` | changed | Fake `POST /api/help` (`KNOWN_FIX` for a known fingerprint, else `TEAM_STARTED: run-1`) and `GET /api/help/{run_id}` (first `TEAM_WORKING` with events, then `TEAM_REPORT` with a canned 3-hypothesis report); `--selftest` checks them |
 | `plugin/hook/dev/fake_claude.py` | **new** | A stand-in for `claude -p` for tests and the replay: applies scripted edits per hypothesis and logs what it saw |
 | `plugin/hook/dev/replay.py` | changed | New scenario lines `_env` and `_run` (run a command like the agent's Bash and feed the result to the hook) |
 | `plugin/hook/dev/scenarios/team_and_tester.jsonl` | **new** | The whole flow end to end with a fake claude |
@@ -74,7 +74,7 @@ The hook never posts and never runs the tester. It only tells the agent which to
 
 ## How the tester works
 
-**1. The report.** `--run-id run-1` fetches `GET /v1/help/run-1` with the hook's own config and request helper
+**1. The report.** `--run-id run-1` fetches `GET /api/help/run-1` with the hook's own config and request helper
 (`backend.py`: `~/.agentoverflow/config.json` or `AGENTOVERFLOW_API_URL`). The shape is the one in
 [api-endpoints.md](api-endpoints.md) (`report.hypotheses[]` with `rank`, `cause`, `confidence`, `steps`, `check`).
 `--report file.json` reads the same JSON from a file instead (for tests and demos). The top `--max-hypotheses`
@@ -223,7 +223,7 @@ Tests and demos:
 
 ```
 python -m unittest discover -s plugin/hook/tests            # 126 tests, ~1 min; never calls the real claude
-python plugin/hook/dev/mock_backend.py --selftest           # includes /v1/help and /v1/help/{run_id}
+python plugin/hook/dev/mock_backend.py --selftest           # includes /api/help and /api/help/{run_id}
 python plugin/hook/dev/replay.py plugin/hook/dev/scenarios/team_and_tester.jsonl   # the whole flow, fake claude
 ```
 

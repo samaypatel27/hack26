@@ -137,15 +137,26 @@ def search(error: str, command: str = "", tags: list[str] | None = None) -> str:
 #   evidence (fail counts, fingerprints); this tool brings the agent's own explanation.
 # USED IN: Workflow 2 (stuck)
 @mcp.tool()
-def ask_for_help(description: str, command: str, error: str, tried: list[str] | None = None) -> str:
+def ask_for_help(
+    description: str, command: str, error: str, tried: list[str] | None = None, fingerprint: str = ""
+) -> str:
     """Ask for help with a problem you are stuck on. Describe what you were doing, give the
-    failing command and key error lines, and list what you already tried. Returns a known fix,
-    a known open question, a checklist to try first, or a run ID if a team started (use
-    check_help with it)."""
+    failing command and key error lines, and list what you already tried (at least two
+    attempts, with what happened). Pass `fingerprint` from the hook message when it gave one.
+    Returns a known fix, a known open question, a checklist to try first, or a run ID if a team
+    started (use check_help with it)."""
     data, err = call_api(
         "POST",
         "/api/help",
-        {"description": description, "command": command, "error": error, "tried": tried or []},
+        {
+            "goal": description,
+            "symptom": error,
+            "check_command": command,
+            "tried": [{"attempt": t, "result": ""} for t in (tried or [])],
+            "fingerprint": fingerprint,
+            "project": project_id(),
+            "model": os.environ.get("ANTHROPIC_MODEL", ""),
+        },
     )
     if err:
         return err

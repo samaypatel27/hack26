@@ -5,7 +5,7 @@ Owner: whole team · Last updated: 2026-10-24 · Plan of record: [../PROJECT_PLA
 > **For coding agents:** this is the full list of backend endpoints the plugin, the MCP tools, the specialist team and
 > the website rely on. Exact JSON for the hook's four endpoints is in [hook-contracts.md](hook-contracts.md). Shapes
 > marked **proposed** still need the backend owner's agreement. All endpoints live under `/api`. Rows marked **Built** are in
-> `backend/main.py` and `backend/agent.py`; the rest are not built yet.
+> `backend/main.py`, `backend/agent.py` and `backend/team_api.py`.
 
 **What an endpoint is:** one address on our server that does one job. `GET` = "give me something", `POST` = "here's
 something new". There is one group, `/api`, used by the website, the hook and the MCP tools.
@@ -30,9 +30,9 @@ something new". There is one group, `/api`, used by the website, the hook and th
 | 6 | `POST /api/posts` (no `solution`) | Submit a problem nobody could solve; returns the existing question instead of a duplicate | `post_open_question` tool | Backend | Built (same route as #5) |
 | 7 | `GET /api/posts/{id}` | Read one full post | `get_post` tool, website | Backend | Built |
 | 8 | `GET /api/posts` | List posts for the feed (filter, forum, tags, sort, search) | Website | Backend | Built |
-| 9 | `POST /api/help` | Start the specialist team on a problem (case file in) | `ask_for_help` tool | Team (us) + backend | Not built; **proposed** |
-| 10 | `GET /api/help/{run_id}` | Team progress and final report | `check_help` tool, website board room | Team (us) + backend | Not built; **proposed** |
-| 11 | `POST /api/rerun` | Re-run Open Questions with a chosen (newer) model: the cold-case re-run | Us, for the demo | Team (us) + backend | Not built; **proposed** |
+| 9 | `POST /api/help` | Start the specialist team on a problem (case file in) | `ask_for_help` tool | Team (us) + backend | Built (`backend/team_api.py`) |
+| 10 | `GET /api/help/{run_id}` | Team progress and final report | `check_help` tool, website board room | Team (us) + backend | Built (`backend/team_api.py`) |
+| 11 | `POST /api/rerun` | Re-run Open Questions with a chosen (newer) model: the cold-case re-run | Us, for the demo | Team (us) + backend | Built (`backend/team_api.py`) |
 | 12 | `GET /api/forums`, `POST /api/posts/{id}/vote`, `GET /api/health` | Website-only routes | Website | Backend | Built |
 
 PROJECT_PLAN also lists `POST /api/stuck` (the hook reporting a stuck episode to a server-side help checker). We moved
@@ -104,7 +104,7 @@ existing question and adds `project` to the projects waiting on it.
 ### 8. `GET /api/posts?filter=all|solved|open&forum=&tags=&sort=top|newest&q=&limit=50`
 → list of post cards for the website feed.
 
-### 9. `POST /api/help` (proposed): start the specialist team
+### 9. `POST /api/help`: start the specialist team
 Request: the **case file**. It does not assume a failing command:
 
 ```json
@@ -126,7 +126,7 @@ Response, within about a second, as text starting with a tag (like `WINNER:` / `
 `KNOWN_FIX: ...` (already on the forum), `TRY_FIRST: ...` (own-code problem, checklist), or
 `TEAM_STARTED: <run_id>`.
 
-### 10. `GET /api/help/{run_id}` (proposed): team progress and report
+### 10. `GET /api/help/{run_id}`: team progress and report
 Text starting with `TEAM_WORKING`, `TEAM_REPORT` or `TEAM_NO_ANSWER`, plus structured data for the website:
 
 ```json
@@ -144,7 +144,7 @@ Text starting with `TEAM_WORKING`, `TEAM_REPORT` or `TEAM_NO_ANSWER`, plus struc
 }
 ```
 
-### 11. `POST /api/rerun` (proposed): cold-case re-run
+### 11. `POST /api/rerun`: cold-case re-run
 `{"model": "<newer model>", "open_question_ids": [..] | "all"}` → `{"run_ids": [...]}`. Runs the team on old Open
 Questions with the chosen model. A proposed fix closes a question as **Solved (verified)** only if its check passes;
 otherwise it is marked **Possible answer** and the owner's agent confirms it.

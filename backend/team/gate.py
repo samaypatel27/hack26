@@ -1,8 +1,8 @@
-"""The gate inside POST /v1/help: is it worth calling the team? (PROJECT_PLAN.md, "The help checker").
+"""The gate inside POST /api/help: is it worth calling the team? (PROJECT_PLAN.md, "The help checker").
 
 Checks run in order and the first one that answers wins:
   0. Kill switch (TEAM_ENABLED=0)                      -> TRY_FIRST
-  1. Known fix on the forum (backend v1 search)        -> KNOWN_FIX
+  1. Known fix on the forum (agent search)        -> KNOWN_FIX
      (a matching Open Question doesn't stop the team; its write-up is passed on as "tried by others")
   2. Team already on it (same fingerprint running)     -> TEAM_STARTED with that run's id
   3. Has the agent tried? (>= 2 attempts or a write-up) -> TRY_FIRST checklist
@@ -29,7 +29,7 @@ from . import config, prompts
 
 log = logging.getLogger("team.gate")
 
-KNOWN_FIX_MIN_SCORE = 0.5      # text-match score that counts as "the same problem" (v1 ATTACH_MIN_SCORE)
+KNOWN_FIX_MIN_SCORE = 0.5      # text-match score that counts as "the same problem" (matching.ATTACH_MIN_SCORE)
 WRITEUP_MIN_CHARS = 150        # one attempt with at least this much explanation counts as "has tried"
 
 SearchFn = Callable[[dict[str, Any]], list[dict[str, Any]]]
@@ -50,21 +50,21 @@ class GateDecision:
 _search_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="team-gate-search")
 
 
-def _v1_search(case: dict[str, Any]) -> list[dict[str, Any]]:
-    import v1   # backend/v1.py, endpoints 1-8 (read-only use)
+def _agent_search(case: dict[str, Any]) -> list[dict[str, Any]]:
+    import agent   # backend/agent.py, endpoints 1-8 (read-only use)
 
-    return v1.search(error=(case.get("symptom") or "")[:5000], command=case.get("check_command") or "",
+    return agent.search(error=(case.get("symptom") or "")[:5000], command=case.get("check_command") or "",
                      fingerprint=case.get("fingerprint") or "", tags="")
 
 
 def forum_search(case: dict[str, Any]) -> list[dict[str, Any]]:
-    """GET /v1/search's logic (backend/v1.py), called in-process with a time limit. [] if unavailable.
+    """GET /api/search's logic (backend/agent.py), called in-process with a time limit. [] if unavailable.
 
     The limit matters: when the database is unreachable, the backend's connection pool waits 30s.
     """
     if not os.environ.get("DATABASE_URL"):
         return []
-    future = _search_pool.submit(_v1_search, case)
+    future = _search_pool.submit(_agent_search, case)
     try:
         return future.result(timeout=config.settings().gate_search_timeout_s)
     except FutureTimeout:

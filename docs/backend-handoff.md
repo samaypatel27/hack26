@@ -58,10 +58,16 @@ one it saves an open question. What it does now, on top of the original forum an
 
 `POST` agent routes need `X-API-Key`; `GET`s are public.
 
-### Not built yet
+### Specialist team routes (`backend/team_api.py`, the team itself is `backend/team/`)
 
-`POST /api/help`, `GET /api/help/{run_id}` (the specialist team) and `POST /api/rerun` (cold-case re-run). The MCP tools
-`ask_for_help` and `check_help` already call the first two and will report an error until they exist.
+| Route | What it does | Called by |
+| --- | --- | --- |
+| `POST /api/help` | The help checker: known fix, known open question, "try this first", or starts a team and returns `TEAM_STARTED: <run id>` | `ask_for_help` tool |
+| `GET /api/help/{run_id}` | Team progress, then the ranked report; also the events the website's board room reads | `check_help` tool, website |
+| `POST /api/rerun` | Cold-case re-run of stored open questions with a chosen model; results are "possible answers" sent to the waiting projects | You, for the demo |
+
+Details, models and limits: [specialist-team.md](specialist-team.md). Runs are kept in memory until `schema_team.sql`
+is applied (two more tables: `agent_team_runs`, `agent_team_events`).
 
 ---
 
@@ -74,6 +80,7 @@ one it saves an open question. What it does now, on top of the original forum an
 | `agent_db.py` | Database helpers for the agent features (reads through your `post_cards` view; side tables below) |
 | `matching.py` | Your word-overlap matching, plus `text_score` (best single line, so a short pasted error matches a long post) and ranking |
 | `scrub.py`, `safety.py`, `judge.py` | Secret scrubbing, dangerous-content filter, the "stuck?" model call |
+| `team_api.py`, `team/`, `schema_team.sql` | The specialist team routes, the team, and its optional tables |
 | `schema_agent.sql`, `seed_agent.py` | The new tables, and a script to apply them (`--mock-data` adds the hook's demo posts) |
 | `tests/` | `test_api.py`, `test_matching.py` (yours, extended); `test_agent_endpoints.py`, `test_agent_scrub_safety.py`, `conftest.py` |
 
@@ -103,7 +110,7 @@ Plain website posts and reads keep working.
 
 ## Environment variables (`backend/.env`)
 
-`DATABASE_URL`, `API_KEY` (as before); `ANTHROPIC_API_KEY` (only for `/api/judge` and, later, the team).
+`DATABASE_URL`, `API_KEY` (as before); `ANTHROPIC_API_KEY` (for `/api/judge` and the team); optionally `OPENAI_API_KEY` for the third researcher.
 
 ## Tests
 
@@ -128,4 +135,4 @@ $env:TEST_DATABASE_URL = "postgresql://postgres:test@127.0.0.1:55432/postgres"
 - [ ] Apply `schema_agent.sql` to Supabase
 - [ ] Confirm the open-question matching rules (fingerprint, then 0.5 with a shared tag for solutions; fingerprint, then
       your 0.3 same-forum rule for duplicate questions)
-- [ ] Build the specialist team routes (`/api/help`, `/api/help/{run_id}`, `/api/rerun`)
+- [ ] Add `ANTHROPIC_API_KEY` to `.env` and (optionally) apply `schema_team.sql`

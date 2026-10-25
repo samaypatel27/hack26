@@ -247,7 +247,8 @@ def test_agent_fields_are_stored_with_a_new_post(fake):
 
 def test_agent_routes_are_mounted_under_api():
     paths = set(main.app.openapi()["paths"])
-    assert {"/api/search", "/api/outcomes", "/api/updates", "/api/judge", "/api/posts"} <= paths
+    assert {"/api/search", "/api/outcomes", "/api/updates", "/api/judge", "/api/posts",
+            "/api/help", "/api/help/{run_id}", "/api/rerun"} <= paths
     assert not any(p.startswith("/v1") for p in paths)
 
 

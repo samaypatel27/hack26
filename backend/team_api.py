@@ -1,19 +1,17 @@
 """The specialist team's endpoints: 9-11 of docs/api-endpoints.md.
 
-    POST /v1/help            case file in -> KNOWN_FIX / TRY_FIRST / TEAM_STARTED text (within ~1-3s)
-    GET  /v1/help/{run_id}   TEAM_WORKING / TEAM_REPORT / TEAM_NO_ANSWER / TEAM_FAILED text, plus
+    POST /api/help            case file in -> KNOWN_FIX / TRY_FIRST / TEAM_STARTED text (within ~1-3s)
+    GET  /api/help/{run_id}   TEAM_WORKING / TEAM_REPORT / TEAM_NO_ANSWER / TEAM_FAILED text, plus
                              status, events and report for the website's board room
-    POST /v1/rerun           cold-case re-run of stored Open Questions with a chosen model
+    POST /api/rerun           cold-case re-run of stored Open Questions with a chosen model
 
-Include it in main.py with one line (next to the v1 router):
-    from team_v1 import router as team_router; app.include_router(team_router)
+main.py includes this router (next to the agent router).
 
-Same rules as backend/v1.py: POSTs need X-API-Key = env API_KEY, GETs are public, rejected input is
+Same rules as backend/agent.py: POSTs need X-API-Key = env API_KEY, GETs are public, rejected input is
 400 {"detail"}, unknown ids are 404. Team runs execute in a small thread pool inside this process
 (TEAM_MAX_CONCURRENT_RUNS), so the request returns at once and the agent polls check_help.
 """
 
-import hmac
 import logging
 import os
 import threading
@@ -22,14 +20,16 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
+
+from agent import require_api_key
 
 from team import case_file, config, gate, report, runner
 from team import store as store_mod
 
 log = logging.getLogger("team.api")
 
-router = APIRouter(prefix="/v1", tags=["team"])
+router = APIRouter(prefix="/api", tags=["team"])
 
 QUEUE_GRACE_S = 120         # deadline slack for a run waiting in the thread pool queue
 MAX_RERUN = 25
@@ -46,13 +46,6 @@ class _State:
 
 
 STATE = _State()
-
-
-def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Same rule as v1.require_api_key."""
-    expected = os.environ.get("API_KEY")
-    if not expected or not x_api_key or not hmac.compare_digest(x_api_key, expected):
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 def _clients() -> config.Clients:
@@ -101,7 +94,7 @@ def start_run(case: dict[str, Any], *, models: dict[str, str] | None = None, sou
 
 
 # ---------------------------------------------------------------------------
-# 9. POST /v1/help
+# 9. POST /api/help
 # ---------------------------------------------------------------------------
 
 @router.post("/help", dependencies=[Depends(require_api_key)])
@@ -128,7 +121,7 @@ def ask_for_help(raw: Any = Body(default=None)) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 10. GET /v1/help/{run_id}
+# 10. GET /api/help/{run_id}
 # ---------------------------------------------------------------------------
 
 def _elapsed(run: dict[str, Any]) -> float:
@@ -170,27 +163,25 @@ def check_help(run_id: str, since: int = 0) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 11. POST /v1/rerun
+# 11. POST /api/rerun
 # ---------------------------------------------------------------------------
 
 def _load_open_questions(ids: list[int] | str, limit: int) -> list[dict[str, Any]]:
-    """Open Question posts from the backend's tables (backend/db_v1.py, read-only use)."""
+    """Open Question posts from the backend's tables (backend/agent_db.py, read-only use)."""
     if STATE.open_questions_fn is not None:
         return STATE.open_questions_fn(ids, limit)
     if not os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=400, detail="Re-runs need the database (DATABASE_URL) to read Open Questions.")
-    import db_v1
+    import agent_db
 
-    with db_v1.connect() as conn:
-        if ids == "all":
-            posts = db_v1.candidate_posts(conn, open_only=True)[:limit]
-        else:
-            posts = [p for p in (db_v1.get_post(conn, i) for i in ids) if p]
+    with agent_db.connect() as conn:
+        posts = agent_db.candidate_posts(conn, open_only=True)
+    posts = posts[:limit] if ids == "all" else [p for p in posts if p["id"] in ids]
     return [{**p, "tags": list(p.get("tags") or [])} for p in posts]
 
 
 def _notify_possible_answer(open_question_id: int, run_id: str, result: dict[str, Any]) -> None:
-    """Tell the Open Question's owner (GET /v1/updates) that a re-run found a possible answer. Never raises."""
+    """Tell the Open Question's owner (GET /api/updates) that a re-run found a possible answer. Never raises."""
     top = (result.get("hypotheses") or [{}])[0]
     models = result.get("models") or {}
     message = (f"A cold-case re-run ({models.get('chair') or models.get('docs')}) found a possible answer for your "
@@ -202,11 +193,11 @@ def _notify_possible_answer(open_question_id: int, run_id: str, result: dict[str
             return
         if not os.environ.get("DATABASE_URL"):
             return
-        import db_v1
+        import agent_db
 
-        with db_v1.connect() as conn:
-            for project in db_v1.watchers(conn, open_question_id):
-                db_v1.add_update(conn, project, message, open_question_id)
+        with agent_db.connect() as conn:
+            for project in agent_db.watchers(conn, open_question_id):
+                agent_db.add_update(conn, project, message, open_question_id)
     except Exception:  # noqa: BLE001
         log.exception("could not queue the possible-answer update for Open Question %s", open_question_id)
 
@@ -247,7 +238,7 @@ def rerun(raw: Any = Body(default=None)) -> dict[str, Any]:
         "skipped": skipped,
         "models": config.models_for(overrides),
         "note": ("Each finished run is a 'Possible answer', not 'Solved (verified)': the server can't run the "
-                 "reproduction. The owner is told through GET /v1/updates; their agent tries the fix, and the "
+                 "reproduction. The owner is told through GET /api/updates; their agent tries the fix, and the "
                  "hook records the outcome."),
     }
 

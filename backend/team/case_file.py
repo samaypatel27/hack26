@@ -130,7 +130,7 @@ def _fit(case: dict[str, Any]) -> None:
 
 
 def from_open_question(post: dict[str, Any]) -> dict[str, Any]:
-    """A case file for a cold-case re-run, built from a stored Open Question post (db_v1 row).
+    """A case file for a cold-case re-run, built from a stored Open Question post (agent_db row).
 
     The post's description already holds the summary, the error and everything that was tried.
     The owner's project id is deliberately left out.

@@ -44,7 +44,7 @@ def models_for(overrides: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def override_for(model: str) -> dict[str, str]:
-    """Seat overrides for a cold-case re-run with one chosen model (POST /v1/rerun).
+    """Seat overrides for a cold-case re-run with one chosen model (POST /api/rerun).
 
     A Claude model takes every Claude seat (docs, issues, community fallback, chair); an OpenAI
     model takes the community seat. The gate never runs on a re-run.

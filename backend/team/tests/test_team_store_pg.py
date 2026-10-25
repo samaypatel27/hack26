@@ -1,6 +1,6 @@
 """PostgresStore against a THROWAWAY Postgres (TEAM_TEST_DATABASE_URL), and the memory fallback.
 
-The test applies schema_team_v1.sql itself, on purpose, to its own throwaway database. The app
+The test applies schema_team.sql itself, on purpose, to its own throwaway database. The app
 never does that: choose_store only checks whether the tables exist.
 """
 
@@ -12,7 +12,7 @@ import pytest
 from team import store as store_mod
 
 TEST_DB = os.environ.get("TEAM_TEST_DATABASE_URL", "")
-SCHEMA = Path(__file__).resolve().parents[2] / "schema_team_v1.sql"
+SCHEMA = Path(__file__).resolve().parents[2] / "schema_team.sql"
 
 pytestmark = pytest.mark.skipif(not TEST_DB, reason="set TEAM_TEST_DATABASE_URL to a throwaway Postgres")
 
@@ -25,7 +25,7 @@ def _sql(query: str) -> None:
 
 
 def test_missing_tables_fall_back_to_memory_without_creating_them(monkeypatch):
-    _sql("DROP TABLE IF EXISTS v1_team_events; DROP TABLE IF EXISTS v1_team_runs;")
+    _sql("DROP TABLE IF EXISTS agent_team_events; DROP TABLE IF EXISTS agent_team_runs;")
     monkeypatch.setenv("DATABASE_URL", TEST_DB)
     chosen = store_mod.choose_store()
     assert chosen.kind == "memory"
@@ -35,7 +35,7 @@ def test_missing_tables_fall_back_to_memory_without_creating_them(monkeypatch):
 def test_postgres_store_round_trip(monkeypatch):
     _sql(SCHEMA.read_text(encoding="utf-8"))
     _sql(SCHEMA.read_text(encoding="utf-8"))   # idempotent
-    _sql("TRUNCATE v1_team_events, v1_team_runs")
+    _sql("TRUNCATE agent_team_events, agent_team_runs")
     monkeypatch.setenv("DATABASE_URL", TEST_DB)
     st = store_mod.choose_store()
     assert st.kind == "postgres"
@@ -56,6 +56,6 @@ def test_postgres_store_round_trip(monkeypatch):
     assert st.find_active_run("51749bd5") is None
 
     st.create_run("tr_pg2", case={}, models={}, source="rerun", deadline_s=1, open_question_id=3)
-    _sql("UPDATE v1_team_runs SET deadline_at = now() - interval '1 minute' WHERE id = 'tr_pg2'")
+    _sql("UPDATE agent_team_runs SET deadline_at = now() - interval '1 minute' WHERE id = 'tr_pg2'")
     assert st.expire_stale() == 1
     assert st.get_run("tr_pg2")["status"] == "failed"

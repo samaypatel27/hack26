@@ -1,7 +1,7 @@
 """The specialist team: gate, three independent researchers, and a chair (docs/specialist-team.md).
 
 Entry points:
-    team.gate.decide(...)        quick yes/no inside POST /v1/help
+    team.gate.decide(...)        quick yes/no inside POST /api/help
     team.runner.run_team(...)    the full team run (researchers in parallel, then the chair)
     python -m backend.team.cli   run a whole team on a case file and print timing + cost
 

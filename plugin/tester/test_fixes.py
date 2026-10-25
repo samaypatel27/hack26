@@ -237,14 +237,14 @@ def tail(text: str, lines: int = TAIL_LINES, chars: int = TAIL_CHARS) -> str:
 # ---------------------------------------------------------------------------
 
 def load_report(run_id: str | None, report_file: str | None) -> dict[str, Any]:
-    """The report dict ({"hypotheses": [...], ...}) from a file or from GET /v1/help/{run_id}."""
+    """The report dict ({"hypotheses": [...], ...}) from a file or from GET /api/help/{run_id}."""
     if report_file:
         try:
             data = json.loads(Path(report_file).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise TesterError(f"cannot read the report file: {exc}") from exc
     else:
-        data = backend._request("GET", f"/v1/help/{run_id}", FETCH_TIMEOUT)
+        data = backend._request("GET", f"/api/help/{run_id}", FETCH_TIMEOUT)
         if not isinstance(data, dict):
             raise TesterError(f"could not fetch team run {run_id} from {backend.api_url()}")
         status = data.get("status")
@@ -900,7 +900,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--project", required=True, help="the project folder (the hook's message gives it)")
     p.add_argument("--session", required=True, help="the Claude Code session id")
     src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--run-id", help="team run id: the report is fetched with GET /v1/help/{run_id}")
+    src.add_argument("--run-id", help="team run id: the report is fetched with GET /api/help/{run_id}")
     src.add_argument("--report", help="a report JSON file instead (for testing)")
     p.add_argument("--check", help="the command that proves a fix (default: from the report, then the session)")
     p.add_argument("--max-hypotheses", type=int, default=MAX_HYPOTHESES)

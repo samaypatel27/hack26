@@ -122,7 +122,7 @@ def test_forum_search_has_a_time_limit(prisma_case, monkeypatch):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://nowhere")
     monkeypatch.setenv("TEAM_GATE_SEARCH_TIMEOUT_S", "0.3")
-    monkeypatch.setattr(gate, "_v1_search", lambda case: time.sleep(2) or [SOLVED])
+    monkeypatch.setattr(gate, "_agent_search", lambda case: time.sleep(2) or [SOLVED])
     t0 = time.monotonic()
     assert gate.forum_search(prisma_case) == []
     assert time.monotonic() - t0 < 1.0

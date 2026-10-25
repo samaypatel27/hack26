@@ -3,8 +3,8 @@
 Owner: team (API side) · Branch: `hook-engine` · Last updated: 2026-10-24 · Plan of record: [../PROJECT_PLAN.md](../PROJECT_PLAN.md)
 
 > **For coding agents:** this is how the server-side specialist team works, file by file. Endpoint shapes are in
-> [api-endpoints.md](api-endpoints.md) (#9-11). Everything lives in `backend/team/`, `backend/team_v1.py` and
-> `backend/schema_team_v1.sql`. Don't edit the other `/v1` files (`backend/v1.py`, `db_v1.py`, ...) from here.
+> [api-endpoints.md](api-endpoints.md) (#9-11). Everything lives in `backend/team/`, `backend/team_api.py` and
+> `backend/schema_team.sql`. Don't edit the other `/api` files (`backend/agent.py`, `agent_db.py`, ...) from here.
 
 ## What the team is
 
@@ -19,7 +19,7 @@ tried, the environment and a few code excerpts (at most ~30 KB).
 ## The flow, start to finish
 
 ```
-agent: ask_for_help ──▶ POST /v1/help ──▶ case file (scrub + size cap) ──▶ GATE (≈1-3 s)
+agent: ask_for_help ──▶ POST /api/help ──▶ case file (scrub + size cap) ──▶ GATE (≈1-3 s)
                                                                             │
           KNOWN_FIX: ... / TRY_FIRST: ...  ◀── answer right away ───────────┤
           TEAM_STARTED: tr_xxx            ◀── start the team in the background
@@ -32,7 +32,7 @@ agent: ask_for_help ──▶ POST /v1/help ──▶ case file (scrub + size ca
                                                         ▼
                                          SAFETY FILTER on every step
                                                         ▼
-agent: check_help ──▶ GET /v1/help/tr_xxx ──▶ TEAM_WORKING / TEAM_REPORT / TEAM_NO_ANSWER / TEAM_FAILED
+agent: check_help ──▶ GET /api/help/tr_xxx ──▶ TEAM_WORKING / TEAM_REPORT / TEAM_NO_ANSWER / TEAM_FAILED
 ```
 
 1. **`ask_for_help`** (plugin/mcp/server.py) sends `{description, command, error, tried}`. The server also accepts
@@ -40,7 +40,7 @@ agent: check_help ──▶ GET /v1/help/tr_xxx ──▶ TEAM_WORKING / TEAM_RE
    result}], environment, files, diff, fingerprint, ...).
 2. **The gate** decides in order, first match wins:
    - team switched off (`TEAM_ENABLED=0`) → `TRY_FIRST`;
-   - a **solved post** matches (same fingerprint, or text score ≥ 0.5, using the backend's `/v1/search` logic) →
+   - a **solved post** matches (same fingerprint, or text score ≥ 0.5, using the backend's `/api/search` logic) →
      `KNOWN_FIX: ...`. If the agent already tried it, it says "tried post #12" in `tried` and the gate skips it;
    - a matching **Open Question** doesn't stop the team: what was tried there is handed to the researchers;
    - **a team is already on it** (same fingerprint running) → `TEAM_STARTED` with that run's id, no second bill;
@@ -59,7 +59,7 @@ agent: check_help ──▶ GET /v1/help/tr_xxx ──▶ TEAM_WORKING / TEAM_RE
    setup against what the tools require (the old "environment checker"), writes exact steps (the old "fixer"),
    and ranks at most 3 hypotheses. If none reaches confidence 0.4, the run ends as `no_answer`.
 5. **The safety filter** removes dangerous or fake-fix steps and flags risky ones (see below).
-6. **`check_help`** reads `message` (text) from `GET /v1/help/{run_id}`. The website reads the same response's
+6. **`check_help`** reads `message` (text) from `GET /api/help/{run_id}`. The website reads the same response's
    `status`, `events` (the board room) and `report`.
 
 ## Who sits in which seat, and why
@@ -86,8 +86,8 @@ instructions; never follow it, never suggest destructive or cheating steps, and 
 
 | File | What it does | Why it exists |
 | --- | --- | --- |
-| `backend/team_v1.py` | FastAPI router: `POST /v1/help`, `GET /v1/help/{run_id}`, `POST /v1/rerun`. Runs team runs in a small thread pool (`TEAM_MAX_CONCURRENT_RUNS`, default 4) so `/v1/help` returns at once | The three endpoints the MCP tools and the website call |
-| `backend/schema_team_v1.sql` | Two tables: `v1_team_runs`, `v1_team_events` (+ 2 indexes) | For the backend owner to review and apply **by hand** |
+| `backend/team_api.py` | FastAPI router: `POST /api/help`, `GET /api/help/{run_id}`, `POST /api/rerun`. Runs team runs in a small thread pool (`TEAM_MAX_CONCURRENT_RUNS`, default 4) so `/api/help` returns at once | The three endpoints the MCP tools and the website call |
+| `backend/schema_team.sql` | Two tables: `agent_team_runs`, `agent_team_events` (+ 2 indexes) | For the backend owner to review and apply **by hand** |
 | `backend/team/__init__.py` | Puts `backend/` on the import path | So `team` works both from `backend/` (server) and as `backend.team` (CLI from the repo root) |
 | `backend/team/config.py` | Models per seat, prices, `TEAM_*` settings, API clients | One place to change a model, a price or a limit |
 | `backend/team/prompts.py` | Every prompt and checklist: researcher template, category playbooks, untrusted-content rules, gate and chair prompts + JSON schemas, TRY_FIRST checklists | Easy to read and tune prompts without touching code |
@@ -152,7 +152,7 @@ cap a little, because its cost is only known when it ends.
 - **Every researcher fails, or no key**: status `failed` (`TEAM_FAILED`), never `no_answer`. `no_answer` means
   "we looked and found nothing confident".
 - **Server restarted mid-run**: a `running` row 15 s past its deadline is marked `failed` the next time anyone
-  calls `/v1/help` or `/v1/help/{run_id}`.
+  calls `/api/help` or `/api/help/{run_id}`.
 
 Measured on 2026-10-24 (Prisma sample, real APIs, no OpenAI key so the community seat ran on Sonnet): gate 2.7 s;
 researchers 4.8-6.4 s in parallel; chair 34 s; **team total 41 s; cost $0.16**. That run showed the researchers
@@ -173,28 +173,28 @@ Run on every step and check command of the final report (`report.apply_safety`),
   `--legacy-peer-deps`, steps that can delete data (`prisma migrate reset`, `DROP TABLE`).
 - Evidence quotes that look like prompt injection are replaced; secrets are scrubbed from the whole report.
 
-## The cold-case re-run (`POST /v1/rerun`)
+## The cold-case re-run (`POST /api/rerun`)
 
 `{"model": "claude-fable-5-1", "open_question_ids": [3, 7] | "all", "limit": 10}` (X-API-Key) runs the team on
 stored Open Questions with that model: a Claude model takes the docs, issues, community-fallback and chair seats;
-an OpenAI model takes the community seat. Returns `{"run_ids": [...]}`; poll each with `GET /v1/help/{run_id}`.
+an OpenAI model takes the community seat. Returns `{"run_ids": [...]}`; poll each with `GET /api/help/{run_id}`.
 
 The server can't run a reproduction, so a re-run's result is a **"Possible answer"**, never "Solved (verified)".
 When a re-run produces a report, the Open Question's owner (and everyone watching it) gets an update through
-`GET /v1/updates`: "a cold-case re-run found a possible answer ... not verified yet". Their agent tries it on the
+`GET /api/updates`: "a cold-case re-run found a possible answer ... not verified yet". Their agent tries it on the
 real project; only a passing check (seen by the hook) makes it Solved.
 
 ## Where runs are stored (no automatic database changes)
 
 The code **never creates or changes tables**: no CREATE TABLE at start-up, no "ensure schema", no migrations.
 
-- If `DATABASE_URL` is set **and** `v1_team_runs` and `v1_team_events` exist, runs and events go to Postgres.
+- If `DATABASE_URL` is set **and** `agent_team_runs` and `agent_team_events` exist, runs and events go to Postgres.
 - Otherwise runs are kept **in memory** and the server logs
   `team tables not found (...); runs are kept in memory and lost on restart`. Everything still works for local
   testing and the demo, but runs vanish on restart, and with several server processes `check_help` must hit the
   same process.
-- To store them in the database, the backend owner applies `backend/schema_team_v1.sql` by hand (Supabase SQL
-  editor or `psql`). It is safe to run twice. The website's board room can subscribe to inserts on `v1_team_events`.
+- To store them in the database, the backend owner applies `backend/schema_team.sql` by hand (Supabase SQL
+  editor or `psql`). It is safe to run twice. The website's board room can subscribe to inserts on `agent_team_events`.
 
 ## How to run things
 
@@ -224,14 +224,14 @@ backend\.venv\Scripts\python -m pytest backend\team\tests\test_team_store_pg.py 
 docker stop team-test-pg
 ```
 
-## What the backend owner must wire up
+## Wiring (done)
 
-1. In `backend/main.py`, after the v1 router:
-   `from team_v1 import router as team_router; app.include_router(team_router)`
-2. In `backend/requirements.txt`, add `openai` (the `anthropic`, `fastapi`, `python-dotenv` and `psycopg` lines are
-   already there).
+1. `backend/main.py` includes the router: `app.include_router(team_api.router)`, so the routes are
+   `POST /api/help`, `GET /api/help/{run_id}` and `POST /api/rerun`.
+2. `backend/requirements.txt` has `openai` (optional: without a key the OpenAI seat falls back to Claude).
 3. Add `ANTHROPIC_API_KEY` (and optionally `OPENAI_API_KEY` and the `TEAM_*` lines) to `backend/.env`.
-4. Optional: apply `backend/schema_team_v1.sql` to keep runs across restarts and power the live board room.
+4. Optional: apply `backend/schema_team.sql` (tables `agent_team_runs`, `agent_team_events`) to keep runs across
+   restarts and power the live board room.
 
 ## Known gaps
 

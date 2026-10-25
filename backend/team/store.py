@@ -1,12 +1,12 @@
 """Where team runs and their board-room events are kept.
 
 Two stores with the same methods:
-  PostgresStore  the tables in backend/schema_team_v1.sql (v1_team_runs, v1_team_events), used when
+  PostgresStore  the tables in backend/schema_team.sql (agent_team_runs, agent_team_events), used when
                  DATABASE_URL is set AND those tables already exist.
   MemoryStore    a dict in this process. Used when there is no DATABASE_URL or the tables are missing,
                  so local testing and the demo still work. Runs are lost on restart.
 
-This module NEVER creates or changes tables. The backend owner applies schema_team_v1.sql by hand.
+This module NEVER creates or changes tables. The backend owner applies schema_team.sql by hand.
 """
 
 import logging
@@ -18,7 +18,7 @@ from typing import Any
 
 log = logging.getLogger("team.store")
 
-TABLES = ("v1_team_runs", "v1_team_events")
+TABLES = ("agent_team_runs", "agent_team_events")
 STALE_GRACE_S = 15          # a "running" row this long past its deadline is marked failed
 STALE_ERROR = "the run did not finish before its deadline (server restarted or timed out)"
 EVENT_LIMIT = 500
@@ -139,7 +139,7 @@ class PostgresStore:
 
     def tables_exist(self) -> bool:
         with self._connect() as conn:
-            row = conn.execute("SELECT to_regclass('v1_team_runs') AS runs, to_regclass('v1_team_events') AS events"
+            row = conn.execute("SELECT to_regclass('agent_team_runs') AS runs, to_regclass('agent_team_events') AS events"
                                ).fetchone()
         return bool(row and row["runs"] and row["events"])
 
@@ -147,7 +147,7 @@ class PostgresStore:
                    deadline_s: float, open_question_id: int | None = None) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO v1_team_runs (id, status, source, fingerprint, project, open_question_id, models,"
+                "INSERT INTO agent_team_runs (id, status, source, fingerprint, project, open_question_id, models,"
                 " case_file, deadline_at) VALUES (%s, 'running', %s, %s, %s, %s, %s, %s,"
                 " now() + make_interval(secs => %s))",
                 (run_id, source, case.get("fingerprint"), case.get("project"), open_question_id,
@@ -156,29 +156,29 @@ class PostgresStore:
 
     def mark_started(self, run_id: str, deadline_s: float) -> None:
         with self._connect() as conn:
-            conn.execute("UPDATE v1_team_runs SET started_at = now(), deadline_at = now() + make_interval(secs => %s)"
+            conn.execute("UPDATE agent_team_runs SET started_at = now(), deadline_at = now() + make_interval(secs => %s)"
                          " WHERE id = %s", (deadline_s, run_id))
 
     def finish_run(self, run_id: str, status: str, report: dict[str, Any] | None, error: str | None) -> None:
         with self._connect() as conn:
             conn.execute(
-                "UPDATE v1_team_runs SET status = %s, report = %s, error = %s, cost_usd = %s, finished_at = now()"
+                "UPDATE agent_team_runs SET status = %s, report = %s, error = %s, cost_usd = %s, finished_at = now()"
                 " WHERE id = %s AND status = 'running'",
                 (status, self._json(report), error, float((report or {}).get("cost_usd") or 0.0), run_id),
             )
 
     def add_event(self, run_id: str, member: str, kind: str, text: str, data: dict[str, Any] | None) -> None:
         with self._connect() as conn:
-            conn.execute("INSERT INTO v1_team_events (run_id, member, type, text, data) VALUES (%s, %s, %s, %s, %s)",
+            conn.execute("INSERT INTO agent_team_events (run_id, member, type, text, data) VALUES (%s, %s, %s, %s, %s)",
                          (run_id, member, kind, (text or "")[:1000], self._json(data)))
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
-            return conn.execute("SELECT * FROM v1_team_runs WHERE id = %s", (run_id,)).fetchone()
+            return conn.execute("SELECT * FROM agent_team_runs WHERE id = %s", (run_id,)).fetchone()
 
     def list_events(self, run_id: str, since: int = 0) -> list[dict[str, Any]]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT id, member, type, text, data, created_at FROM v1_team_events"
+            rows = conn.execute("SELECT id, member, type, text, data, created_at FROM agent_team_events"
                                 " WHERE run_id = %s AND id > %s ORDER BY id LIMIT %s",
                                 (run_id, since, EVENT_LIMIT)).fetchall()
         return [{"id": r["id"], "member": r["member"], "type": r["type"], "text": r["text"], "data": r["data"],
@@ -186,19 +186,19 @@ class PostgresStore:
 
     def count_runs_today(self) -> int:
         with self._connect() as conn:
-            row = conn.execute("SELECT count(*) AS n FROM v1_team_runs WHERE created_at >= date_trunc('day', now()"
+            row = conn.execute("SELECT count(*) AS n FROM agent_team_runs WHERE created_at >= date_trunc('day', now()"
                                " AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'").fetchone()
         return int(row["n"])
 
     def find_active_run(self, fingerprint: str) -> str | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT id FROM v1_team_runs WHERE status = 'running' AND fingerprint = %s"
+            row = conn.execute("SELECT id FROM agent_team_runs WHERE status = 'running' AND fingerprint = %s"
                                " AND deadline_at > now() ORDER BY created_at DESC LIMIT 1", (fingerprint,)).fetchone()
         return row["id"] if row else None
 
     def expire_stale(self) -> int:
         with self._connect() as conn:
-            cur = conn.execute("UPDATE v1_team_runs SET status = 'failed', error = %s, finished_at = now()"
+            cur = conn.execute("UPDATE agent_team_runs SET status = 'failed', error = %s, finished_at = now()"
                                " WHERE status = 'running' AND deadline_at < now() - make_interval(secs => %s)",
                                (STALE_ERROR, STALE_GRACE_S))
             return cur.rowcount or 0
@@ -219,7 +219,7 @@ def choose_store() -> Any:
         if store.tables_exist():
             return store
         log.warning("team tables not found (%s); runs are kept in memory and lost on restart. "
-                    "Apply backend/schema_team_v1.sql to store them in the database.", ", ".join(TABLES))
+                    "Apply backend/schema_team.sql to store them in the database.", ", ".join(TABLES))
     except Exception as e:  # noqa: BLE001 - database down: still let the team work
         log.warning("team: database unreachable (%s); runs are kept in memory and lost on restart", e)
     return MemoryStore()
