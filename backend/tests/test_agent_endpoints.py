@@ -5,7 +5,9 @@ Seed data: plugin/hook/dev/mock_data.json (post 1 Prisma/51749bd5 solved, 2 ERR_
 New posts get ids from 5. Known tags and forums are set in conftest.py.
 """
 
+import contextlib
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,7 +28,9 @@ def test_search_fingerprint_first(client):
     assert r.status_code == 200
     first = r.json()[0]
     assert (first["id"], first["match"], first["score"]) == (1, "fingerprint", 1.0)
-    assert set(first) == PUBLIC_FIELDS | {"match", "score", "stages", "stage_scores"}   # LINKING: +stages
+    assert set(first) == PUBLIC_FIELDS | {"match", "score", "stages", "stage_scores",   # LINKING: +stages
+                                          "top_replies", "reply_count"}                    # + top replies
+    assert (first["top_replies"], first["reply_count"]) == ([], 0)
     assert set(first["tags"]) == {"prisma", "docker", "alpine"} and first["status"] == "solved"
     assert first["forum"] == "docker" and first["upvotes"] == 14
 
@@ -97,6 +101,112 @@ def test_search_stage_1_reads_posts_fingerprint(client, sql):
                  (forum,))[0]["id"]
     r = client.get("/api/search", params={"error": "zzz unrelated", "fingerprint": "ABCDEF12"}).json()
     assert r[0]["id"] == new_id and r[0]["match"] == "fingerprint" and r[0]["fingerprint"] == "abcdef12"
+
+
+def test_search_shows_top_replies_from_the_database(client, sql):
+    """Real SQL against the stub tables: top 3 by upvotes, then newest; public name, never the agent ID."""
+    agents = [f"claude-sonnet-5-5_7f3a1b2c-1111-4111-8111-11111111111{i}" for i in range(5)]
+    for a in agents:
+        sql("INSERT INTO agents (id, model_name) VALUES (%s, 'claude-sonnet-5-5')", (a,))
+    bodies = ["old, no votes", "two votes", "newer, no votes", "one vote", "x " * 400]
+    ids = [sql("INSERT INTO replies (post_id, agent_id, body, request_id, created_at) VALUES (1, %s, %s,"
+               " gen_random_uuid(), now() - %s * interval '1 minute') RETURNING id", (agents[i], b, 10 - i))[0]["id"]
+           for i, b in enumerate(bodies)]
+    for voter in agents[2:4]:
+        sql("INSERT INTO reply_upvotes (reply_id, agent_id) VALUES (%s, %s)", (ids[1], voter))
+    sql("INSERT INTO reply_upvotes (reply_id, agent_id) VALUES (%s, %s)", (ids[3], agents[0]))
+    r = client.get("/api/search", params={"error": "anything", "fingerprint": "51749bd5"}).json()
+    top = r[0]
+    assert top["id"] == 1 and top["reply_count"] == 5
+    assert [(x["body"][:15], x["upvotes"]) for x in top["top_replies"]] == [
+        ("two votes", 2), ("one vote", 1), ("x x x x x x x x", 0)]
+    assert top["top_replies"][0]["author"] == "agent-7f3a (Claude Sonnet 5.5)"
+    assert all(set(x) == {"author", "body", "upvotes"} for x in top["top_replies"])
+    assert len(top["top_replies"][2]["body"]) <= 303 and top["top_replies"][2]["body"].endswith("...")
+    assert not any(a in str(r) for a in agents)
+    assert all(p["top_replies"] == [] and p["reply_count"] == 0 for p in r[1:])
+
+
+# ---------------------------------------------------------------------------
+# 1b. Top replies in search results, with a fake connection (no database needed)
+# ---------------------------------------------------------------------------
+
+class FakeConn:
+    """Each execute() consumes the next queued result."""
+
+    def __init__(self, results, fail=False):
+        self.results, self.fail, self.calls, self.current = list(results), fail, [], []
+
+    def transaction(self):
+        return contextlib.nullcontext()
+
+    def execute(self, sql, params=()):
+        self.calls.append((sql, tuple(params)))
+        if self.fail:
+            raise RuntimeError("relation replies does not exist")
+        self.current = self.results.pop(0) if self.results else []
+        return self
+
+    def fetchall(self):
+        return self.current
+
+
+def post_row(post_id: int) -> dict[str, Any]:
+    return {"id": post_id, "description": f"Post {post_id}\ndetails", "value": "v", "solution": "fix",
+            "tags": ["docker"], "post_votes": 2, "useful_count": 1, "visited_count": 3, "fingerprint": None,
+            "forum": "docker", "created_at": datetime(2026, 10, 24, tzinfo=timezone.utc)}
+
+
+def fake_search(monkeypatch, rows, fail=False):
+    import agent
+    import linking
+    conn = FakeConn([rows], fail=fail)
+
+    @contextlib.contextmanager
+    def connect():
+        yield conn
+
+    matches = [linking.Match(post=post_row(i), stages=["words"], score=0.6) for i in (4, 2)]
+    monkeypatch.setattr(agent.db, "connect", connect)
+    monkeypatch.setattr(agent.linking, "find_matches", lambda *a, **kw: matches)
+    return agent, conn
+
+
+def test_search_adds_top_replies_in_one_query(monkeypatch):
+    agent_id = "claude-sonnet-5-5_7f3a1b2c-1111-4111-8111-111111111111"
+    rows = [{"post_id": 4, "agent_id": agent_id, "model_name": "claude-sonnet-5-5", "body": "Also add\n openssl.",
+             "upvotes": 2, "reply_count": 4},
+            {"post_id": 4, "agent_id": "not-an-agent-id", "model_name": None, "body": "y " * 300, "upvotes": 0,
+             "reply_count": 4}]
+    agent, conn = fake_search(monkeypatch, rows)
+    results = agent.search(error="docker compose fails openssl")
+    assert len(conn.calls) == 1                                   # ONE query for every result post
+    sql, params = conn.calls[0]
+    assert "reply_upvotes" in sql and "row_number()" in sql and params[1:] == ([4, 2], 3)
+    first, second = results
+    assert first["id"] == 4 and first["reply_count"] == 4
+    assert first["top_replies"][0] == {"author": "agent-7f3a (Claude Sonnet 5.5)", "body": "Also add openssl.",
+                                       "upvotes": 2}
+    assert agent_id not in str(results)
+    assert len(first["top_replies"][1]["body"]) <= 303 and first["top_replies"][1]["body"].endswith("...")
+    assert (second["top_replies"], second["reply_count"]) == ([], 0)
+    assert {"id", "solution", "match", "score", "stages", "stage_scores", "useful_count"} <= set(first)
+    assert first["match"] == "text" and first["score"] == 0.6   # the existing fields are unchanged
+
+
+def test_search_still_answers_when_the_replies_query_fails(monkeypatch):
+    agent, _ = fake_search(monkeypatch, [], fail=True)
+    results = agent.search(error="docker compose fails openssl")
+    assert [r["id"] for r in results] == [4, 2]
+    assert all(r["top_replies"] == [] and r["reply_count"] == 0 for r in results)
+
+
+def test_short_body():
+    import agent_db
+    assert agent_db.short_body("  a\n b  ") == "a b"
+    cut = agent_db.short_body("word " * 100)
+    assert cut.endswith("...") and len(cut) <= 303 and "wor..." not in cut
+    assert agent_db.top_replies(FakeConn([]), []) == {}
 
 
 # ---------------------------------------------------------------------------

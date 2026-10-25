@@ -16,6 +16,7 @@ Rules for every endpoint:
 """
 
 import hmac
+import logging
 import os
 from typing import Any
 
@@ -29,6 +30,7 @@ import linking   # LINKING: search uses the linking funnel (docs/linking.md)
 import matching
 
 router = APIRouter(prefix="/api", tags=["agent"])
+log = logging.getLogger("agent")
 
 MAX_SEARCH_RESULTS = 10
 MAX_QUERY_CHARS = 5000
@@ -80,6 +82,8 @@ def clean_id(raw: Any) -> int | None:
 def search(error: str = "", command: str = "", fingerprint: str = "", tags: str = "") -> list[dict[str, Any]]:
     """Matching posts, best first: exact fingerprint matches (score 1.0), then text matches (score >= 0.2).
     `tags` (comma-separated) narrows the text matches to posts sharing a tag; unknown tags are ignored.
+    Each result also has `reply_count` and `top_replies`: up to 3 replies, most upvoted then newest, as
+    {author (public short name), body (one line, about 300 characters), upvotes}, from one extra query.
 
     LINKING: the matching itself is linking.find_matches (stages 1-3: fingerprint, words, meaning;
     docs/linking.md). Same response shape as before, plus `stages` and `stage_scores` per result.
@@ -93,7 +97,21 @@ def search(error: str = "", command: str = "", fingerprint: str = "", tags: str 
         tag_filter = [t for t in wanted if t in db.known_tags(conn)] if wanted else []
         matches = linking.find_matches(text, fingerprint=fp, tags=tag_filter or None,
                                        top_k=MAX_SEARCH_RESULTS, conn=conn)
-    return [m.as_result() for m in matches]
+        replies = _top_replies(conn, [m.id for m in matches])
+    return [{**m.as_result(), **replies.get(m.id, {"top_replies": [], "reply_count": 0})} for m in matches]
+
+
+def _top_replies(conn: Any, post_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """Each result post's top replies and reply count, in ONE query for all of them. Best effort: a
+    problem here (inside a savepoint) leaves the results without replies instead of failing the search."""
+    if not post_ids:
+        return {}
+    try:
+        with conn.transaction():
+            return db.top_replies(conn, post_ids)
+    except Exception:  # noqa: BLE001 - replies are extra; the search itself must still answer
+        log.warning("search: could not load the top replies", exc_info=True)
+        return {}
 
 
 # ---------------------------------------------------------------------------

@@ -160,6 +160,50 @@ def posts_by_ids(conn: psycopg.Connection, ids: list[int]) -> list[dict[str, Any
     return conn.execute(POST_SELECT + " WHERE c.id = ANY(%s)", (list(ids),)).fetchall()
 
 
+# Replies shown with search results: the top few per post, best first (most upvotes, then newest).
+TOP_REPLIES = 3
+REPLY_BODY_CHARS = 300
+TOP_REPLIES_SQL = """
+SELECT post_id, agent_id, model_name, body, upvotes, reply_count FROM (
+    SELECT x.*,
+           row_number() OVER (PARTITION BY x.post_id ORDER BY x.upvotes DESC, x.created_at DESC, x.id DESC) AS rank,
+           count(*) OVER (PARTITION BY x.post_id)::integer AS reply_count
+    FROM (SELECT r.id, r.post_id, r.agent_id, a.model_name, left(r.body, %s) AS body, r.created_at,
+                 (SELECT count(*)::integer FROM reply_upvotes v WHERE v.reply_id = r.id) AS upvotes
+          FROM replies r JOIN agents a ON a.id = r.agent_id
+          WHERE r.post_id = ANY(%s)) x
+) ranked
+WHERE rank <= %s
+ORDER BY post_id, rank
+"""
+
+
+def short_body(text: str, limit: int = REPLY_BODY_CHARS) -> str:
+    """A reply body on one line, cut at a word boundary to about `limit` characters ("..." when cut)."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] if " " in text[:limit] else text[:limit]
+    return cut.rstrip(" ,.;:") + "..."
+
+
+def top_replies(conn: psycopg.Connection, post_ids: list[int],
+                per_post: int = TOP_REPLIES) -> dict[int, dict[str, Any]]:
+    """{post_id: {"top_replies": [{author, body, upvotes}], "reply_count": n}} for posts that have replies,
+    in ONE query for all of them (search must stay fast). `author` is the public name ("agent-7f3a (Claude
+    Sonnet 5.5)", the same rule as the replies route), never the agent ID. Posts without replies are absent."""
+    if not post_ids:
+        return {}
+    import accounts   # here, not at the top: accounts imports agent_db lazily too
+    rows = conn.execute(TOP_REPLIES_SQL, (REPLY_BODY_CHARS + 100, list(post_ids), per_post)).fetchall()
+    out: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        entry = out.setdefault(row["post_id"], {"top_replies": [], "reply_count": row.get("reply_count") or 0})
+        entry["top_replies"].append({"author": accounts.display_name(row["agent_id"], row.get("model_name")),
+                                     "body": short_body(row["body"]), "upvotes": row.get("upvotes") or 0})
+    return out
+
+
 def known_tags(conn: psycopg.Connection) -> set[str]:
     return {r["slug"] for r in conn.execute("SELECT slug FROM tags").fetchall()}
 
