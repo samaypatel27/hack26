@@ -14,6 +14,10 @@ The state file holds:
   episode      the open stuck episode, or None (see new_episode)
   last_judge   history length when the AI judge last ran
   last_error   the most recent failing command and its error text, for forum searches
+  goal_key     the command the last stuck episode was about (its pass saves a "last_good" checkpoint)
+  checkpoints  git snapshots saved this session, oldest first (checkpoints.py, docs/rewind.md):
+               {"id", "ref", "label", "time", "history_idx", "key", "cmd"}. Two entries can share one
+               snapshot when the files did not change in between.
 
 This file also turns raw hook payloads into history records (action_from_tool_use).
 """
@@ -35,6 +39,8 @@ HISTORY_LIMIT = 200
 TAIL_CHARS = 500        # output kept per run, for the AI judge and "already tried" notes
 ERROR_CHARS = 2000      # error text kept for forum searches and messages
 GIT_TIMEOUT = 2
+CHECKPOINT_LIMIT = 20   # entries kept in the notes (checkpoints.py keeps the same number of git refs)
+REWIND_KIND = "rewind"  # history record written by rewind.py; struggles.py counts from the last one
 
 EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
 READ_TOOLS = {"Read", "Grep", "Glob"}
@@ -102,6 +108,8 @@ def new_state(payload: dict[str, Any]) -> dict[str, Any]:
         "episode": None,
         "last_judge": None,
         "last_error": None,
+        "goal_key": None,
+        "checkpoints": [],
     }
 
 
@@ -119,6 +127,14 @@ def new_episode(key: str, fp: str | None, started_idx: int) -> dict[str, Any]:
         "last_nudge_idx": None,     # history length when we last sent a ladder message
         "started_idx": started_idx,
         "tried": [],                # short notes of what was already tried
+        "rewind_offered": False,    # REWIND_OFFER is sent at most once per episode
+        "rewound": False,           # set by rewind.py after the user said yes
+        # The backup team and the local tester (docs/local-tester.md). Older notes files lack these: use .get().
+        "team_run_id": None,        # from TEAM_STARTED: <run_id>
+        "team_status": None,        # working | report | no_answer | failed | winner | no_winner
+        "team_report_idx": None,    # history length when TEAM_REPORT arrived
+        "tester_offered": None,     # run id TEST_FIXES was sent for (once per run)
+        "team_fix": None,           # {"hypothesis", "cause", "run_id"}: the tester's WINNER, until the check passes
     }
 
 
@@ -130,8 +146,10 @@ def load(payload: dict[str, Any]) -> dict[str, Any]:
         state = None
     if not isinstance(state, dict) or not isinstance(state.get("history"), list):
         return new_state(payload)
-    for key in ("episode", "last_judge", "last_error"):
+    for key in ("episode", "last_judge", "last_error", "goal_key"):
         state.setdefault(key, None)
+    if not isinstance(state.get("checkpoints"), list):
+        state["checkpoints"] = []
     if not state.get("project_id"):
         state["project_id"] = project_id(project_dir(payload))
     return state
@@ -167,6 +185,51 @@ def record(state: dict[str, Any], action: dict[str, Any]) -> None:
         episode["started_idx"] = max(0, episode["started_idx"] - extra)
         if episode.get("last_nudge_idx") is not None:
             episode["last_nudge_idx"] -= extra
+    for entry in state.get("checkpoints") or []:
+        entry["history_idx"] = entry.get("history_idx", 0) - extra   # may go below 0: saved before the oldest action we still have
+
+
+# ---------------------------------------------------------------------------
+# Checkpoints (the git side is in checkpoints.py)
+# ---------------------------------------------------------------------------
+
+def add_checkpoint(state: dict[str, Any], saved: dict[str, Any], label: str, history_idx: int,
+                   run: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Note a checkpoints.save() result under `label`. Forgets entries whose git ref was pruned."""
+    pruned = set(saved.get("pruned") or [])
+    entries = [e for e in state.get("checkpoints") or [] if e.get("ref") not in pruned]
+    entry = {"id": saved["id"], "ref": saved["ref"], "label": label, "time": saved.get("time") or time.time(),
+             "history_idx": history_idx, "key": (run or {}).get("key", ""), "cmd": (run or {}).get("cmd", "")}
+    entries.append(entry)
+    state["checkpoints"] = entries[-CHECKPOINT_LIMIT:]
+    return entry
+
+
+def checkpoint_for(state: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """The checkpoint a name means: "last_good" / "before_rewind" (the latest one), "episode_start"
+    (the one saved at the open episode's first failure, else the latest), or an id number."""
+    entries = state.get("checkpoints") or []
+    if str(name).isdigit():
+        return next((e for e in reversed(entries) if e.get("id") == int(name)), None)
+    episode = state.get("episode")
+    if name == "episode_start" and episode:
+        start = episode.get("started_idx", 0)
+        return next((e for e in reversed(entries) if e.get("label") == name and e.get("key") == episode.get("key")
+                     and (e.get("history_idx") == start or (start == 0 and e.get("history_idx", 0) <= 0))), None)
+    return next((e for e in reversed(entries) if e.get("label") == name), None)
+
+
+def last_rewind_idx(history: list[dict[str, Any]]) -> int:
+    """Index of the last rewind record, or -1."""
+    return next((i for i in range(len(history) - 1, -1, -1) if history[i].get("kind") == REWIND_KIND), -1)
+
+
+def edits_since(state: dict[str, Any], entry: dict[str, Any]) -> tuple[int, list[str]]:
+    """(number of edits, files edited) since a checkpoint, not counting edits a rewind already undid."""
+    history = state["history"]
+    start = max(entry.get("history_idx", -1), last_rewind_idx(history)) + 1
+    edits = [a.get("path", "") for a in history[max(start, 0):] if a.get("kind") == "edit"]
+    return len(edits), list(dict.fromkeys(p for p in edits if p))
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +267,10 @@ def _text(value: Any) -> str:
     if isinstance(value, list):     # MCP-style content blocks
         return "\n".join(_text(v.get("text") if isinstance(v, dict) else v) for v in value)
     if isinstance(value, dict):
+        if isinstance(value.get("content"), list):   # an MCP result object: {"content": [blocks], ...}
+            return _text(value["content"])
+        if isinstance(value.get("result"), str):
+            return value["result"]
         return json.dumps(value)
     return str(value)
 

@@ -7,6 +7,14 @@ transcript_path filled in, and the hook's output is printed under it.
 Special lines (not sent to the hook):
   {"_comment": "..."}     printed as a heading
   {"_assistant": "..."}   appended to the fake transcript as the agent's reply (the Stop hook reads it)
+  {"_files": {"path": "text"}}   write files into the project (what an Edit event really changed)
+  {"_git": ["init", "-q"]}       run git in the project, with a throwaway identity
+  {"_rewind": "last_good"}       run rewind.py for this session, as the agent does after the user says yes
+  {"_env": {"NAME": "value"}}    set environment variables for the lines after it (hook and _run)
+  {"_run": "command"}            run a command in the project with bash, like the agent's Bash tool, and send
+                                 its result to the hook as a Bash PostToolUse / PostToolUseFailure event
+  In _env values and _run commands, {project}, {session}, {tester}, {dev} and {python} are filled in
+  ({tester} = plugin/tester/test_fixes.py, {dev} = this folder).
 
 Usage (from the repo root):
   python plugin/hook/dev/replay.py plugin/hook/dev/scenarios/stuck_known_fix.jsonl
@@ -28,6 +36,10 @@ import time
 from pathlib import Path
 
 MAIN = Path(__file__).resolve().parents[1] / "main.py"
+REWIND = Path(__file__).resolve().parents[1] / "rewind.py"
+TESTER = Path(__file__).resolve().parents[2] / "tester" / "test_fixes.py"
+DEV = Path(__file__).resolve().parent
+GIT = ["git", "-c", "user.email=replay@example.com", "-c", "user.name=replay", "-c", "commit.gpgsign=false"]
 
 
 def describe(payload: dict) -> str:
@@ -87,6 +99,41 @@ def main() -> None:
                 f.write(json.dumps(entry) + "\n")
             print(f"\n(agent says) {payload['_assistant']}")
             continue
+        if "_files" in payload:
+            for rel, text in payload["_files"].items():
+                (project / rel).parent.mkdir(parents=True, exist_ok=True)
+                (project / rel).write_text(text, encoding="utf-8")
+            continue
+        if "_git" in payload:
+            subprocess.run(GIT + payload["_git"], cwd=project, capture_output=True)
+            continue
+        if "_rewind" in payload:
+            result = subprocess.run([sys.executable, str(REWIND), "--project", str(project), "--session",
+                                     args.session, payload["_rewind"]], capture_output=True, env=env)
+            text = (result.stdout or result.stderr).decode("utf-8", errors="replace").strip()
+            print(f"\n(agent runs rewind.py {payload['_rewind']}, exit {result.returncode})")
+            print("    " + text.replace("\n", "\n    "))
+            continue
+        fill = {"project": project.as_posix(), "session": args.session, "tester": TESTER.as_posix(),
+                "dev": DEV.as_posix(), "python": Path(sys.executable).as_posix()}
+        if "_env" in payload:
+            env.update({k: str(v).format(**fill) for k, v in payload["_env"].items()})
+            continue
+        if "_run" in payload:
+            command = payload["_run"].format(**fill)
+            started = time.time()
+            sys.path.insert(0, str(TESTER.parent))
+            from test_fixes import bash_path   # Git Bash on Windows, never WSL's bash.exe
+            result = subprocess.run([bash_path() or "bash", "-c", command], cwd=project, capture_output=True, env=env)
+            output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+            print(f"\n(agent runs `{command[:100]}`, exit {result.returncode}, {time.time() - started:.1f}s)")
+            print("    " + output.strip().replace("\n", "\n    "))
+            if result.returncode == 0:
+                payload = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+                           "tool_response": {"stdout": output, "stderr": "", "interrupted": False}}
+            else:
+                payload = {"hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
+                           "tool_input": {"command": command}, "error": f"Exit code {result.returncode}\n{output}"}
 
         step += 1
         payload.setdefault("session_id", args.session)
@@ -107,7 +154,11 @@ def main() -> None:
     if errors.exists():
         print(f"\nHook errors were logged: {errors}")
     if args.project is None and not args.keep:
-        shutil.rmtree(project, ignore_errors=True)
+        # git's object files are read-only on Windows: make them writable, then delete
+        try:
+            shutil.rmtree(project, onexc=lambda func, path, _: (os.chmod(path, 0o666), func(path)))
+        except OSError:
+            pass
     else:
         print(f"\nProject folder: {project}")
 

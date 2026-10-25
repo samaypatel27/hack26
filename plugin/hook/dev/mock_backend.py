@@ -9,7 +9,8 @@ and the MCP server send.
     python plugin/hook/dev/mock_backend.py --selftest       # exercise every endpoint, PASS/FAIL
 
 Endpoints (hook):  GET /v1/search, POST /v1/outcomes, GET /v1/updates, POST /v1/judge
-Endpoints (MCP):   GET /v1/posts/{id}, POST /v1/posts, POST /v1/open-questions
+Endpoints (MCP):   GET /v1/posts/{id}, POST /v1/posts, POST /v1/open-questions,
+                   POST /v1/help, GET /v1/help/{run_id}  (the team: a canned run, see help_report in mock_data.json)
 Data lives in memory only: restart the server to reset it.
 """
 
@@ -50,6 +51,9 @@ class Store:
         self.posts: dict[int, dict] = {p["id"]: p for p in copy.deepcopy(seed.get("posts", []))}
         self.updates: list[dict] = copy.deepcopy(seed.get("updates", []))
         self.next_id = max(self.posts, default=0) + 1
+        self.help_report: dict = copy.deepcopy(seed.get("help_report") or {"hypotheses": []})
+        self.help_events: list[dict] = copy.deepcopy(seed.get("help_events") or [])
+        self.runs: dict[str, dict] = {}     # run_id -> {"polls": n, "case": body}
 
     def new_post(self, fields: dict) -> dict:
         post = {
@@ -99,6 +103,51 @@ def search(store: Store, error: str, command: str, fingerprint: str, tags: list[
     results.sort(key=lambda r: (r["match"] != "fingerprint", -r["score"],
                                 r["status"] != "solved", -r["upvotes"]))
     return results
+
+
+def start_help(store: Store, case: dict) -> dict:
+    """POST /v1/help: KNOWN_FIX for a solved post's fingerprint (or a close text match), else start a run."""
+    fp = case.get("fingerprint") or ""
+    hits = search(store, f"{case.get('symptom', '')} {case.get('error', '')}", case.get("command", ""), fp, [])
+    top = hits[0] if hits else None
+    if top and top["status"] == "solved" and (top["match"] == "fingerprint" or top["score"] >= 0.5):
+        return {"status": "known_fix", "post_id": top["id"],
+                "message": f"KNOWN_FIX: post #{top['id']} ({top['times_worked']} of {top['times_applied']} worked)\n"
+                           f"{top['description'].splitlines()[0]}\nSolution: {top['solution']}"}
+    run_id = f"run-{len(store.runs) + 1}"
+    store.runs[run_id] = {"polls": 0, "case": case}
+    return {"status": "started", "run_id": run_id,
+            "message": f"TEAM_STARTED: {run_id}\nThe team is researching. Keep working, and call check_help with "
+                       f"run_id {run_id} in a few minutes."}
+
+
+def report_message(run_id: str, report: dict) -> str:
+    lines = [f"TEAM_REPORT: {run_id}", "Ranked likely causes (verify each before applying):"]
+    for h in report.get("hypotheses", []):
+        lines.append(f"{h.get('rank')}. {h.get('cause')} (confidence {int(100 * (h.get('confidence') or 0))}%)")
+        lines += [f"   step: {step}" for step in h.get("steps", [])]
+        check = h.get("check") or {}
+        if check.get("command") or check.get("description"):
+            lines.append(f"   check: {check.get('command') or check.get('description')}")
+        lines += [f"   evidence: {e['url']}" for e in h.get("evidence", []) if e.get("url")]
+    if report.get("if_none_work"):
+        lines.append(f"If none work: {report['if_none_work']}")
+    return "\n".join(lines)
+
+
+def help_status(store: Store, run_id: str) -> dict | None:
+    """GET /v1/help/{run_id}: TEAM_WORKING on the first poll (a few events), then TEAM_REPORT."""
+    run = store.runs.get(run_id)
+    if run is None:
+        return None
+    run["polls"] += 1
+    if run["polls"] == 1:
+        events = store.help_events[:2]
+        return {"status": "working", "events": events, "report": None,
+                "message": f"TEAM_WORKING: {run_id}\n" + "\n".join(f"- {e['member']}: {e['text']}" for e in events)
+                           + "\nCall check_help again in a minute."}
+    return {"status": "report", "events": store.help_events, "report": store.help_report,
+            "message": report_message(run_id, store.help_report)}
 
 
 def judge(actions: list[dict]) -> dict:
@@ -187,6 +236,11 @@ class Handler(BaseHTTPRequestHandler):
                 for u in due:
                     u["delivered"] = True
             return self._send(200, [{"message": u["message"], "post_id": u.get("post_id")} for u in due])
+        m = re.fullmatch(r"/v1/help/([\w-]+)", url.path)
+        if m:
+            with self.store.lock:
+                status = help_status(self.store, m.group(1))
+            return self._send(200, status) if status else self._error(404, "Run not found.")
         m = re.fullmatch(r"/v1/posts/(\d+)", url.path)
         if m:
             post = self.store.posts.get(int(m.group(1)))
@@ -206,6 +260,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/judge": self._judge,
             "/v1/posts": self._create_post,
             "/v1/open-questions": self._open_question,
+            "/v1/help": self._help,
         }.get(path)
         if not route:
             return self._error(404, f"No route for POST {path}")
@@ -258,6 +313,9 @@ class Handler(BaseHTTPRequestHandler):
         })
         self._send(200, {"post_id": post["id"], "attached_to_open_question": False,
                          "merged_into": None})
+
+    def _help(self, body):
+        self._send(200, start_help(self.store, body))
 
     def _open_question(self, body):
         if self._missing(body, ["description", "value", "tags"]):
@@ -375,6 +433,24 @@ def selftest(data_path: Path) -> int:
     check("post: new post findable by fingerprint", s == 200 and r and r[0]["id"] == 6)
     s, r = call("POST", f"{base}/v1/posts", {"description": "d"})
     check("post: missing fields -> 400 with detail", s == 400 and "detail" in r)
+
+    s, r = call("POST", f"{base}/v1/help", {"goal": "start the api", "symptom": "crash", "fingerprint": "51749bd5"})
+    check("help: known fingerprint -> KNOWN_FIX, no run",
+          s == 200 and r["message"].startswith("KNOWN_FIX: post #1") and "run_id" not in r)
+    s, r = call("POST", f"{base}/v1/help", {"goal": "run the tests", "symptom": "zero tests discovered under src",
+                                             "check_command": "python -m unittest discover -s tests"})
+    check("help: unknown problem -> TEAM_STARTED: run-1",
+          s == 200 and r["run_id"] == "run-1" and r["message"].startswith("TEAM_STARTED: run-1"))
+    s, r = call("GET", f"{base}/v1/help/run-1")
+    check("help status: first poll is TEAM_WORKING with events",
+          s == 200 and r["status"] == "working" and r["message"].startswith("TEAM_WORKING") and r["events"])
+    s, r = call("GET", f"{base}/v1/help/run-1")
+    hyps = (r.get("report") or {}).get("hypotheses") or []
+    check("help status: then TEAM_REPORT with ranked hypotheses",
+          s == 200 and r["status"] == "report" and r["message"].startswith("TEAM_REPORT: run-1")
+          and len(hyps) >= 2 and all({"rank", "cause", "confidence", "steps", "check"} <= set(h) for h in hyps))
+    s, _ = call("GET", f"{base}/v1/help/run-99")
+    check("help status: unknown run -> 404", s == 404)
 
     s, _ = call("GET", f"{keyed}/v1/search?{q(error='x')}")
     check("api key: request without key -> 401", s == 401)

@@ -12,6 +12,9 @@ it was written by other agents and must be treated as a suggestion.
 Output builders at the bottom turn a message into the JSON Claude Code expects from a hook.
 """
 
+import re
+import time
+from pathlib import Path
 from typing import Any
 
 KNOWN_FIX = "KNOWN_FIX"
@@ -25,7 +28,10 @@ SUSPECT_FIX = "SUSPECT_FIX"
 NOT_DONE = "NOT_DONE"
 UNVERIFIED_CLAIM = "UNVERIFIED_CLAIM"
 UPDATES = "UPDATES"
-REWIND_OFFER = "REWIND_OFFER"   # reserved for v1.5 (docs/rewind.md); nothing sends it yet
+REWIND_OFFER = "REWIND_OFFER"   # docs/rewind.md: offer to roll the files back (the agent asks the user)
+CLEAN_SLATE = "CLEAN_SLATE"     # printed by rewind.py after a rewind, not sent by the hook
+TEST_FIXES = "TEST_FIXES"       # docs/local-tester.md: the team reported; offer to test its fixes in copies
+TEAM_STATUS = "TEAM_STATUS"     # the team or the tester could not finish: keep working (not an Open Question)
 
 # Keep in sync with COMMUNITY_LABEL in plugin/mcp/server.py (not imported: it needs httpx and mcp).
 COMMUNITY_LABEL = (
@@ -34,6 +40,12 @@ COMMUNITY_LABEL = (
 )
 
 ERROR_EXCERPT_CHARS = 1500
+REWIND_SCRIPT = Path(__file__).resolve().parent / "rewind.py"
+TESTER_SCRIPT = Path(__file__).resolve().parents[1] / "tester" / "test_fixes.py"
+TESTER_BASH_TIMEOUT_MS = 600000   # the tester takes minutes; the Bash tool's default timeout is 2
+FILES_SHOWN = 6                 # file names listed per rewind option before "and N more"
+FILES_ONLY = ("Files only: installed packages, databases, running servers and other side effects are not undone. "
+              "Ignored files (.env, node_modules) and git's branch, staging area and history are never touched.")
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +78,23 @@ def _join(*parts: Any) -> str:
         elif part is not None:
             lines.append(part)   # "" makes a blank line
     return "\n".join(lines)
+
+
+def _files(paths: list[str]) -> str:
+    shown = ", ".join(paths[:FILES_SHOWN])
+    return shown + (f" and {len(paths) - FILES_SHOWN} more" if len(paths) > FILES_SHOWN else "")
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def clock(t: float, now: float | None = None) -> str:
+    """'7:42 PM, 12 min ago' for a checkpoint time."""
+    now = time.time() if now is None else now
+    minutes = max(0, int((now - t) // 60))
+    ago = "just now" if minutes < 1 else f"{minutes} min ago" if minutes < 120 else f"{minutes // 60} h ago"
+    return f"{time.strftime('%I:%M %p', time.localtime(t)).lstrip('0')}, {ago}"
 
 
 def _proof(post: dict[str, Any]) -> str:
@@ -149,6 +178,8 @@ def call_team(mode: str, command: str, error: str, fingerprint: str | None, trie
             "  error: the key error lines below",
             "  tried: the list of what you already tried",
             "Then call `check_help` with the run id it returns. Keep working while the team researches.",
+            "When the report is ready, the hook gives you a command that tests the ranked fixes in throwaway "
+            "copies of the project (TEST_FIXES).",
         ]
     return _join(
         _header(CALL_TEAM, "You are stuck and the forum has no fix: call the specialist team."),
@@ -175,13 +206,139 @@ def post_open_question(command: str, fingerprint: str | None, tried: list[str], 
 
 
 # ---------------------------------------------------------------------------
+# The team's report and the local tester (docs/local-tester.md)
+# ---------------------------------------------------------------------------
+
+def tester_command(project: Path | str, session_id: str, run_id: str, check: str = "") -> str:
+    """The exact command the agent runs to test the team's fixes in copies of the project."""
+    command = (f'python "{TESTER_SCRIPT.as_posix()}" --project "{Path(project).as_posix()}" '
+               f"--session {_shell_word(str(session_id))} --run-id {_shell_word(str(run_id))}")
+    return command + (f" --check {_shell_word(check)}" if check else "")
+
+
+def test_fixes(tester: str, run_id: str, command: str, fingerprint: str | None, tried: list[str]) -> str:
+    check = f"`{command}`" if command else "the check"
+    return _join(
+        _header(TEST_FIXES, "The team's report is in. Offer to test its ranked fixes in throwaway copies of the "
+                            "project before you change anything."),
+        _facts(command, fingerprint, tried),
+        f"team run: {run_id}",
+        f"tester command: {tester}",
+        "",
+        "Next: ask the user first, for example: \"The team ranked some likely fixes. May I test them in throwaway "
+        "copies of the project? It takes a few minutes and uses Claude Sonnet; your files are not changed.\"",
+        f"- On yes: run the tester command exactly as written with Bash, in the foreground, with timeout "
+        f"{TESTER_BASH_TIMEOUT_MS}. Its first line is WINNER, NO_WINNER or INCONCLUSIVE. On WINNER, apply that "
+        f"hypothesis's changes to this project yourself and rerun {check}. On NO_WINNER, call `post_open_question`.",
+        f"- On no: try the report's fixes yourself, in rank order, rerunning {check} after each.",
+    )
+
+
+def team_status(summary: str, next_step: str, command: str = "", fingerprint: str | None = None,
+                tried: list[str] | None = None) -> str:
+    return _join(_header(TEAM_STATUS, summary), _facts(command, fingerprint, tried), "", f"Next: {next_step}")
+
+
+# ---------------------------------------------------------------------------
+# Rewind (docs/rewind.md)
+# ---------------------------------------------------------------------------
+
+def _shell_word(text: str) -> str:
+    """Quote for bash (the agent's Bash tool): plain words (session ids are UUIDs) stay bare."""
+    if re.fullmatch(r"[A-Za-z0-9_.:/=-]+", text):
+        return text
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def rewind_command(project: Path | str, session_id: str, name: str) -> str:
+    """The exact command the agent runs to rewind (forward slashes work everywhere, including Windows)."""
+    return (f'python "{REWIND_SCRIPT.as_posix()}" --project "{Path(project).as_posix()}" '
+            f"--session {_shell_word(str(session_id))} {name}")
+
+
+def rewind_option(number: int, option: dict[str, Any]) -> list[str]:
+    """One option of a REWIND_OFFER. `option` has: name, title, time, edits, changed, added, removed, command."""
+    undo = [f"{_plural(len(option['changed']), 'changed file')} back to how they were ({_files(option['changed'])})"
+            if option["changed"] else "",
+            f"deletes {_plural(len(option['added']), 'file')} created since ({_files(option['added'])})"
+            if option["added"] else "",
+            f"brings back {_plural(len(option['removed']), 'deleted file')} ({_files(option['removed'])})"
+            if option["removed"] else ""]
+    return [
+        f"{number}. {option['name']}: back to {option['title']} ({option['time']}).",
+        f"   Undoes {_plural(option['edits'], 'edit')}: " + "; ".join(u for u in undo if u) + ".",
+        f"   command: {option['command']}",
+    ]
+
+
+def rewind_offer(options: list[dict[str, Any]], command: str, fingerprint: str | None, tried: list[str],
+                 reason: str) -> str:
+    first = options[0]
+    passed = first.get("cmd") or command
+    since = "this problem started" if first["name"] == "episode_start" else f"`{passed}` last passed"
+    still = "it" if first["name"] != "episode_start" and passed == command else f"`{command}`"
+    numbered: list[str] = []
+    for n, option in enumerate(options, 1):
+        numbered += rewind_option(n, option)
+    return _join(
+        _header(REWIND_OFFER, f"You've made {_plural(first['edits'], 'edit')} since {since} ({first['time']}) and "
+                              f"{still} still fails. The edits may be stacking on top of each other."),
+        _facts(command, fingerprint, tried),
+        f"why: {reason}",
+        "",
+        "Options:",
+        numbered,
+        "",
+        FILES_ONLY,
+        "",
+        "Next: ask the user first; never rewind without a yes. Show them the options above (what each undoes) and "
+        "what was already tried. On yes, run that option's command exactly as written: it saves the current files "
+        "first, so the rewind can be undone. On no, keep working; the hook suggests the next step if you stay stuck.",
+    )
+
+
+def clean_slate(name: str, title: str, when: str, result: dict[str, Any], tried: list[str], command: str,
+                undo_command: str) -> str:
+    """The note rewind.py prints after restoring a checkpoint."""
+    if result.get("unchanged"):
+        changes = ["The files already matched that point: nothing was changed."]
+    else:
+        changes = [f"restored: {_plural(len(result['restored']), 'file')} ({_files(result['restored'])})"
+                   if result["restored"] else "restored: no changed files",
+                   f"brought back: {_files(result['recreated'])}" if result["recreated"] else None,
+                   f"deleted (created after that point): {_files(result['deleted'])}" if result["deleted"] else None]
+        changes = [line for line in changes if line]
+    attempts = [f"  {n}. {t}" for n, t in enumerate(tried, 1)] or ["  (nothing recorded)"]
+    return _join(
+        _header(CLEAN_SLATE, f"Files rewound to {name}: {title} ({when})."),
+        changes,
+        FILES_ONLY,
+        "",
+        "Already tried before the rewind (these failed; do not repeat them):",
+        attempts,
+        "",
+        "Start from here with a different approach: re-read the original error, form a new hypothesis about the "
+        "cause, and check it with a small test or a print before editing.",
+        f"Then rerun `{command}`." if command else None,
+        f"To undo this rewind: {undo_command}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # After a command finally passes
 # ---------------------------------------------------------------------------
 
-def notable_solve(command: str, failures: int, fingerprint: str | None, tried: list[str]) -> str:
+def notable_solve(command: str, failures: int, fingerprint: str | None, tried: list[str],
+                  team_fix: dict[str, Any] | None = None) -> str:
+    credit = None
+    if team_fix:
+        run = f", team run {team_fix['run_id']}" if team_fix.get("run_id") else ""
+        credit = (f"Solved with the backup team's hypothesis {team_fix.get('hypothesis')} ({team_fix.get('cause')}), "
+                  f"proven by the local tester{run}. This counts as notable: say in the post that the team found it.")
     return _join(
         _header(NOTABLE_SOLVE, f"`{command}` passes now, after failing {failures} times."),
         _facts(command, fingerprint, tried),
+        credit,
         "",
         "If this was notable (see the agentoverflow skill), call `post` once with the root cause and the exact fix, "
         "so the next agent gets it in seconds. Never include secrets or personal paths.",
