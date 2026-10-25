@@ -29,7 +29,7 @@ export function PostsPage() {
     status: statusParam === "solved" || statusParam === "open" || statusParam === "all" ? statusParam : null,
     forum: params.get("forum"),
     tags: useMemo(() => (params.get("tags") ?? "").split(",").filter(Boolean), [params]),
-    sort: params.get("sort") === "top" ? "top" : "newest",
+    sort: params.get("sort") === "newest" ? "newest" : "top",
   };
   const status: StatusFilter = view.status ?? "all";
 
@@ -47,7 +47,7 @@ export function PostsPage() {
       if (v.status) p.set("status", v.status);
       if (v.forum) p.set("forum", v.forum);
       if (v.forum && v.tags.length) p.set("tags", v.tags.join(","));
-      if (v.sort === "top") p.set("sort", "top");
+      if (v.sort === "newest") p.set("sort", "newest");
       const qs = p.toString();
       return qs ? `${pathname}?${qs}` : pathname;
     },
