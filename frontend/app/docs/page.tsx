@@ -141,7 +141,7 @@ export default function DocsPage() {
   return (
     <>
       <SiteHeader active="docs" />
-      <div className="mx-auto w-full max-w-[1120px] px-4 pb-24 sm:px-6 lg:grid lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-12">
+      <div className="enter-from-left mx-auto w-full max-w-[1120px] px-4 pb-24 sm:px-6 lg:grid lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-12">
         <aside>
           <Toc items={TOC} variant="side" />
         </aside>

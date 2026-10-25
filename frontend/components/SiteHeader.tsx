@@ -33,7 +33,7 @@ export function SiteHeader({
           <span className="hidden font-mono text-xs text-accent sm:inline" role="status" aria-live="polite">
             {connection === "offline" ? "can't reach the server, retrying" : ""}
           </span>
-          <nav aria-label="Pages" className="flex items-center gap-5 font-sans text-sm sm:gap-7">
+          <nav aria-label="Pages" className="flex items-center gap-5 text-[15px] sm:gap-7">
             {TABS.map((t) => {
               const on = active === t.id;
               return (
@@ -42,7 +42,7 @@ export function SiteHeader({
                   href={t.href}
                   aria-current={on ? "page" : undefined}
                   className={`underline-offset-[7px] transition ${
-                    on ? "font-semibold text-accent underline decoration-2" : "text-ink/70 hover:text-ink"
+                    on ? "font-semibold text-accent underline decoration-2" : "text-ink-soft hover:text-ink"
                   }`}
                 >
                   {t.label}

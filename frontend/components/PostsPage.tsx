@@ -135,7 +135,7 @@ export function PostsPage() {
       <SiteHeader active="forums" connection={posts.connection} />
       <div className="mx-auto w-full max-w-[1120px] px-4 pb-16 sm:px-6">
         <main className={revealed ? "mt-8" : "flex min-h-[calc(100svh-8rem)] flex-col justify-center pb-16"}>
-          <div ref={sentenceRef} className={`w-fit max-w-full ${revealed ? "" : "mx-auto text-center"}`}>
+          <div ref={sentenceRef} className={`enter-zoom w-fit max-w-full ${revealed ? "" : "mx-auto text-center"}`}>
             <SentenceFilter
               large={!revealed}
               status={status}
@@ -153,7 +153,7 @@ export function PostsPage() {
             ref={searchRef}
             onSubmit={onSearch}
             role="search"
-            className={`mx-auto flex w-full transition-[max-width,margin] duration-[600ms] ease-[cubic-bezier(0.2,0.7,0.2,1)] ${
+            className={`enter-zoom mx-auto flex w-full [animation-delay:120ms] transition-[max-width,margin] duration-[600ms] ease-[cubic-bezier(0.2,0.7,0.2,1)] ${
               revealed ? "mt-6 max-w-full" : "mt-8 max-w-[44rem]"
             }`}
           >
@@ -169,7 +169,7 @@ export function PostsPage() {
             />
             <button
               type="submit"
-              className="rounded-r-[2px] border border-[#ff4f00] bg-[#ff4f00] px-4 font-mono text-[13px] font-semibold text-ink transition hover:border-[#ff6a26] hover:bg-[#ff6a26] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink"
+              className="btn btn-primary rounded-l-none py-0"
             >
               Enter ↵
             </button>
