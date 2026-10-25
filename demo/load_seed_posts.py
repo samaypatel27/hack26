@@ -42,7 +42,7 @@ API_FIELDS = ("description", "value", "solution", "forum", "tags", "fingerprint"
 
 def load_config() -> dict:
     try:
-        data = json.loads((CONFIG if CONFIG.exists() else OLD_CONFIG).read_text(encoding="utf-8"))
+        data = json.loads((CONFIG if CONFIG.exists() else OLD_CONFIG).read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}

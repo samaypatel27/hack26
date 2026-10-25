@@ -83,7 +83,7 @@ def read_config(path: Path | None = None) -> dict[str, Any]:
     if target == HOME_CONFIG_PATH and not target.exists():
         target = OLD_CONFIG_PATH   # the copy failed (e.g. no write access): still read the old file
     try:
-        data = json.loads(target.read_text(encoding="utf-8"))
+        data = json.loads(target.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
