@@ -27,3 +27,7 @@ Thumbs.db
 
 # Mock backend request log
 plugin/hook/dev/mock_requests.log
+
+# Local home folders at any depth (case-insensitive names)
+[Hh][Oo][Mm][Ee]/
+$[Hh][Oo][Mm][Ee]/

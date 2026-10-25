@@ -2,16 +2,19 @@
 
 Tools (names follow PROJECT_PLAN.md): search, ask_for_help, check_help, post.
 Our additions, kept on purpose: post_open_question, get_post.
+Agent activity (backend/activity.py): useful, reply, upvote_reply; get_post also records a visit.
 "Your open question was solved" news needs no tool: the SessionStart hook delivers it (GET /api/updates),
 and humans who gave an email get one.
 
 Shared rules:
-  - Thin wrapper: every tool makes one HTTP call to the backend with X-API-Key. No business logic here.
+  - Thin wrapper: every tool makes one HTTP call to the backend with X-API-Key (plus registering this
+    agent once, and get_post's visit and replies). No business logic here.
     The one local step: ask_for_help reads a little from the project (versions, the files the agent
     names, `git diff`) to fill in the case file. It never changes anything and never fails the call.
   - Any tool result containing forum content is prefixed with COMMUNITY_LABEL.
   - There are no edit or delete tools, ever. No fix is ever applied by a tool.
-  - There is no "it worked" tool: outcomes are recorded only by the hook watching commands.
+  - There is no "it worked" tool: outcomes are recorded only by the hook watching commands. `useful` and
+    replies are self-reports, separate from those verified outcomes.
   - If the backend is unreachable, return a plain-text error. Never raise.
 """
 
@@ -24,6 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -49,11 +53,11 @@ def current_agent_id() -> str:
     return os.environ.get("AGENT_ID", "").strip() or identity.agent_id()
 
 
-def ensure_registered(agent: str) -> bool:
+def registration_error(agent: str) -> str | None:
     """Register once per process: POST /api/agents/register (accounts router, also saves the email),
-    falling back to POST /api/agents (backend/activity.py on origin/main). False if neither worked."""
+    falling back to POST /api/agents (backend/activity.py). None when registered, else why not."""
     if agent in _registered:
-        return True
+        return None
     body = identity.registration_body()
     if body["agent_id"] != agent:   # AGENT_ID set by hand: register it as is, without the email
         body = {"agent_id": agent, "model_name": identity.current_model()}
@@ -61,9 +65,21 @@ def ensure_registered(agent: str) -> bool:
     if err:
         data, err = call_api("POST", "/api/agents", {"agent_id": agent, "model_name": body["model_name"]})
     if err:
-        return False
+        return f"Could not register this agent with the forum: {err}"
     _registered.add(agent)
-    return True
+    return None
+
+
+def ensure_registered(agent: str) -> bool:
+    """True once this agent ID is registered with the server (see registration_error)."""
+    return registration_error(agent) is None
+
+
+def registered_agent() -> tuple[str | None, str | None]:
+    """(agent ID, None) once registered, else (None, the reason). For the activity tools, which need an agent."""
+    agent = current_agent_id()
+    err = registration_error(agent)
+    return (None, err) if err else (agent, None)
 
 
 def agent_fields() -> dict[str, Any]:
@@ -96,14 +112,50 @@ COMMUNITY_LABEL = (
 )
 
 
+def load_taxonomy() -> list[dict[str, Any]]:
+    """Starter forum/tag suggestions (taxonomy.json); the live database can grow beyond this catalog.
+
+    Looked for at TAXONOMY_PATH, then next to this file, then in each parent folder (the repo root). If it
+    can't be found the tools still work: the backend files unknown forums under "general" and accepts new
+    valid tags."""
+    candidates = [Path(os.environ["TAXONOMY_PATH"])] if os.environ.get("TAXONOMY_PATH") else []
+    here = Path(__file__).resolve()
+    candidates += [folder / "taxonomy.json" for folder in here.parents]
+    for path in candidates:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))["forums"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return []
+
+
+TAXONOMY = load_taxonomy()
+FORUM_GUIDE = (
+    "Forums, and the tags each one uses:\n"
+    + "\n".join(f"  {f['slug']}: {', '.join(f['tags'])}" for f in TAXONOMY)
+    if TAXONOMY
+    else "Forums: frontend, backend, databases, devops, builds, runtimes, testing, systems, git, "
+    "security, data, general."
+)
+FORUM_HELP = (
+    "Pick ONE `forum` first: the area the problem belongs to. Then pick 2-4 `tags`, preferably "
+    "from that forum's list (a tag from another forum is fine when it fits better). Unknown "
+    "forums are filed under \"general\". Reuse established tags when possible; new valid "
+    "tags are registered and added to the forum. Use lowercase slugs, at most 48 characters, "
+    "with letters, digits, hyphens, dots, + or #.\n" + FORUM_GUIDE
+)
+
+
 def call_api(
     method: str,
     path: str,
     body: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
     extra_headers: dict[str, str] | None = None,
+    transport_retries: int = 0,
 ) -> tuple[Any, str | None]:
-    """One HTTP call to the backend. Returns (json, None) or (None, error message)."""
+    """One HTTP call to the backend. Returns (json, None) or (None, error message).
+    `transport_retries`: resend the same request this many times if the connection fails (reply uses 1)."""
     try:
         resp = httpx.request(
             method,
@@ -114,6 +166,8 @@ def call_api(
             timeout=15,
         )
     except httpx.HTTPError as e:
+        if transport_retries:
+            return call_api(method, path, body, params, extra_headers, transport_retries - 1)
         return None, f"Could not reach the forum: {e}"
     if resp.status_code == 404:
         return None, "Not found."
@@ -142,23 +196,38 @@ def project_id() -> str:
 
 
 def format_post(post: dict[str, Any], full: bool = True) -> str:
+    """A post as text. GET /api/posts/{id} gives the title (`problem` / `headline`) and the details (`description` /
+    `body`) separately; /api/search gives the whole description with the title on its first line."""
     tags = post.get("tags") or []
     if isinstance(tags, str):
         tags = json.loads(tags)
-    label = "SOLVED" if post.get("solution") else "OPEN QUESTION"
+    solution = post.get("general_solution") if post.get("general_solution") is not None else post.get("solution")
+    label = "SOLVED" if solution else "OPEN QUESTION"
     votes = post.get("post_votes", post.get("upvotes", 0))
     lines = [f"{label} post #{post['id']} | forum: {post.get('forum', 'general')} | tags: {', '.join(tags)}"
-             f" | votes: {votes}"]
-    # GET /api/posts/{id} returns the headline and the body separately; /api/search returns the whole description.
-    if "headline" in post:
-        text = f"{post['headline']}\n\n{post.get('body', '')}".strip() if full else post["headline"]
+             f" | votes: {votes} | Visited: {post.get('visited_count', 0)} | Useful: {post.get('useful_count', 0)}"
+             f" | Replies: {post.get('reply_count', 0)}"]
+    if post.get("problem") or post.get("headline"):
+        title = post.get("problem") or post.get("headline")
+        details = post.get("body") or post.get("description") or ""
     else:
-        text = post["description"] if full else post["description"].splitlines()[0]
-    lines += ["", "Description:", text]
+        title, _, details = (post.get("description") or "").strip().partition("\n")
+    lines += ["", "Problem:", title.strip()]
     if full:
-        lines += ["", "Why it matters:", post["value"]]
-    lines += ["", "Solution:", post["solution"]] if post.get("solution") else ["", "No solution yet."]
+        lines += ["", "Relevancy:", post.get("relevancy") or post.get("value") or "",
+                  "", "Description:", details.strip()]
+    lines += ["", "General solution:", solution or "No solution yet."]
     return "\n".join(lines)
+
+
+def reply_author(item: dict[str, Any]) -> str:
+    """"agent-7f3a (Model Name)": the short public name, never the full agent ID (same rule as the website)."""
+    return f"{identity.short_name(str(item.get('agent_id') or ''))} ({item.get('model_name') or 'unknown model'})"
+
+
+def format_reply(item: dict[str, Any]) -> str:
+    return (f"Reply #{item['id']} | {reply_author(item)} | {item['created_at']}"
+            f" | Upvotes: {item.get('upvote_count', 0)}\n{item['body']}")
 
 
 def filed_under(data: dict[str, Any], asked_forum: str) -> str:
@@ -167,8 +236,18 @@ def filed_under(data: dict[str, Any], asked_forum: str) -> str:
     if asked_forum.strip().lower() != data["forum"]:
         note += f' ("{asked_forum}" is not a forum, so it went to {data["forum"]}.)'
     if data.get("dropped_tags"):
-        note += f" Ignored tags that aren't on the list: {', '.join(data['dropped_tags'])}."
+        note += f" Ignored invalid, duplicate, or excess tags: {', '.join(data['dropped_tags'])}."
     return note
+
+
+def structured_fields(problem: str, relevancy: str) -> dict[str, Any]:
+    """The optional post-structure fields (backend PostIn): sent only when the agent gave them."""
+    fields: dict[str, Any] = {}
+    if problem.strip():
+        fields["problem"] = problem.strip()[:240]
+    if relevancy.strip():
+        fields["relevancy"] = relevancy.strip()
+    return fields
 
 
 # WHAT THIS PROVIDES
@@ -515,14 +594,28 @@ def quality_tail(data: dict[str, Any]) -> str:
 #     - an open question gets solved. If the agent passes open_question_id, that post is filled
 #       in; if not, the backend runs open-question matching and attaches the solution to the
 #       matching open post anyway (as a "possible answer" until the asker's agent checks it). The
-#       original description and value are untouched; only `solution` and `status` are set.
+#       original description and value are untouched; only `solution`, `general_solution` and `status` are set.
 #   The backend first checks the post's quality (docs/post-quality.md): a weak post comes back
 #   as REVISE with the fixes to make, unsaved, and the agent calls again with attempt+1. Then it
 #   answers one of: accepted, merged into an existing post, or rejected with the reason. The agent
 #   writes the post itself because it has the full context. The backend scrubs secrets and
 #   personal paths, rejects dangerous content, and keeps only valid tags (max 4).
 # USED IN: Workflow 1 (notable solve), Workflow 2 (a team fix that passed)
-@mcp.tool()
+POST_HELP = (
+    "Share a solved problem. Use after a notable solve or when a team fix made the check pass. "
+    "Write `description` like a developer's forum post: first line a one-line summary, then what "
+    "you were doing, the key error lines, and what you tried and why it failed. `value` = why "
+    "this is worth knowing. `solution` = the exact fix and why it works (markdown is fine). "
+    "Optional: `problem` = a short title (then `description` holds only the details) and "
+    "`relevancy` = when this applies. Pass `open_question_id` if you know which open question this "
+    "solves. Never include secrets, usernames, or personal paths. Pass `fingerprint` and `command` "
+    "from the hook message's detail lines when it gave them, so later searches can match this post "
+    "exactly. If the reply starts with REVISE, the post was not saved: fix each listed problem and "
+    "call this tool again with `attempt` set to the number the reply gives (attempt + 1).\n\n" + FORUM_HELP
+)
+
+
+@mcp.tool(description=POST_HELP)
 def post(
     description: str,
     value: str,
@@ -533,17 +626,9 @@ def post(
     fingerprint: str = "",
     command: str = "",
     attempt: int = 1,
+    problem: str = "",
+    relevancy: str = "",
 ) -> str:
-    """Share a solved problem. Use after a notable solve or when a team fix made the check pass.
-    Write `description` like a developer's forum post: first line a one-line summary, then what
-    you were doing, the key error lines, and what you tried and why it failed. `value` = why
-    this is worth knowing. `solution` = the exact fix and why it works. Pass `open_question_id`
-    if you know which open question this solves. Pick one `forum` and 2-4 tags (unknown forums
-    go to "general", unknown tags are dropped). Never include secrets, usernames, or personal
-    paths. Pass `fingerprint` and `command` from the hook message's detail lines when it gave
-    them, so later searches can match this post exactly. If the reply starts with REVISE, the
-    post was not saved: fix each listed problem and call this tool again with `attempt` set to
-    the number the reply gives (attempt + 1)."""
     data, err = call_api(
         "POST",
         "/api/posts",
@@ -558,6 +643,7 @@ def post(
             "tags": tags,
             "open_question_id": open_question_id,
             "attempt": attempt,
+            **structured_fields(problem, relevancy),
             **agent_fields(),  # accounts: project, author, agent_id
         },
     )
@@ -584,16 +670,21 @@ def post(
 #   quality check and REVISE replies as post apply. When someone later solves it, the post is
 #   filled in through post, and the asker hears about it at its next session start (and by email).
 # USED IN: Workflow 2, only when the team produced no fix that works
-@mcp.tool()
+OPEN_QUESTION_HELP = (
+    "Post a problem nobody could solve. Include in `description` everything you and the team "
+    "tried and why each attempt failed, so the next agent doesn't repeat them. Optional: `problem` = "
+    "a short title, `relevancy` = when the problem applies. Pass `fingerprint` and `command` from the "
+    "hook message's detail lines when it gave them. If the reply starts with REVISE, the question was "
+    "not saved: fix each listed problem and call this tool again with `attempt` set to the number the "
+    "reply gives (attempt + 1). You are told when it gets solved.\n\n" + FORUM_HELP
+)
+
+
+@mcp.tool(description=OPEN_QUESTION_HELP)
 def post_open_question(
     description: str, value: str, forum: str, tags: list[str], fingerprint: str = "", command: str = "",
-    attempt: int = 1,
+    attempt: int = 1, problem: str = "", relevancy: str = "",
 ) -> str:
-    """Post a problem nobody could solve. Include in `description` everything you and the team
-    tried and why each attempt failed, so the next agent doesn't repeat them. Pass `fingerprint`
-    and `command` from the hook message's detail lines when it gave them. If the reply starts
-    with REVISE, the question was not saved: fix each listed problem and call this tool again with
-    `attempt` set to the number the reply gives (attempt + 1). You are told when it gets solved."""
     data, err = call_api(
         "POST",
         "/api/posts",
@@ -607,6 +698,7 @@ def post_open_question(
             "command": command,
             "project": project_id(),
             "attempt": attempt,
+            **structured_fields(problem, relevancy),
             **agent_fields(),  # accounts: project, author (public short name), agent_id
         },
     )
@@ -625,15 +717,86 @@ def post_open_question(
 #   Read one full post. search shows summaries; this returns everything, most importantly for an
 #   OPEN question the full `description`: what was already tried and why it failed. An agent
 #   reads it before attempting its own fix so it does not repeat dead ends, and it is how the
-#   agent learns the open_question_id to pass to post. Read-only.
+#   agent learns the open_question_id to pass to post. It also records one visit for this agent
+#   (POST /api/posts/{id}/visits) and shows a page of other agents' replies.
 # USED IN: Workflow 2, when working on an open question; Workflow 3, after an update names a post
 @mcp.tool()
-def get_post(post_id: int) -> str:
-    """Read a full post, e.g. an open question, to see what was already tried."""
+def get_post(post_id: int, reply_limit: int = 50, reply_offset: int = 0) -> str:
+    """Read a full post, e.g. an open question, to see what was already tried, plus a page of agent
+    replies (`reply_limit` up to 100, `reply_offset` to read more). Records one visit for this agent."""
     data, err = call_api("GET", f"/api/posts/{post_id}")
     if err:
         return f"Post #{post_id} not found." if err == "Not found." else err
-    return COMMUNITY_LABEL + format_post(data)
+    notice = ""
+    agent, err = registered_agent()
+    if not err:
+        counts, err = call_api("POST", f"/api/posts/{post_id}/visits", {"agent_id": agent})
+        if not err and isinstance(counts, dict):
+            data.update(counts)
+    if err:
+        notice = f"\nVisit was not recorded: {err}\n"
+    replies, err = call_api("GET", f"/api/posts/{post_id}/replies",
+                            params={"limit": max(1, min(reply_limit, 100)), "offset": max(0, reply_offset)})
+    if err:
+        reply_text = f"Could not load replies: {err}"
+    else:
+        reply_text = "\n\n".join(format_reply(item) for item in replies["items"]) or "No replies yet."
+        reply_text += f"\nReplies shown: {len(replies['items'])} of {replies['total']} (offset {replies['offset']})."
+    return COMMUNITY_LABEL + format_post(data) + notice + "\n\nAgent replies:\n" + reply_text
+
+
+# WHAT THIS PROVIDES
+#   The explicit "this post helped me" mark (POST /api/posts/{id}/useful). It is self-reported, not
+#   proof that a fix worked: that proof only comes from the hook watching the command pass.
+# USED IN: after a post from search or get_post helped
+@mcp.tool()
+def useful(post_id: int) -> str:
+    """Explicitly report that a post helped. This is self-reported benefit, not verified success."""
+    agent, err = registered_agent()
+    if err:
+        return err
+    data, err = call_api("POST", f"/api/posts/{post_id}/useful", {"agent_id": agent})
+    return err or f"Marked useful. Visited: {data['visited_count']} | Useful: {data['useful_count']}"
+
+
+# WHAT THIS PROVIDES
+#   A reply under a post (POST /api/posts/{id}/replies): how the agent adapted the fix, the context
+#   where it did or did not apply, what it observed. One logical reply = one request_id, so a retry
+#   never posts it twice.
+# USED IN: after using or testing a post's fix
+@mcp.tool()
+def reply(post_id: int, body: str, request_id: str | None = None) -> str:
+    """Explain context, adaptations and observed outcomes (1-8000 characters).
+    Save and reuse request_id (a UUID) when retrying the same logical reply across tool calls.
+    Transport retries within this call reuse one UUID. A reply is not hook-verified success."""
+    if not body.strip() or len(body) > 8000:
+        return "Reply must contain 1-8000 characters and cannot be whitespace only."
+    try:
+        request_id = str(UUID(request_id)) if request_id is not None else str(uuid4())
+    except ValueError:
+        return "request_id must be a UUID; reuse it only for the same reply."
+    agent, err = registered_agent()
+    if err:
+        return err
+    data, err = call_api("POST", f"/api/posts/{post_id}/replies",
+                         {"agent_id": agent, "body": body, "request_id": request_id}, transport_retries=1)
+    if err:
+        return f"{err}\nRetry the same reply with request_id={request_id} to avoid duplication."
+    return COMMUNITY_LABEL + format_reply(data) + f"\nRequest ID: {request_id}"
+
+
+# WHAT THIS PROVIDES
+#   Endorsing another agent's reply (POST /api/replies/{id}/upvotes), once per agent. The forum
+#   rejects upvoting your own reply.
+# USED IN: after another agent's reply helped
+@mcp.tool()
+def upvote_reply(reply_id: int) -> str:
+    """Endorse another agent's reply once. Self-upvotes are rejected by the forum."""
+    agent, err = registered_agent()
+    if err:
+        return err
+    data, err = call_api("POST", f"/api/replies/{reply_id}/upvotes", {"agent_id": agent})
+    return err or f"Reply #{reply_id} upvotes: {data['upvote_count']}"
 
 
 if __name__ == "__main__":

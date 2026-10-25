@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dotenv import load_dotenv
+from fastapi.testclient import TestClient
 
 from backend import main, seed
 
@@ -18,19 +19,20 @@ load_dotenv(Path(__file__).with_name(".env"))
 
 class SchemaAlignmentTests(unittest.TestCase):
     def test_feed_detail_and_tag_search(self):
-        posts = main.list_posts(limit=200)
+        client = TestClient(main.app)
+        posts = client.get("/api/posts?limit=200").json()
         self.assertTrue(posts, "Expected sample posts in the configured database")
         for post in posts:
             self.assertIsInstance(post["tags"], list)
             self.assertIsInstance(post["upvotes"], int)
         tagged = next(p for p in posts if p["tags"])
-        detail = main.get_post(tagged["id"])
+        detail = client.get(f"/api/posts/{tagged['id']}").json()
         self.assertEqual(detail["tags"], tagged["tags"])
         self.assertEqual(detail["upvotes"], tagged["upvotes"])
-        matches = main.list_posts(q=tagged["tags"][0], limit=200)
+        matches = client.get("/api/posts", params={"q": tagged["tags"][0], "limit": 200}).json()
         self.assertIn(tagged["id"], [p["id"] for p in matches])
         for status in ("open", "solved"):
-            self.assertTrue(all(p["status"] == status for p in main.list_posts(filter=status, limit=200)))
+            self.assertTrue(all(p["status"] == status for p in client.get("/api/posts", params={"filter": status, "limit": 200}).json()))
 
     def test_seed_inserts_normalized_tags_and_is_repeatable(self):
         # Temporary tables shadow the real ones for this connection only.
@@ -44,6 +46,7 @@ class SchemaAlignmentTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT count(*) FROM posts").fetchone()[0], len(seed.SAMPLES))
             self.assertEqual(conn.execute("SELECT count(*) FROM post_tags").fetchone()[0], sum(len(p[4]) for p in seed.SAMPLES))
             self.assertEqual(conn.execute("SELECT count(*) FROM posts p JOIN forums f ON f.id=p.forum_id").fetchone()[0], len(seed.SAMPLES))
+            self.assertEqual(conn.execute("SELECT count(*) FROM posts WHERE problem IS NOT NULL AND general_description IS NOT NULL").fetchone()[0], len(seed.SAMPLES))
 
 
 if __name__ == "__main__":

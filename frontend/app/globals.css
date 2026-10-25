@@ -1,26 +1,228 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+  /* Matches the landing page: #E8F1F2 background, navy ink, rescue-orange accent. */
+  --paper: #e8f1f2;
+  --paper-deep: #dae6e8;
+  --card: #ffffff;
+  --rule: #ccdadd;
+  --rule-strong: #95aab1;
+  --ink: #0b1a30;
+  --ink-soft: #3b4a5e;
+  --faint: #6a7a8c;
+  --accent: #e04400; /* #ff4f00 darkened just enough to read as small text */
+  --accent-soft: #ffe1d1;
+  --highlight: #ffd8c2;
+  --rescue: #ff4f00; /* full-strength orange: filled buttons and marks only */
+  --rescue-hover: #ff6a26;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-paper: var(--paper);
+  --color-paper-deep: var(--paper-deep);
+  --color-card: var(--card);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-highlight: var(--highlight);
+  --color-rescue: var(--rescue);
+  --font-serif: var(--font-source-serif), Georgia, "Times New Roman", serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, Menlo, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+html { scroll-behavior: smooth; }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  overflow-x: clip; /* full-bleed headers use 100vw, which includes the scrollbar */
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-source-serif), Georgia, serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+/* Buttons: one shape everywhere. Mono label, 2px corners, 1px border, like the forum's search button. */
+@layer components {
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border: 1px solid var(--rule-strong);
+    border-radius: 2px;
+    padding: 0.6rem 1.1rem;
+    font-family: var(--font-plex-mono), ui-monospace, monospace;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--ink);
+    background: var(--card);
+    transition: background-color 150ms, border-color 150ms;
+  }
+  .btn:hover { border-color: var(--ink); }
+  .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .btn:disabled { cursor: default; opacity: 0.4; }
+  .btn:disabled:hover { border-color: var(--rule-strong); }
+  .btn-primary { border-color: var(--rescue); background: var(--rescue); }
+  .btn-primary:hover { border-color: var(--rescue-hover); background: var(--rescue-hover); }
+  .btn-sm { padding: 0.25rem 0.75rem; font-size: 12px; font-weight: 500; }
+  .btn-arrow { transition: transform 150ms; }
+  .btn:hover .btn-arrow { transform: translateX(3px); }
+}
+
+::selection {
+  background: var(--highlight);
+}
+
+/* A row that just arrived or just got solved: a brief highlighter wash. */
+@keyframes wash {
+  from { background-color: var(--highlight); }
+  to { background-color: transparent; }
+}
+
+/* Markdown in post bodies and solutions. */
+.prose-paper { font-size: 16px; line-height: 1.6; }
+.prose-paper > * + * { margin-top: 0.75em; }
+.prose-paper ol { list-style: decimal; padding-left: 1.5em; }
+.prose-paper ul { list-style: square; padding-left: 1.4em; }
+.prose-paper li + li { margin-top: 0.3em; }
+.prose-paper a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.prose-paper strong { font-weight: 700; }
+.prose-paper h1, .prose-paper h2, .prose-paper h3 { font-weight: 700; font-size: 1.05em; margin-top: 1.1em; }
+.prose-paper code {
+  font-family: var(--font-plex-mono), ui-monospace, monospace;
+  font-size: 0.86em;
+  background: var(--paper-deep);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 0.05em 0.35em;
+}
+.prose-paper pre {
+  background: #dfeaec;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--rule-strong);
+  border-radius: 2px;
+  padding: 0.8em 1em;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+.prose-paper pre code { background: none; border: 0; padding: 0; font-size: 13.5px; }
+.prose-paper blockquote { border-left: 3px solid var(--rule-strong); padding-left: 0.9em; color: var(--ink-soft); font-style: italic; }
+
+/* Compact thread cards; keep full content visible and code horizontally scrollable. */
+.post-thread .prose-paper { font-size: 14px; line-height: 1.5; }
+.post-thread .prose-paper > * + * { margin-top: 0.6em; }
+.post-thread .prose-paper li + li { margin-top: 0.2em; }
+.post-thread .prose-paper pre { padding: 0.65em 0.8em; }
+.post-thread .prose-paper pre code { font-size: 12.5px; }
+
+/* One shared reply level: branch from the question without implying nested replies. */
+.reply-chain { --reply-indent: 18px; margin-left: 6px; padding-left: var(--reply-indent); }
+.reply-branch { position: relative; }
+.reply-branch::before {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--reply-indent));
+  top: -13px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--rule-strong);
+}
+.reply-branch:last-child::before { bottom: auto; height: calc(1.25rem + 13px); }
+.reply-branch::after {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--reply-indent));
+  top: 1.25rem;
+  width: var(--reply-indent);
+  height: 1px;
+  background: var(--rule-strong);
+}
+.reply-node {
+  position: absolute;
+  left: calc(-1 * var(--reply-indent) - 2px);
+  top: calc(1.25rem - 2px);
+  z-index: 1;
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+@media (min-width: 640px) { .reply-chain { --reply-indent: 24px; } }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* /docs: a diagram step lights up in turn. --i is the step's index, --n the step count. */
+@keyframes docs-step {
+  0%, 12% { background-color: var(--highlight); }
+  18%, 100% { background-color: transparent; }
+}
+@keyframes docs-step-fill {
+  0%, 12% { fill: var(--highlight); }
+  18%, 100% { fill: var(--card); }
+}
+.docs-step {
+  animation: docs-step calc(var(--n) * 2.2s) linear infinite;
+  animation-delay: calc(var(--i) * 2.2s);
+}
+.docs-badge {
+  animation: docs-step-fill calc(var(--n) * 2.2s) linear infinite;
+  animation-delay: calc(var(--i) * 2.2s);
+}
+
+/* /forums: the rest of the page fades up once the sentence and search bar move into place. */
+.forums-reveal {
+  animation: landing-rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) 0.35s both;
+}
+
+/* Leaving the landing page: starting from the middle line, everything slides off to one side.
+   --d is how far an item sits from the middle, so the middle goes first. */
+.exit-item { --d: 0; }
+[data-leaving] .exit-item {
+  animation: exit-left 0.5s cubic-bezier(0.55, 0, 0.75, 0.2) forwards;
+  animation-delay: calc(var(--d) * 55ms);
+}
+[data-leaving="right"] .exit-item { animation-name: exit-right; }
+@keyframes exit-left { to { opacity: 0; transform: translateX(-45vw); } }
+@keyframes exit-right { to { opacity: 0; transform: translateX(45vw); } }
+
+/* Arriving on /forums: the sentence and search bar zoom in from a distance. */
+.enter-zoom {
+  animation: enter-zoom 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes enter-zoom {
+  from { opacity: 0; transform: scale(0.86); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+/* Arriving on /docs: the page slides in from the side the landing page left by. */
+.enter-from-left {
+  animation: enter-from-left 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes enter-from-left {
+  from { opacity: 0; transform: translateX(-6vw); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Landing page (app/page.tsx) */
+.landing-rise {
+  animation: landing-rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+/* Returning to the landing page in the same tab: skip the fade-in (see LandingShell). */
+[data-intro="skip"] .landing-rise {
+  animation: none;
+}
+
+@keyframes landing-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
 }

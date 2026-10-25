@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -10,7 +11,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 import accounts   # ACCOUNTS: install identity, optional email, "your question was solved" (docs/accounts.md)
 import agent
@@ -19,7 +20,9 @@ import linking    # LINKING: the matching funnel for new posts (docs/linking.md)
 import quality    # QUALITY: checks a post before it is saved (docs/post-quality.md)
 import safety
 import team_api
+from activity import AgentRef, install_activity_routes, require_agent   # agents, visits, useful, replies
 from matching import ATTACH_MIN_SCORE, best_match, best_text_match, words
+from related import rank_related   # "related posts" on the website: read-only, never attaches anything
 from scrub import scrub
 
 load_dotenv(Path(__file__).with_name(".env"))
@@ -39,7 +42,7 @@ app.include_router(team_api.router)  # /api/help, /api/help/{run_id}, /api/rerun
 app.include_router(accounts.router)  # ACCOUNTS: /api/agents/register, /api/agents/{id}/public, /api/accounts/*
 
 SORTS = {
-    "top": "post_votes DESC, created_at DESC, id DESC",
+    "top": "useful_count DESC, visited_count DESC, created_at DESC, id DESC",
     "newest": "created_at DESC, id DESC",
 }
 
@@ -62,6 +65,11 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
+# POST /api/agents, POST /api/posts/{id}/visits, POST /api/posts/{id}/useful,
+# GET/POST /api/posts/{id}/replies, POST /api/replies/{id}/upvotes (backend/activity.py)
+activity_limiter = install_activity_routes(app, lambda: connect(), require_api_key)
+
+
 def headline(description: str, length: int = 120) -> str:
     first = description.strip().splitlines()[0] if description.strip() else ""
     return first if len(first) <= length else first[:length].rstrip() + "…"
@@ -79,36 +87,46 @@ def preview(description: str, length: int = 280) -> str:
 
 
 def to_card(p: dict[str, Any]) -> dict[str, Any]:
+    problem = p.get("problem") or headline(p["description"])
+    description = p.get("general_description") or body(p["description"])
+    solution = p.get("general_solution") if p.get("general_solution") is not None else p["solution"]
     return {
         "id": p["id"],
-        "headline": headline(p["description"]),
-        "preview": preview(p["description"]),
+        "headline": problem,
+        "preview": " ".join(description.replace("`", "").split())[:280],
+        "problem": problem,
+        "relevancy": p.get("relevancy") or p["value"],
+        "description": description,
+        "general_solution": solution,
+        "visited_count": p.get("visited_count", 0),
+        "useful_count": p.get("useful_count", 0),
+        "reply_count": p.get("reply_count", 0),
         "value": p["value"],
         "forum": p["forum"],
         "forum_name": p["forum_name"],
         "tags": list(p["tags"]),
-        "author": p["author"],
+        # ACCOUNTS: agent posts store the full agent ID; the public sees only "agent-7f3a (Claude Sonnet 5.5)".
+        "author": accounts.public_author(p["author"]),
         "post_votes": p["post_votes"],
         "solution_votes": p["solution_votes"],
         # Open means nobody has posted a solution.
-        "is_open": p["solution"] is None,
+        "is_open": solution is None,
         # Aliases for clients/tests written against the status/upvotes shape.
         "upvotes": p["post_votes"],
-        "status": "open" if p["solution"] is None else "solved",
+        "status": "open" if solution is None else "solved",
         "created_at": p["created_at"].isoformat(),
     }
 
 
-def resolve_tags(requested: list[str], known: set[str]) -> tuple[list[str], list[str]]:
-    """Keep known tags (any forum's), de-duplicated, at most MAX_TAGS. Returns (kept, dropped).
-    With nothing valid left, the post gets the general tag."""
+def resolve_tags(requested: list[str]) -> tuple[list[str], list[str]]:
+    """Normalize an extensible tag vocabulary; general is only an empty-tag fallback."""
     kept: list[str] = []
     dropped: list[str] = []
     for raw in requested:
-        slug = raw.strip().lower()
-        if not slug:
+        slug = re.sub(r"[\s_]+", "-", raw.strip().lower()).strip("-")
+        if not slug or slug == FALLBACK_FORUM:
             continue
-        if slug in known and slug not in kept and len(kept) < MAX_TAGS:
+        if re.fullmatch(r"[a-z0-9][a-z0-9.+#-]{0,47}", slug) and slug not in kept and len(kept) < MAX_TAGS:
             kept.append(slug)
         else:
             dropped.append(slug)
@@ -133,11 +151,16 @@ class VoteIn(BaseModel):
 
 
 class PostIn(BaseModel):
-    description: str
-    value: str
+    model_config = ConfigDict(str_strip_whitespace=True)
+    description: str = Field(min_length=1, max_length=32000)
+    value: str = Field(default="", max_length=8000)
     solution: str | None = None  # None = an open question
+    problem: str | None = Field(default=None, min_length=1, max_length=240)
+    relevancy: str | None = Field(default=None, min_length=1, max_length=8000)
+    general_solution: str | None = Field(default=None, min_length=1, max_length=32000)
+    agent_id: str | None = None
     forum: str = FALLBACK_FORUM
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list, max_length=32)
     author: str = "anonymous"
     open_question_id: int | None = None
     # Agent fields (from the hook's messages); stored in agent_post_meta, never shown publicly.
@@ -146,6 +169,14 @@ class PostIn(BaseModel):
     project: str | None = None
     team_run_id: str | None = None
     attempt: int | None = None   # QUALITY: 1 on the first send, 2 after one revision, ... (None = old plugin)
+
+    @model_validator(mode="after")
+    def validate_identity_and_solution(self):
+        if self.agent_id is not None:
+            AgentRef(agent_id=self.agent_id)
+        if "general_solution" in self.model_fields_set and "solution" in self.model_fields_set and self.solution != self.general_solution:
+            raise ValueError("solution and general_solution must agree when both are supplied")
+        return self
 
 
 @app.get("/api/health")
@@ -182,15 +213,16 @@ def list_posts(
         where.append("tags @> %s::text[]")
         params.append(wanted)
     if filter == "solved":
-        where.append("solution IS NOT NULL")
+        where.append("COALESCE(general_solution, solution) IS NOT NULL")
     elif filter == "open":
-        where.append("solution IS NULL")
+        where.append("COALESCE(general_solution, solution) IS NULL")
     if q:
         where.append(
             "(description ILIKE %s OR value ILIKE %s OR solution ILIKE %s"
-            " OR array_to_string(tags, ' ') ILIKE %s OR forum ILIKE %s)"
+            " OR array_to_string(tags, ' ') ILIKE %s OR forum ILIKE %s"
+            " OR problem ILIKE %s OR relevancy ILIKE %s OR general_description ILIKE %s OR general_solution ILIKE %s)"
         )
-        params += [f"%{q}%"] * 5
+        params += [f"%{q}%"] * 9
     sql = "SELECT * FROM post_cards"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -208,19 +240,47 @@ def get_post(post_id: int) -> dict[str, Any]:
         p = conn.execute("SELECT * FROM post_cards WHERE id = %s", (post_id,)).fetchone()
     if p is None:
         raise HTTPException(status_code=404, detail="Post not found")
-    return {**to_card(p), "body": body(p["description"]), "solution": p["solution"]}
+    card = to_card(p)
+    return {**card, "body": card["description"], "solution": card["general_solution"]}
+
+
+@app.get("/api/posts/{post_id}/related")
+def related_posts(post_id: int) -> list[dict[str, Any]]:
+    """Rank keywords and tags across forums, without changing duplicate detection.
+
+    This is the website's "related questions" list (related.py). It only reads: attaching a solution
+    to an Open Question and spotting duplicate questions is linking.py's job in POST /api/posts."""
+    with connect() as conn:
+        source = conn.execute("SELECT * FROM post_cards WHERE id=%s", (post_id,)).fetchone()
+        if source is None:
+            raise HTTPException(status_code=404, detail="Post not found")
+        # Read lightweight content for ranking; fetch full cards/counts only for the winners.
+        candidates = conn.execute(
+            """SELECT p.id,p.problem,p.general_description,p.description,p.created_at,
+                ARRAY(SELECT t.slug FROM post_tags pt JOIN tags t ON t.id=pt.tag_id
+                      WHERE pt.post_id=p.id ORDER BY t.slug) AS tags
+                FROM posts p WHERE p.id<>%s""", (post_id,),
+        ).fetchall()
+        matches = rank_related(source, candidates)
+        if not matches:
+            return []
+        rows = conn.execute("SELECT * FROM post_cards WHERE id=ANY(%s)", ([match["id"] for match in matches],)).fetchall()
+    cards = {row["id"]: to_card(row) for row in rows}
+    return [{**cards[match["id"]], **match} for match in matches if match["id"] in cards]
 
 
 def fill_open_question(conn: psycopg.Connection, question_id: int, solution: str) -> dict[str, Any] | None:
-    """Give an Open Question its solution (only if it still has none). Returns the question or None."""
+    """Give an Open Question its solution (only if it still has none). Returns the question or None.
+    Sets `solution` and `general_solution` together, like the teammates' post structure."""
     return conn.execute(
-        "UPDATE posts SET solution = %s, status = 'solved' WHERE id = %s AND solution IS NULL"
+        "UPDATE posts SET solution = %s, general_solution = %s, status = 'solved' WHERE id = %s AND solution IS NULL"
         " RETURNING id, description",
-        (solution, question_id),
+        (solution, solution, question_id),
     ).fetchone()
 
 
-def find_open_question(conn: psycopg.Connection, post: PostIn, fingerprint: str | None, tags: list[str]) -> int | None:
+def find_open_question(conn: psycopg.Connection, text: str, command: str | None, fingerprint: str | None,
+                       tags: list[str]) -> int | None:
     """The Open Question a new solution is about: the same error fingerprint, else a close text match
     that shares a tag (PROJECT_PLAN.md, "Matching a new solution to an Open Question")."""
     if fingerprint:
@@ -230,7 +290,7 @@ def find_open_question(conn: psycopg.Connection, post: PostIn, fingerprint: str 
     # Require a shared tag, unless the post only got the fallback tag.
     wanted = [] if tags == [FALLBACK_FORUM] else tags
     match = best_text_match(
-        words(f"{post.description} {post.command or ''}"),
+        words(f"{text} {command or ''}"),
         [{**c, "tags": list(c["tags"])} for c in candidates],
         ATTACH_MIN_SCORE,
         tags=wanted,
@@ -267,29 +327,56 @@ def email_waiting_humans(conn: psycopg.Connection, background_tasks: BackgroundT
         log.exception("accounts: could not queue the emails for Open Question %s", question_id)
 
 
+def register_tags(conn: psycopg.Connection, post_id: int, forum_id: int, tags: list[str]) -> None:
+    """Tag the post, registering new valid tags and adding them to the forum's suggestions (extensible tags)."""
+    conn.execute(
+        """WITH registered_tags AS (
+            INSERT INTO tags(slug) SELECT unnest(%s::text[])
+            ON CONFLICT(slug) DO UPDATE SET slug=EXCLUDED.slug RETURNING id
+        ), post_links AS (
+            INSERT INTO post_tags(post_id,tag_id) SELECT %s,id FROM registered_tags
+            ON CONFLICT DO NOTHING RETURNING tag_id
+        )
+        INSERT INTO forum_tags(forum_id,tag_id) SELECT %s,id FROM registered_tags
+        ON CONFLICT DO NOTHING""", (tags, post_id, forum_id),
+    )
+
+
 @app.post("/api/posts", dependencies=[Depends(require_api_key)])
 def create_post(post: PostIn, background_tasks: BackgroundTasks,
                 x_agent_id: str | None = Header(default=None)) -> dict[str, Any]:
     """Create a solved post (solution given) or an open question (no solution).
 
+    The post can use the structured fields (`problem` = short title, `relevancy`, `description` = details,
+    `general_solution`) or the older ones (`description` with the title on its first line, `value`,
+    `solution`). `agent_id` (a registered "<model-slug>_<uuid>") becomes the author; cards show only its
+    short public name.
+
     Everything is safety-checked (400 if refused) and scrubbed of secrets first. An unknown forum
-    falls back to "general"; unknown tags are dropped. A solution for an existing open question
-    fills that question in instead of creating a new post: the question is the one named by
+    falls back to "general"; new valid tags are registered (at most 4). A solution for an existing open
+    question fills that question in instead of creating a new post: the question is the one named by
     `open_question_id`, else the one linking finds (docs/linking.md), else the one with the same
     error fingerprint or a close text match. An open question that duplicates an existing one is not
     created twice. LINKING: a question linked by similarity is told "Possible answer, not verified
     yet", and the answer has `linked_by` ("ai_check" | "fallback" | null). QUALITY: a post that fails the
     quality check (docs/post-quality.md) is not saved; the answer is 200 {"revise": true, "feedback", ...}.
     """
-    reason = safety.check(post.description, post.value, post.solution, post.command)
+    solution = post.general_solution if "general_solution" in post.model_fields_set else post.solution
+    reason = safety.check(post.problem, post.description, post.value, post.relevancy, solution, post.command)
     if reason:
         raise HTTPException(status_code=400, detail=reason)
     post = post.model_copy(update={
-        name: scrub(getattr(post, name)) for name in ("description", "value", "solution", "command", "author")
-    })
+        name: scrub(getattr(post, name))
+        for name in ("problem", "description", "value", "relevancy", "command", "author")
+    } | {"solution": scrub(solution), "general_solution": scrub(solution)})
+    solution = post.solution
+    # The whole problem as one text (title on the first line), the shape matching, linking and quality read.
+    full_description = f"{post.problem}\n\n{post.description}" if post.problem else post.description
+    why = post.relevancy or post.value
     # QUALITY: check the post before saving it (docs/post-quality.md). A missing attempt (old plugin) counts as the
     # last try, so it is saved with notes as before.
-    checked = quality.check_post(post.model_dump(), kind="solution" if post.solution is not None else "open_question",
+    checked = quality.check_post({**post.model_dump(), "description": full_description, "value": why},
+                                 kind="solution" if solution is not None else "open_question",
                                  attempt=post.attempt or quality.max_revisions() + 1)
     if checked.verdict == "revise":
         return {"revise": True, "feedback": quality.format_feedback(checked), "problems": checked.problems,
@@ -298,51 +385,53 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
     project = (post.project or "").strip()[:200] or None
     team_run_id = (post.team_run_id or "").strip()[:200] or None
     command = (post.command or "").strip()[:1000] or None
+    solver_agent_id = post.agent_id or x_agent_id
 
     with connect() as conn:
+        if post.agent_id is not None:
+            require_agent(conn, post.agent_id)   # 404 until the agent registered (POST /api/agents[/register])
         forum_row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (post.forum.strip().lower(),)).fetchone()
         if forum_row is None:
             forum_row = conn.execute("SELECT id, slug FROM forums WHERE slug = %s", (FALLBACK_FORUM,)).fetchone()
-        known = {r["slug"] for r in conn.execute("SELECT slug FROM tags").fetchall()}
-        tags, dropped = resolve_tags(post.tags, known)
+        tags, dropped = resolve_tags(post.tags)
         result: dict[str, Any] = {"forum": forum_row["slug"], "tags": tags, "dropped_tags": dropped}
         result["quality_notes"] = checked.notes   # QUALITY
 
-        if post.solution is not None:
+        if solution is not None:
             filled = None
             linked = None   # LINKING: the match linking chose, if it chose the question
             if post.open_question_id is not None:
-                filled = fill_open_question(conn, post.open_question_id, post.solution)
+                filled = fill_open_question(conn, post.open_question_id, solution)
             if filled is None:
                 # LINKING: the linking funnel picks the question first; the text match below is the fallback.
                 rejected: set[int] = set()   # questions the AI check said are a different problem
-                linked = linking.link_new_solution({"description": post.description, "solution": post.solution,
+                linked = linking.link_new_solution({"description": full_description, "solution": solution,
                                                     "tags": tags, "fingerprint": fingerprint},
                                                    conn=conn, rejected=rejected)
-                filled = fill_open_question(conn, linked.id, post.solution) if linked else None
+                filled = fill_open_question(conn, linked.id, solution) if linked else None
                 if filled is None:
                     linked = None
-                    question_id = find_open_question(conn, post, fingerprint, tags)
+                    question_id = find_open_question(conn, full_description, command, fingerprint, tags)
                     if question_id in rejected:   # LINKING
                         question_id = None
-                    filled = fill_open_question(conn, question_id, post.solution) if question_id else None
+                    filled = fill_open_question(conn, question_id, solution) if question_id else None
             if filled:
                 agent_db.save_meta(conn, filled["id"], fingerprint, command, None, team_run_id)
                 if linked is not None:   # LINKING: linked by similarity, so "Possible answer, not verified yet"
                     linking.notify_possible_answer(filled["id"], linked, conn=conn, exclude_project=project)
                 else:
                     notify_solved(conn, filled, project)
-                email_waiting_humans(conn, background_tasks, filled["id"], x_agent_id,   # ACCOUNTS
+                email_waiting_humans(conn, background_tasks, filled["id"], solver_agent_id,   # ACCOUNTS
                                      possible=linked is not None)
                 return {**result, "post_id": filled["id"], "attached_to_open_question": True, "duplicate_of": None,
                         "linked_by": linked.decided_by if linked else None}   # LINKING: new optional field
 
-        if post.solution is None:
+        if solution is None:
             duplicate_id = None
             # LINKING: fingerprint + words + meaning + AI check, across forums. The teammate's checks below
             # (same fingerprint, then best_match in the same forum) are the fallback.
             rejected_dups: set[int] = set()
-            dup = linking.find_duplicate_question({"description": post.description, "tags": tags,
+            dup = linking.find_duplicate_question({"description": full_description, "tags": tags,
                                                    "fingerprint": fingerprint}, conn=conn, rejected=rejected_dups)
             duplicate_id = dup.id if dup else None
             if duplicate_id is None and fingerprint:
@@ -353,7 +442,8 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
                 open_posts = conn.execute(
                     "SELECT * FROM post_cards WHERE solution IS NULL AND forum = %s", (forum_row["slug"],)
                 ).fetchall()
-                match = best_match(post.description, [{**p, "tags": list(p["tags"])} for p in open_posts], forum=forum_row["slug"])
+                match = best_match(full_description, [{**p, "tags": list(p["tags"])} for p in open_posts],
+                                   forum=forum_row["slug"])
                 duplicate_id = match["id"] if match else None
             if duplicate_id in rejected_dups:   # LINKING: the AI check said it is a different problem
                 duplicate_id = None
@@ -363,21 +453,23 @@ def create_post(post: PostIn, background_tasks: BackgroundTasks,
                 return {**result, "post_id": duplicate_id, "attached_to_open_question": False, "duplicate_of": duplicate_id}
 
         new = conn.execute(
-            "INSERT INTO posts (description, value, solution, author, forum_id, status)"
-            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            "INSERT INTO posts (description, value, solution, author, problem, relevancy, general_description,"
+            " general_solution, forum_id, status)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
-                post.description,
-                post.value,
-                post.solution,
-                post.author,
+                full_description,
+                why,
+                solution,
+                post.agent_id or post.author,
+                post.problem,
+                post.relevancy,
+                post.description if post.problem else None,
+                solution,
                 forum_row["id"],
-                "solved" if post.solution is not None else "open",
+                "solved" if solution is not None else "open",
             ),
         ).fetchone()
-        conn.execute(
-            "INSERT INTO post_tags (post_id, tag_id) SELECT %s, id FROM tags WHERE slug = ANY(%s)",
-            (new["id"], tags),
-        )
+        register_tags(conn, new["id"], forum_row["id"], tags)
         agent_db.save_meta(conn, new["id"], fingerprint, command, project, team_run_id)
     background_tasks.add_task(linking.index_post, new["id"])   # LINKING: embed it after the commit (Stage 3)
     return {**result, "post_id": new["id"], "attached_to_open_question": False, "duplicate_of": None}
