@@ -1,9 +1,11 @@
 # Rewind: rolling a struggling agent back to a clean state
 
-Owner: hook team · Branch: `hook-engine` · Status: planned for v1.5 (after the core loop works) · Last updated: 2026-10-24
+Owner: hook team · Branch: `hook-engine` · Status: **built** (v1.5; tested, see "As built" at the end) · Last updated: 2026-10-24
 
-> **For coding agents:** this is the design for the rewind feature. Build it only after the v1 struggle signals in
-> [struggle-signals.md](struggle-signals.md) work end to end. Never make rewinding automatic.
+> **For coding agents:** this is the design for the rewind feature, and it is built: `plugin/hook/checkpoints.py`
+> (snapshots), `brain.py` (when to save and when to offer), `messages.py` (`REWIND_OFFER`, `CLEAN_SLATE`) and
+> `plugin/hook/rewind.py` (the command the agent runs). The section **"As built"** at the end lists where the code
+> differs from the design below. Never make rewinding automatic.
 
 Background on where this idea came from: [mentor-feedback.md](mentor-feedback.md).
 
@@ -49,11 +51,11 @@ Struggle signal 2, 3 or the judge fires, and 3+ edits since a checkpoint
 Hook sends REWIND_OFFER (both points, times, edits each would undo, what already failed)
         │
         ▼
-Agent asks the human ──▶ human says yes ──▶ agent calls the rewind tool
+Agent asks the human ──▶ human says yes ──▶ agent runs the rewind command from the message (Bash)
         │
         ▼
-Tool saves the current state as "before_rewind" (so it can be undone), restores the files,
-and returns the clean slate note ──▶ agent tries a different approach
+rewind.py saves the current state as "before_rewind" (so it can be undone), restores the files,
+and prints the clean slate note ──▶ agent tries a different approach
 ```
 
 ### 1. Checkpoints (hook)
@@ -103,10 +105,11 @@ Example message:
 > or **when this problem started** (undoes 6 edits in 2 files). Already tried and failed: (1) …, (2) …
 > Ask the user before rewinding.
 
-### 3. The rewind tool
+### 3. The rewind command
 
-A small local tool, `rewind(checkpoint)`, where `checkpoint` is `"last_good"`, `"episode_start"`,
-`"before_rewind"`, or a checkpoint id.
+A small local script, `plugin/hook/rewind.py <checkpoint>`, that the agent runs through Bash, where `checkpoint` is
+`last_good`, `episode_start`, `before_rewind`, or a checkpoint id. (Built as a script, not an MCP tool: see "Open
+decisions".)
 
 Steps:
 1. Save the current state as `before_rewind`.
@@ -156,8 +159,88 @@ roll back → the agent reads what already failed, tries a new approach, and the
 
 ## Open decisions
 
-- [ ] Does the `rewind` tool go in `mcp/server.py` (coordinate with the MCP owner), or does the agent run a small
-      script through Bash?
-- [ ] Which command counts as the "goal command" for `last_good`: the tracked failing command only, or any test
-      command?
-- [ ] Final trigger numbers (3 edits, one offer per episode)
+- [x] Tool in `mcp/server.py`, or a script run through Bash? **A script** (`plugin/hook/rewind.py`). The MCP server
+      has a "no edit or delete tools" rule, and Claude Code's Bash permission prompt doubles as a second "yes".
+- [x] Which command counts as the "goal command" for `last_good`? **During an episode: only the episode's command.
+      Otherwise: the last episode's command, any command whose previous run failed, or a test/build command**
+      (`pytest`, `npm test`, `npm run build`, `jest`, `tsc`, `cargo`, ...; `GOAL_COMMAND_RE` in `brain.py`).
+- [ ] Final trigger numbers: 3 edits and one offer per episode for now (`REWIND_MIN_EDITS` in `brain.py`). Tune on
+      the trap tasks.
+- [ ] Bonus (section 5, specialists start from `episode_start`): not built. It needs a change in
+      `plugin/mcp/server.py`, which the MCP owner holds.
+
+---
+
+## As built
+
+### Exactly when things happen
+
+| Moment | What the hook does |
+| --- | --- |
+| A goal command passes (rule above) | Saves `last_good` |
+| A command fails for the first time since it last passed, and no episode is open | Saves `episode_start`. Episodes open lazily (at the 3rd or 4th failure), so we snapshot every first failure; the one at the episode's first failure becomes its `episode_start` |
+| A nudge would go to triage or the team, and all of: the signals include whack-a-mole, edit-run-same-output or the AI judge; 3+ edits since the offered checkpoint; git shows at least one file would change; no offer yet this episode | Sends `REWIND_OFFER` instead, once. The next nudge carries on up the ladder |
+| The agent runs `rewind.py` | Hook ignores that command (it is not work on the problem) |
+
+The ladder is therefore: forum → **rewind offer** → triage (`STEP_BACK`) → team → Open Question. If a forum fix was
+suggested and failed, the offer can still come on a later nudge, before the team.
+
+### The command and the note
+
+The offer contains one ready-to-run line per option, with absolute paths filled in:
+
+```bash
+python "C:/.../plugin/hook/rewind.py" --project "C:/path/to/project" --session <session id> last_good
+python "C:/.../plugin/hook/rewind.py" --project "C:/path/to/project" --session <session id> episode_start
+python "C:/.../plugin/hook/rewind.py" --project "C:/path/to/project" --session <session id> before_rewind   # undo
+python "C:/.../plugin/hook/rewind.py" --project "C:/path/to/project" --session <session id> --list
+```
+
+It accepts `last_good`, `episode_start`, `before_rewind` or a checkpoint id from `--list`. It exits 1 with a message
+on stderr if the checkpoint does not exist or git fails. It prints the clean slate note, tagged
+`[AgentOverflow: CLEAN_SLATE]`: the point it went back to, files restored, brought back and deleted, "files only",
+the attempts that already failed, "start from here with a different approach", and the undo command.
+
+**What it changes in the hook's notes:** it adds a `{"kind": "rewind"}` record to the history, marks the episode
+`rewound` (no second offer), adds "rewound the files to last_good" to the episode's tried list, and starts the usual
+3-action pause before the next nudge. `struggles.py` counts signals 1-3 and the judge only after the last rewind
+record, because the earlier attempts were made on files that no longer exist; without this the very next failure
+would fire whack-a-mole again. The episode itself stays open (the problem is not solved yet): its ladder position,
+tried list and failure count carry on, so a later pass still gets `NOTABLE_SOLVE`.
+
+### Differences from the design above
+
+- **Snapshot speed:** the throwaway index starts as a *copy of the real index* instead of `git read-tree HEAD`, so
+  git can skip unchanged files using its timestamp cache. The result is the same tree. `read-tree HEAD` is the
+  fallback when there is no index file, and an empty index when there are no commits.
+- **`.claude/` is left out** of snapshots and restores. Claude Code writes `settings.local.json` there when the user
+  approves a command, and the hook keeps its notes there; a rewind must not roll those back.
+- **Duplicate snapshots are shared:** when the files have not changed since the previous checkpoint, no new ref is
+  made and the new name points at the same snapshot. The notes record `{id, ref, label, time, history_idx, key, cmd}`
+  and edit counts are computed from the history (instead of storing `edits_since`).
+- **The repo's top folder is what gets snapshotted**, even if the project folder is a subfolder of a bigger repo.
+- Snapshot commits use a fixed identity (`AgentOverflow <agentoverflow@localhost>`) and `--no-gpg-sign`, so they
+  work without `user.name` and never stop for a signing prompt. They are never on a branch.
+- Timeouts: 2 seconds per git call from the hook (skip silently), 60 seconds per git call in `rewind.py` (the user
+  is waiting for it, and the undo point must be saved before any file changes).
+
+### Try it
+
+```bash
+python -m unittest discover -s plugin/hook/tests                                     # all hook tests
+python plugin/hook/dev/replay.py plugin/hook/dev/scenarios/rewind_offer.jsonl         # whole flow, real git repo
+```
+
+The scenario builds a small git project, passes the tests (`last_good`), goes through four edit → fail rounds with
+different errors (`REWIND_OFFER`), runs `rewind.py last_good` as the agent would after a yes (`CLEAN_SLATE`), then
+passes with a new approach (`NOTABLE_SOLVE`, whose tried list includes the rewind).
+
+### Known limits
+
+- Needs git 2.23+ (`git restore`). Not a git repo, or git slower than 2 seconds: no checkpoints and no offer.
+- Rewinding to `last_good` saved for a *different* command than the failing one is possible (the message names
+  the command that passed).
+- A checkpoint saved before the hook's 200-action history window still works, but its edit count only covers the
+  actions still in the history.
+- Hidden refs are kept until pruned (20 per session). They are local only (never pushed by a normal `git push`);
+  `git for-each-ref refs/agentoverflow` lists them and `git update-ref -d` removes one.

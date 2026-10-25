@@ -60,5 +60,33 @@
       "post_id": 2,
       "project": null
     }
-  ]
+  ],
+  "help_events": [
+    {"member": "docs", "type": "searching", "text": "Python docs: how unittest discovery sets sys.path"},
+    {"member": "issues", "type": "searching", "text": "GitHub issues: 'No module named app' src layout"},
+    {"member": "community", "type": "finding", "text": "Stack Overflow: src layouts need src/ on sys.path or an editable install"},
+    {"member": "chair", "type": "ranking", "text": "Ranking 3 hypotheses"}
+  ],
+  "help_report": {
+    "hypotheses": [
+      {"rank": 1, "cause": "tests/ is not a package, so the imports resolve from the wrong folder", "confidence": 0.35,
+       "evidence": [{"url": "https://docs.python.org/3/library/unittest.html#test-discovery", "source": "docs", "quote": "All of the test files must be modules or packages importable from the top-level directory"}],
+       "steps": ["Add an empty `tests/__init__.py`"],
+       "check": {"command": "python -m unittest discover -s tests", "description": "the tests import app and pass"},
+       "agreed_by": ["docs"]},
+      {"rank": 2, "cause": "src layout: src/ is not on sys.path when the tests run", "confidence": 0.55,
+       "evidence": [{"url": "https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/", "source": "docs", "quote": "the src layout requires installation of the project to be able to run its code"}],
+       "steps": ["At the top of `tests/test_cart.py`, put the project's `src/` folder on `sys.path` before `from app.cart import cart_total`"],
+       "check": {"command": "python -m unittest discover -s tests", "description": "the tests import app and pass"},
+       "agreed_by": ["docs", "community"]},
+      {"rank": 3, "cause": "the package is not installed in the environment", "confidence": 0.1,
+       "evidence": [],
+       "steps": ["Add a build backend to pyproject.toml, then run `pip install -e .`"],
+       "check": {"command": "python -m unittest discover -s tests", "description": "the tests import app and pass"},
+       "agreed_by": ["issues"]}
+    ],
+    "if_none_work": "Print sys.path inside the test run and compare it with where the app package lives.",
+    "models": {"docs": "claude-sonnet-5-5", "issues": "claude-sonnet-5-5", "community": "gpt", "chair": "claude-opus-5-5"},
+    "cost_usd": 0.52
+  }
 }

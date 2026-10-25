@@ -334,11 +334,13 @@ class Ladder(TempProject):
     def test_team_ran_and_still_stuck_posts_open_question(self):
         for _ in range(3):
             self.fail(DC, PRISMA)
-        self.assertIsNone(self.mcp("ask_for_help", "Team started. Run id: r1"))
+        self.assertIsNone(self.mcp("ask_for_help", messages.COMMUNITY_LABEL + "TEAM_STARTED: r1\nThe team is on it."))
         self.assertTrue(self.state()["episode"]["team_ran"])
+        self.assertEqual(self.state()["episode"]["team_run_id"], "r1")
         self.edit()
         self.assertIsNone(self.fail(DC, PRISMA))
-        self.assertEqual(tag(self.fail(DC, PRISMA)), "POST_OPEN_QUESTION")
+        self.assertIsNone(self.fail(DC, PRISMA))   # the team is still working: no Open Question yet
+        self.assertEqual(tag(self.mcp("check_help", "TEAM_NO_ANSWER: r1\nNothing found.")), "POST_OPEN_QUESTION")
         self.mcp("post_open_question", "Posted as new open question #9.")
         self.assertTrue(self.state()["episode"]["oq_posted"])
 
@@ -469,7 +471,8 @@ class Stop(TempProject):
     def test_team_ran_and_unsolved_asks_for_open_question(self):
         for _ in range(3):
             self.fail(DC, PRISMA)
-        self.mcp("ask_for_help", "Team started.")
+        self.mcp("ask_for_help", "TEAM_STARTED: r1")
+        self.mcp("check_help", "TEAM_REPORT: r1\n1. Alpine needs the musl engine ...")
         self.user("ok, what now?")
         self.assertEqual(tag(self.stop()), "POST_OPEN_QUESTION")
 

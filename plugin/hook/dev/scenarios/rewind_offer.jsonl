@@ -1,0 +1,30 @@
+{"_comment": "A small git project whose tests pass. The agent is asked to add a discount."}
+{"_files": {".gitignore": "transcript.jsonl\n", "cart.py": "def cart_total(prices, discount=0):\n    return sum(prices)\n", "tests/test_cart.py": "from cart import cart_total\n\ndef test_total():\n    assert cart_total([10, 20, 12]) == 42\n"}}
+{"_git": ["init", "-q"]}
+{"_git": ["add", "-A"]}
+{"_git": ["commit", "-qm", "init"]}
+{"hook_event_name": "UserPromptSubmit", "prompt": "add a discount option to cart_total"}
+{"_comment": "The tests pass: the hook quietly saves checkpoint last_good"}
+{"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "python -m pytest tests -q"}, "tool_response": {"stdout": "1 passed in 0.01s", "stderr": ""}}
+{"_files": {"cart.py": "def cart_total(prices, discount=None):\n    return sum(prices) * (1 - discount)\n"}}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "cart.py"}, "tool_response": {"filePath": "cart.py"}}
+{"_comment": "First failure: the hook saves checkpoint episode_start"}
+{"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "python -m pytest tests -q"}, "error": "Exit code 1\nE   TypeError: unsupported operand type(s) for -: 'int' and 'NoneType'\ncart.py:2: TypeError\nFAILED tests/test_cart.py::test_total\n1 failed in 0.02s"}
+{"_files": {"cart.py": "from discount import apply_discount\n\ndef cart_total(prices, discount=0):\n    return apply_discount(sum(prices), discount)\n", "discount.py": "def apply(total, rate):\n    return total * (1 - rate)\n"}}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "cart.py"}, "tool_response": {"filePath": "cart.py"}}
+{"hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": {"file_path": "discount.py"}, "tool_response": {"filePath": "discount.py"}}
+{"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "python -m pytest tests -q"}, "error": "Exit code 1\nE   NameError: name 'apply_discount' is not defined\ncart.py:4: NameError\nFAILED tests/test_cart.py::test_total\n1 failed in 0.02s"}
+{"_files": {"discount.py": "def apply_discount(total, rate):\n    return round(total * (1 - rate), 2) if rate else apply_discount(total, 0.0)\n"}}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "discount.py"}, "tool_response": {"filePath": "discount.py"}}
+{"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "python -m pytest tests -q"}, "error": "Exit code 1\nE   RecursionError: maximum recursion depth exceeded\ndiscount.py:2: RecursionError\nFAILED tests/test_cart.py::test_total\n1 failed in 0.30s"}
+{"_files": {"discount.py": "def apply_discount(total, rate):\n    return total * (1 - (rate or 0)) + 0.0000001\n"}}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "discount.py"}, "tool_response": {"filePath": "discount.py"}}
+{"_comment": "Fourth failure, each with a different error: whack-a-mole -> REWIND_OFFER"}
+{"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "python -m pytest tests -q"}, "error": "Exit code 1\nE   assert 42.0000001 == 42\ntests/test_cart.py:4: AssertionError\nFAILED tests/test_cart.py::test_total - assert 42.0000001 == 42\n1 failed in 0.02s"}
+{"_comment": "The agent asks the user, the user says yes, and the agent runs the command from the offer"}
+{"hook_event_name": "UserPromptSubmit", "prompt": "yes, rewind to when the tests last passed"}
+{"_rewind": "last_good"}
+{"_comment": "Fresh approach from the clean files: the tests pass"}
+{"_files": {"cart.py": "def cart_total(prices, discount=0):\n    return round(sum(prices) * (1 - discount), 2)\n"}}
+{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "cart.py"}, "tool_response": {"filePath": "cart.py"}}
+{"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "python -m pytest tests -q"}, "tool_response": {"stdout": "1 passed in 0.01s", "stderr": ""}}

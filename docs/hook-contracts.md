@@ -155,7 +155,15 @@ tells the agent what to do for each one.
 | `NOT_DONE` | The agent tried to finish while the tracked command still fails (Stop) |
 | `UNVERIFIED_CLAIM` | The agent claimed success without running anything after its last edit (Stop) |
 | `UPDATES` | News at session start, for example an open question got solved |
-| `REWIND_OFFER` | Coming in v1.5 ([rewind.md](rewind.md)): offer to roll files back; ask the user first |
+| `REWIND_OFFER` | Going in circles: offer to roll files back to a checkpoint ([rewind.md](rewind.md)); ask the user first, then run the command it gives |
+| `CLEAN_SLATE` | Printed by `rewind.py` (not the hook) after a rewind: what changed, what already failed, how to undo |
+| `TEST_FIXES` | The team's report is in: ask the user, then run the given tester command; apply a WINNER yourself ([local-tester.md](local-tester.md)) |
+| `TEAM_STATUS` | The team failed, is still working, or the tester was inconclusive: keep working (not an Open Question) |
+
+The hook reads the first line of `ask_for_help` / `check_help` results (after the community label), so the
+backend's `message` must **start with its tag**: `TEAM_STARTED: <run_id>`, `TEAM_WORKING`, `TEAM_REPORT`,
+`TEAM_NO_ANSWER`, `TEAM_FAILED`, `KNOWN_FIX: post #<id> ...` or `TRY_FIRST`. Only `TEAM_STARTED` (or a later team
+answer) counts as "the team ran".
 
 ---
 

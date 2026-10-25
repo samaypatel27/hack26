@@ -9,6 +9,10 @@ History is a list of actions, oldest first:
   {"kind": "edit", "t": 1730.0, "path": "src/db.ts"}
   {"kind": "read", "t": 1731.0, "path": "src/db.ts"}        # file reads and code searches
   {"kind": "user", "t": 1732.0}                              # the user sent a message
+  {"kind": "rewind", "t": 1733.0, "to": "last_good"}         # rewind.py reset the files (docs/rewind.md)
+
+A rewind resets the counts like progress does: the attempts before it were made on files that no
+longer exist, so signals 1-3 and the judge only look at what happened after the last rewind.
 
 The notebook builds "run" records with command_key() and fingerprint() from this file.
 
@@ -161,6 +165,14 @@ def _edited_paths(history: list[dict[str, Any]], start: int, end: int) -> set[st
     return {a.get("path", "") for a in history[start + 1:end] if a.get("kind") == "edit"}
 
 
+def _since_rewind(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The actions after the last rewind (all of them if there was none)."""
+    for i in range(len(history) - 1, -1, -1):
+        if history[i].get("kind") == "rewind":
+            return history[i + 1:]
+    return history
+
+
 def _current_turn_start(history: list[dict[str, Any]]) -> int:
     """Index of the last user message, or -1 if there is none."""
     for i in range(len(history) - 1, -1, -1):
@@ -175,6 +187,7 @@ def _current_turn_start(history: list[dict[str, Any]]) -> int:
 
 def check_after_run(history: list[dict[str, Any]]) -> list[Signal]:
     """Signals 1-3 for the command that just ran (the last run in the history)."""
+    history = _since_rewind(history)
     runs = _runs(history)
     if not runs:
         return []
@@ -312,14 +325,14 @@ def judge_due(history: list[dict[str, Any]], now: float, last_judge: int | None 
     strong rule fired. `last_judge` is the history length when the judge last ran."""
     if last_judge is not None and len(history) - last_judge < JUDGE_EVERY:
         return False
-    # Last progress: the most recent passing run of a command that had failed before it.
-    progress = -1
+    # Last progress: the most recent passing run of a command that had failed before it, or a rewind.
+    progress = len(history) - len(_since_rewind(history)) - 1
     failed_keys: set[str] = set()
     for i, a in _runs(history):
         if not a.get("ok"):
             failed_keys.add(a["key"])
         elif a["key"] in failed_keys:
-            progress = i
+            progress = max(progress, i)
             failed_keys.discard(a["key"])
     since = history[progress + 1:]
     if not any(a.get("kind") == "run" and not a.get("ok") and not _is_probe(a.get("key", "")) for a in since):
