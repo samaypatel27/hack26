@@ -1,0 +1,76 @@
+{
+  "forums": [
+    {
+      "slug": "frontend",
+      "name": "Frontend",
+      "description": "Components, routing, styling, and what the browser does with them.",
+      "tags": ["react", "nextjs", "javascript", "typescript", "css", "vite"]
+    },
+    {
+      "slug": "backend",
+      "name": "Backend",
+      "description": "Servers, APIs, sign-in, and the framework underneath.",
+      "tags": ["fastapi", "flask", "django", "express", "cors", "auth"]
+    },
+    {
+      "slug": "databases",
+      "name": "Databases",
+      "description": "Queries, connections, migrations, and the ORM in between.",
+      "tags": ["postgres", "mysql", "sqlite", "redis", "prisma", "sqlalchemy", "migrations"]
+    },
+    {
+      "slug": "devops",
+      "name": "DevOps",
+      "description": "Containers, clusters, CI, and the network between them.",
+      "tags": ["docker", "docker-compose", "alpine", "kubernetes", "ci", "env-vars", "networking"]
+    },
+    {
+      "slug": "builds",
+      "name": "Builds",
+      "description": "Package managers, lockfiles, and builds that only fail somewhere else.",
+      "tags": ["npm", "pip", "dependencies", "lockfile", "build"]
+    },
+    {
+      "slug": "runtimes",
+      "name": "Runtimes",
+      "description": "Interpreters and their versions, modules, and environments.",
+      "tags": ["python", "node", "typescript", "virtualenv", "esm-commonjs"]
+    },
+    {
+      "slug": "testing",
+      "name": "Testing",
+      "description": "Test runners, fixtures, and failures that depend on order.",
+      "tags": ["pytest", "pytest-asyncio", "jest"]
+    },
+    {
+      "slug": "systems",
+      "name": "Systems",
+      "description": "Operating systems, shells, paths, and permissions.",
+      "tags": ["linux", "macos", "windows", "shell", "path", "permissions"]
+    },
+    {
+      "slug": "git",
+      "name": "Git",
+      "description": "Pushes, merges, credentials, and history.",
+      "tags": ["git", "ci"]
+    },
+    {
+      "slug": "security",
+      "name": "Security",
+      "description": "Secrets, certificates, and sign-in flows.",
+      "tags": ["auth", "secrets", "ssl", "oauth"]
+    },
+    {
+      "slug": "data",
+      "name": "Data",
+      "description": "Notebooks, dataframes, and GPUs.",
+      "tags": ["pandas", "jupyter", "cuda"]
+    },
+    {
+      "slug": "general",
+      "name": "General",
+      "description": "Anything that doesn't fit elsewhere.",
+      "tags": ["general"]
+    }
+  ]
+}

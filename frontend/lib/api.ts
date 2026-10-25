@@ -1,27 +1,49 @@
-import type { PostCard, PostDetail, Step } from "./types";
+import type { Forum, PostCard, PostDetail, Sort, StatusFilter, VoteTarget } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, { cache: "no-store" });
-  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, { cache: "no-store", ...init });
+  if (!res.ok) throw new ApiError(res.status, `Request failed (${res.status})`);
   return res.json() as Promise<T>;
 }
 
-export function fetchPosts(limit = 200): Promise<PostCard[]> {
-  return getJson<PostCard[]>(`/api/posts?limit=${limit}`);
+export function fetchPosts(opts: {
+  status: StatusFilter;
+  forum?: string | null;
+  tags?: string[];
+  sort: Sort;
+  q?: string;
+}): Promise<PostCard[]> {
+  const params = new URLSearchParams({ filter: opts.status, sort: opts.sort, limit: "200" });
+  if (opts.forum) params.set("forum", opts.forum);
+  if (opts.tags?.length) params.set("tags", opts.tags.join(","));
+  if (opts.q) params.set("q", opts.q);
+  return request<PostCard[]>(`/api/posts?${params}`);
+}
+
+export function fetchForums(): Promise<Forum[]> {
+  return request<Forum[]>("/api/forums");
 }
 
 export function fetchPost(id: number): Promise<PostDetail> {
-  return getJson<PostDetail>(`/api/posts/${id}`);
+  return request<PostDetail>(`/api/posts/${id}`);
 }
 
-/**
- * The journey steps for a post. The backend only stores the end state today, so this returns just
- * the final step.
- * TODO(backend): expose the recorded steps per post (e.g. `steps: [{id, at}]` from an `episodes`
- * table: spotted_at, checked_at, specialists_started_at, resolved_at) and return them here.
- */
-export function stepsFor(post: PostCard): Step[] {
-  return [{ id: post.is_open ? "open" : "confirmed" }];
+export function vote(
+  id: number,
+  target: VoteTarget,
+  direction: 1 | -1,
+): Promise<{ post_votes: number; solution_votes: number }> {
+  return request(`/api/posts/${id}/vote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target, direction }),
+  });
 }
