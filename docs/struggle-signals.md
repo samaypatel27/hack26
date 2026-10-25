@@ -42,7 +42,8 @@ Words count only as supporting evidence.
 **Progress resets the counts:**
 - the goal command passes;
 - the number of failing tests drops;
-- a new error appears further along (a different stage of the build or test run).
+- a new error appears further along (a different stage of the build or test run);
+- the files were rewound ([rewind.md](rewind.md)): attempts made before the rewind no longer count.
 
 **Not struggling (avoid false alarms):**
 - **Waiting:** polling a server that is still starting ("connection refused" a few times) does not count until a
@@ -97,8 +98,9 @@ The hook only collects and sends the recent activity. The backend owns the model
 The hook moves the stuck episode up the help ladder one step at a time:
 
 1. **Forum fix:** search the forum and hand over a known fix.
-2. **Rewind + fresh approach (v1.5):** if the signal was whack-a-mole, edit-run-same-output or the judge, and there
-   are 3+ edits to undo, offer to roll the files back to a clean checkpoint. See [rewind.md](rewind.md).
+2. **Rewind + fresh approach (built):** if the signal was whack-a-mole, edit-run-same-output or the judge, and there
+   are 3+ edits to undo, offer to roll the files back to a clean checkpoint, once per episode. See
+   [rewind.md](rewind.md).
 3. **Specialist team:** run `run_specialists`.
 4. **Open Question:** post it so a future agent or model can solve it.
 
