@@ -1,0 +1,22 @@
+{
+  "goal": "Get the GitHub Actions CI job to pass; the tests pass locally with `pytest` but fail in CI before any test runs.",
+  "symptom": "ImportError while importing test module '/home/runner/work/shop/shop/tests/test_orders.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/opt/hostedtoolcache/Python/3.12.7/x64/lib/python3.12/importlib/__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\ntests/test_orders.py:3: in <module>\n    from app.orders import create_order\nE   ModuleNotFoundError: No module named 'app'\n=========================== short test summary info ============================\nERROR tests/test_orders.py\n!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!",
+  "expected": "pytest collects and runs the 14 tests in CI like it does locally.",
+  "actual": "Collection fails with ModuleNotFoundError: No module named 'app' (exit code 2).",
+  "check_command": "pytest -q",
+  "check_description": "The 'test' job in GitHub Actions is green.",
+  "tried": [
+    {"attempt": "Added an empty tests/__init__.py", "result": "Still ModuleNotFoundError in CI; local still passes"},
+    {"attempt": "Changed the import to `from src.app.orders import create_order`", "result": "Broke local runs too (No module named 'src')"},
+    {"attempt": "Added `pip install -r requirements.txt` before pytest in the workflow (it was already there)", "result": "No change"}
+  ],
+  "environment": "Local: Windows 11, Python 3.12.4, pytest 8.3.3, project installed with `pip install -e .` in a venv. CI: GitHub Actions ubuntu-latest, actions/setup-python@v5 with python 3.12, steps: checkout, pip install -r requirements.txt, pytest. src layout: src/app/__init__.py, src/app/orders.py; tests/ at the repo root.",
+  "files": [
+    {"path": ".github/workflows/ci.yml", "excerpt": "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'\n      - run: pip install -r requirements.txt\n      - run: pytest -q"},
+    {"path": "pyproject.toml", "excerpt": "[project]\nname = \"shop\"\nversion = \"0.1.0\"\n\n[tool.setuptools.packages.find]\nwhere = [\"src\"]\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]"},
+    {"path": "tests/test_orders.py", "excerpt": "import pytest\n\nfrom app.orders import create_order\n\n\ndef test_create_order_total():\n    assert create_order([2, 3]).total == 5"}
+  ],
+  "diff": "",
+  "model": "claude-haiku-5-5",
+  "project": "demo-shop"
+}

@@ -1,0 +1,23 @@
+{
+  "goal": "Run the Node/Express API in Docker with docker compose; it works with `npm run dev` on the laptop but crashes on startup inside the container.",
+  "symptom": "PrismaClientInitializationError: Prisma Client could not locate the Query Engine for runtime \"linux-musl-openssl-3.0.x\".\n\nThis happened because Prisma Client was generated for \"darwin-arm64\", but the actual deployment required \"linux-musl-openssl-3.0.x\".\nAdd \"linux-musl-openssl-3.0.x\" to `binaryTargets` in the \"schema.prisma\" file and run `prisma generate` after saving it:\n\ngenerator client {\n  provider      = \"prisma-client-js\"\n  binaryTargets = [\"native\", \"linux-musl-openssl-3.0.x\"]\n}\n\nThe following locations have been searched:\n  /app/node_modules/.prisma/client\n  /app/node_modules/@prisma/client\n    at Ln (/app/node_modules/@prisma/client/runtime/library.js:111:9)\n    at async Object.loadLibrary (/app/node_modules/@prisma/client/runtime/library.js:111:2134)",
+  "expected": "The api container starts and GET /health returns 200.",
+  "actual": "The api container exits with code 1 right after `node dist/server.js` starts.",
+  "check_command": "docker compose up --build api",
+  "check_description": "The api service logs 'listening on :3000' and stays up.",
+  "tried": [
+    {"attempt": "Deleted node_modules and ran npm ci again on the laptop, then rebuilt the image", "result": "Same error"},
+    {"attempt": "Ran `npx prisma generate` on the laptop before docker compose build", "result": "Same error, still says generated for darwin-arm64"},
+    {"attempt": "Upgraded prisma and @prisma/client from 5.14.0 to 5.22.0", "result": "Same error"}
+  ],
+  "environment": "macOS 15 on Apple Silicon (darwin-arm64) for development; Docker image node:20-alpine (Alpine 3.20, musl, OpenSSL 3); Node 20.18; prisma 5.22.0, @prisma/client 5.22.0; PostgreSQL 16 in a second compose service.",
+  "files": [
+    {"path": "Dockerfile", "excerpt": "FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --omit=dev\nCOPY . .\nRUN npm run build\nCMD [\"node\", \"dist/server.js\"]"},
+    {"path": "prisma/schema.prisma", "excerpt": "generator client {\n  provider = \"prisma-client-js\"\n}\n\ndatasource db {\n  provider = \"postgresql\"\n  url      = env(\"DATABASE_URL\")\n}"},
+    {"path": ".dockerignore", "excerpt": ".git\n.env\ndist"}
+  ],
+  "diff": "",
+  "fingerprint": "51749bd5",
+  "model": "claude-haiku-5-5",
+  "project": "demo-prisma-api"
+}
