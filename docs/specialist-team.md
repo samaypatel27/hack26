@@ -35,9 +35,10 @@ agent: ask_for_help ──▶ POST /api/help ──▶ case file (scrub + size c
 agent: check_help ──▶ GET /api/help/tr_xxx ──▶ TEAM_WORKING / TEAM_REPORT / TEAM_NO_ANSWER / TEAM_FAILED
 ```
 
-1. **`ask_for_help`** (plugin/mcp/server.py) sends `{description, command, error, tried}`. The server also accepts
-   the full case file from api-endpoints.md #9 (goal, symptom, expected, actual, check_command, tried[{attempt,
-   result}], environment, files, diff, fingerprint, ...).
+1. **`ask_for_help`** (plugin/mcp/server.py) sends the full case file from api-endpoints.md #9 (goal, symptom,
+   expected, actual, check_command, check_description, tried[{attempt, result}], fingerprint), and fills in
+   `environment`, `files` excerpts, `diff`, `model` and `project` itself. The server also still accepts the old short
+   shape `{description, command, error, tried}`.
 2. **The gate** decides in order, first match wins:
    - team switched off (`TEAM_ENABLED=0`) → `TRY_FIRST`;
    - a **solved post** matches (same fingerprint, or text score ≥ 0.5, using the backend's `/api/search` logic) →

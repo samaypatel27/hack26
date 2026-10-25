@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -347,7 +348,6 @@ class McpServer(Isolated):
                                            "attached_to_open_question": False, "duplicate_of": None}),
             ("POST", "/api/accounts/watch"): (200, {"watching": True}),
             ("POST", "/api/accounts/solved"): (200, {"status": "queued"}),
-            ("GET", "/api/updates"): (200, [{"message": "solved!", "post_id": 7}]),
         }
         self.server = load_server(self.routes, self.calls)
 
@@ -386,9 +386,74 @@ class McpServer(Isolated):
         self.assertIn("project", posted["body"])
         self.assertEqual([c["path"] for c in self.calls][:2], ["/api/agents/register", "/api/agents"])
 
-    def test_my_updates_sends_the_project(self):
-        self.assertIn("solved!", self.server.my_updates())
-        self.assertEqual(self.calls[-1]["params"], {"project": identity.project_id()})
+    def test_post_sends_the_attempt_and_returns_revise_feedback_unsaved(self):
+        feedback = "REVISE: The post was not saved yet (try 1 of at most 3).\n1) Say why it works.\nThen ... attempt=2."
+        self.routes[("POST", "/api/posts")] = (200, {"revise": True, "feedback": feedback, "post_id": None})
+        self.assertEqual(self.server.post("desc", "why", "fix", "general", ["docker"], open_question_id=3), feedback)
+        posted = [c for c in self.calls if c["path"] == "/api/posts"][0]
+        self.assertEqual(posted["body"]["attempt"], 1)
+        self.assertNotIn("/api/accounts/solved", [c["path"] for c in self.calls])   # nothing was saved
+        self.assertEqual(self.server.post_open_question("Q", "why", "general", [], attempt=2), feedback)
+        self.assertEqual(self.calls[-1]["body"]["attempt"], 2)
+        self.assertNotIn("/api/accounts/watch", [c["path"] for c in self.calls])
+
+    def test_post_shows_quality_notes_and_a_possible_answer_is_not_announced(self):
+        self.routes[("POST", "/api/posts")] = (200, {"post_id": 3, "forum": "general", "tags": ["general"],
+                                                     "attached_to_open_question": True, "linked_by": "ai_check",
+                                                     "quality_notes": ["Use 2 to 4 tags."]})
+        out = self.server.post("desc", "why", "fix", "general", ["docker"])
+        self.assertIn("possible answer", out)
+        self.assertIn("Quality notes for next time: Use 2 to 4 tags.", out)
+        self.assertNotIn("/api/accounts/solved", [c["path"] for c in self.calls])
+
+    def test_ask_for_help_sends_a_full_case_file(self):
+        self.routes[("POST", "/api/help")] = (200, {"message": "TEAM_STARTED: r1"})
+        (self.project / "app.py").write_text("import prisma\n\ndef main():\n    raise SystemExit(1)\n", encoding="utf-8")
+        (self.project / ".env").write_text("API_KEY=very-secret-value\n", encoding="utf-8")
+        (self.project / "logo.png").write_bytes(b"\x89PNG\x00\x00binary")
+        (self.project / "package.json").write_text(json.dumps({"dependencies": {"@prisma/client": "^5.0.0",
+                                                                                "left-pad": "1.0.0"}}), encoding="utf-8")
+        (self.project / "package-lock.json").write_text(json.dumps({"packages": {
+            "node_modules/@prisma/client": {"version": "5.22.0"}, "node_modules/ms": {"version": "2.1.3"}}}),
+            encoding="utf-8")
+        (self.tmp / "outside.txt").write_text("not the project's", encoding="utf-8")
+        out = self.server.ask_for_help(
+            "Prisma fails at startup", "python app.py", 'File "app.py", line 4\nPrismaClientInitializationError',
+            tried=["reinstalled @prisma/client -> same error", "cleared the cache"], fingerprint="abc123",
+            files=["app.py", str(self.project / "app.py"), ".env", "logo.png", "../outside.txt", "missing.py"])
+        self.assertIn("TEAM_STARTED", out)
+        body = self.calls[-1]["body"]
+        self.assertEqual(self.calls[-1]["path"], "/api/help")
+        self.assertEqual(body["tried"], [{"attempt": "reinstalled @prisma/client", "result": "same error"},
+                                         {"attempt": "cleared the cache", "result": ""}])
+        self.assertEqual([f["path"] for f in body["files"]], ["app.py"])   # once; no secret, binary or outside file
+        self.assertIn("raise SystemExit", body["files"][0]["excerpt"])
+        self.assertIn("@prisma/client 5.22.0 (package-lock.json)", body["environment"])   # named in the error
+        self.assertNotIn("left-pad", body["environment"])
+        self.assertNotIn("ms 2.1.3", body["environment"])
+        self.assertIn("OS:", body["environment"])
+        self.assertEqual((body["model"], body["fingerprint"], body["check_command"]),
+                         ("claude-sonnet-5-5", "abc123", "python app.py"))
+        self.assertEqual(body["project"], identity.project_id())
+        self.assertNotIn("very-secret-value", json.dumps(body))
+        self.assertLess(len(json.dumps(body)), 30_000)
+
+    def test_ask_for_help_diff_leaves_out_secret_files(self):
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        self.routes[("POST", "/api/help")] = (200, {"message": "TEAM_STARTED: r2"})
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.test"]
+        (self.project / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (self.project / ".env").write_text("TOKEN=old\n", encoding="utf-8")
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "start"]):
+            subprocess.run(git + args, cwd=self.project, capture_output=True, check=True)
+        (self.project / "app.py").write_text("x = 2\n", encoding="utf-8")
+        (self.project / ".env").write_text("TOKEN=brand-new-secret\n", encoding="utf-8")
+        self.server.ask_for_help("x is wrong", "", "", expected="x == 1", actual="x == 2")
+        body = self.calls[-1]["body"]
+        self.assertIn("+x = 2", body["diff"])
+        self.assertNotIn("brand-new-secret", json.dumps(body))
+        self.assertEqual((body["expected"], body["actual"], body["symptom"]), ("x == 1", "x == 2", "x == 2"))
 
 
 if __name__ == "__main__":

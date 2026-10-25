@@ -157,30 +157,26 @@ def step_back(command: str, fingerprint: str | None, tried: list[str], reason: s
     )
 
 
-def call_team(mode: str, command: str, error: str, fingerprint: str | None, tried: list[str],
+def call_team(command: str, error: str, fingerprint: str | None, tried: list[str],
               reason: str, open_question_id: Any = None) -> str:
-    if mode == "local":
-        how = [
-            "Next: call the `run_specialists` tool with:",
-            "  command: the failing command above",
-            "  error: the key error lines below",
-            "  tried: the list of what you already tried",
-        ]
-        if open_question_id:
-            how.append(f"  open_question_id: {open_question_id}")
-        how.append("It runs specialists in separate copies of the project and verifies any fix by rerunning the "
-                   "command. Then call `post` if there is a winner, or `post_open_question` if there is none.")
-    else:
-        how = [
-            "Next: call the `ask_for_help` tool with:",
-            "  description: what you were doing, and your best guess at the cause",
-            "  command: the failing command above",
-            "  error: the key error lines below",
-            "  tried: the list of what you already tried",
-            "Then call `check_help` with the run id it returns. Keep working while the team researches.",
-            "When the report is ready, the hook gives you a command that tests the ranked fixes in throwaway "
-            "copies of the project (TEST_FIXES).",
-        ]
+    how = [
+        "Next: call the `ask_for_help` tool with:",
+        "  description: what you were doing, and your best guess at the cause",
+        "  command: the failing command above",
+        "  error: the key error lines below",
+        "  tried: the list of what you already tried, as \"attempt -> result\"",
+        f"  fingerprint: {fingerprint}" if fingerprint else "  fingerprint: (none here; leave it out)",
+        "  expected / actual: what should happen and what happens instead (always when there is no error message)",
+        "  files: the 1-5 project files most related to the problem (paths only; the tool reads them)",
+        "The tool adds your environment, package versions and `git diff` by itself.",
+    ]
+    if open_question_id:
+        how.append(f"Open question #{open_question_id} is the same problem: do not repeat what was tried there.")
+    how += [
+        "Then call `check_help` with the run id it returns. Keep working while the team researches.",
+        "When the report is ready, the hook gives you a command that tests the ranked fixes in throwaway "
+        "copies of the project (TEST_FIXES).",
+    ]
     return _join(
         _header(CALL_TEAM, "You are stuck and the forum has no fix: call the specialist team."),
         _facts(command, fingerprint, tried),
