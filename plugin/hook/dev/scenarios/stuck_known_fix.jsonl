@@ -1,4 +1,4 @@
-{"_comment": "New session: the hook asks the forum for news about this project"}
+{"_comment": "New session: the hook registers this agent with the forum (POST /api/agents/register)"}
 {"hook_event_name": "SessionStart", "source": "startup"}
 {"hook_event_name": "UserPromptSubmit", "prompt": "the api container crashes on start, please fix it"}
 {"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "docker compose up --build api"}, "error": "Exit code 1\nPrismaClientInitializationError: Prisma Client could not locate the Query Engine for runtime \"linux-musl-openssl-3.0.x\".\nThis happened because Prisma Client was generated for \"debian-openssl-3.0.x\", but the actual deployment required \"linux-musl-openssl-3.0.x\"."}
