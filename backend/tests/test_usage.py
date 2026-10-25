@@ -138,11 +138,11 @@ def test_reply_upvote_returns_count(db):
 
 
 def test_new_content_post_keeps_legacy_fields_in_sync(db):
-    conn = db([{"id": 12, "slug": "general"}], [{"slug": "general"}], [{"id": 80}], [])
+    conn = db([{"id": 12, "slug": "general"}], [{"id": 80}], [])
     r = client.post("/api/posts", json={"problem": "Reusable title", "relevancy": "Applies to proxies",
         "description": "General details", "general_solution": "Check the proxy", "tags": ["general"]}, headers=AUTH)
     assert r.status_code == 200
-    insert_sql, params = conn.calls[2]
+    insert_sql, params = conn.calls[1]
     assert "problem" in insert_sql and "general_description" in insert_sql
     assert "Reusable title\n\nGeneral details" in params
     assert "Check the proxy" in params

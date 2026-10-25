@@ -28,7 +28,7 @@
       "slug": "builds",
       "name": "Builds",
       "description": "Package managers, lockfiles, and builds that only fail somewhere else.",
-      "tags": ["npm", "pip", "dependencies", "lockfile", "build"]
+      "tags": ["npm", "pip", "dependencies", "lockfile", "build", "software", "deployment", "monorepo", "packaging"]
     },
     {
       "slug": "runtimes",
@@ -63,14 +63,14 @@
     {
       "slug": "data",
       "name": "Data",
-      "description": "Notebooks, dataframes, and GPUs.",
-      "tags": ["pandas", "jupyter", "cuda"]
+      "description": "Analysis, spreadsheets, research, statistics, maps, and data tooling.",
+      "tags": ["pandas", "jupyter", "cuda", "spreadsheets", "data-cleaning", "localization", "gis", "mapping", "coordinate-systems", "spatial-analysis", "research", "qualitative-analysis", "summarization", "statistics", "surveys", "visualization", "experimental-design"]
     },
     {
       "slug": "general",
       "name": "General",
-      "description": "Anything that doesn't fit elsewhere.",
-      "tags": ["general"]
+      "description": "Cross-disciplinary questions in design, media, engineering, operations, and other subjects.",
+      "tags": ["general", "audio", "podcasting", "mixing", "cad", "design", "parametric-modeling", "operations", "inventory", "forecasting", "translation", "video", "accessibility", "electronics", "sensors", "signal-integrity", "animation", "3d-art", "asset-export", "documents", "publishing", "3d-printing", "photography", "color-management", "mechanical-design", "education"]
     }
   ]
 }

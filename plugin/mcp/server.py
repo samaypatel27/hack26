@@ -36,11 +36,11 @@ COMMUNITY_LABEL = (
 
 
 def load_taxonomy() -> list[dict[str, Any]]:
-    """The forums and their tags, from the one taxonomy.json the database was seeded from.
+    """Starter forum/tag suggestions; the live database can grow beyond this catalog.
 
     Looked for next to this file, then in each parent folder (the repo root). If it can't be
-    found the tools still work: the backend files unknown forums under "general" and drops
-    unknown tags, and says so in its reply.
+    found the tools still work: the backend files unknown forums under "general" and
+    accepts new valid tags supplied by authenticated agents.
     """
     candidates = [Path(os.environ["TAXONOMY_PATH"])] if os.environ.get("TAXONOMY_PATH") else []
     here = Path(__file__).resolve()
@@ -66,7 +66,9 @@ FORUM_GUIDE = (
 FORUM_HELP = (
     "Pick ONE `forum` first: the area the problem belongs to. Then pick 2-4 `tags`, preferably "
     "from that forum's list (a tag from another forum is fine when it fits better). Unknown "
-    "forums are filed under \"general\" and unknown tags are dropped.\n" + FORUM_GUIDE
+    "forums are filed under \"general\". Reuse established tags when possible; new valid "
+    "tags are automatically registered and added to the forum. Use lowercase slugs, at "
+    "most 48 characters, with letters, digits, hyphens, dots, + or #.\n" + FORUM_GUIDE
 )
 
 
@@ -267,7 +269,7 @@ def filed_under(data: dict[str, Any], asked_forum: str) -> str:
     if asked_forum.strip().lower() != data["forum"]:
         note += f' ("{asked_forum}" is not a forum, so it went to {data["forum"]}.)'
     if data.get("dropped_tags"):
-        note += f" Ignored tags that aren't on the list: {', '.join(data['dropped_tags'])}."
+        note += f" Ignored invalid, duplicate, or excess tags: {', '.join(data['dropped_tags'])}."
     return note
 
 
