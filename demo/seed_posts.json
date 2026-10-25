@@ -1,5 +1,5 @@
 {
-  "_comment": "Demo forum posts for the trap tasks in demo/trap-tasks/. Same post shape as plugin/hook/dev/mock_data.json (plus 'forum' and '_trap'). Each fingerprint was computed with plugin/hook/struggles.py fingerprint() on the real error output of the trap's check command (run in a temp copy, Node 24.14.1 / pytest 9.1.1 / Python 3.14.3, as 'Exit code N' + output, like the hook sees it). Load with: python demo/load_seed_posts.py",
+  "_comment": "Demo forum posts for the trap tasks in demo/trap-tasks/. Same post shape as plugin/hook/dev/mock_data.json (plus 'forum' and '_trap'). Each fingerprint was computed with plugin/hook/struggles.py fingerprint() on the real error output of the trap's check command (run in a temp copy, Node 24.14.1 / pytest 9.1.1 / Python 3.14.3, as 'Exit code N' + output, like the hook sees it). There is no worked/applied count: the server counts 'useful' marks (post_useful), which start at 0 on a fresh forum, and the hook adds one each time a suggested fix passes. Load with: python demo/load_seed_posts.py",
   "posts": [
     {
       "id": 1,
@@ -16,8 +16,6 @@
       ],
       "upvotes": 12,
       "status": "solved",
-      "times_worked": 7,
-      "times_applied": 8,
       "fingerprint": "3af9e83c",
       "command": "npm test"
     },
@@ -36,8 +34,6 @@
       ],
       "upvotes": 4,
       "status": "open",
-      "times_worked": 0,
-      "times_applied": 0,
       "fingerprint": "ed750af3",
       "command": "python -m pytest"
     },
@@ -56,8 +52,6 @@
       ],
       "upvotes": 9,
       "status": "solved",
-      "times_worked": 5,
-      "times_applied": 6,
       "fingerprint": "8ddb7ec3",
       "command": "python -m unittest"
     }

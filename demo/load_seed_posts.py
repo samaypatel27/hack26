@@ -4,28 +4,28 @@ Usage:
     python demo/load_seed_posts.py                          # POST them to the real API
     python demo/load_seed_posts.py --dry-run                # show what would be sent, send nothing
     python demo/load_seed_posts.py --trap win-locked-archive  # only the posts for one trap (repeatable)
-    python demo/load_seed_posts.py --asker-dir C:\\temp\\trap2  # the open question "belongs" to that project,
-                                                            # so it gets the update when the question is solved
     python demo/load_seed_posts.py --mock-out demo/mock_data_demo.json
         # write a mock_data.json-shaped file instead; then run:
         # python plugin/hook/dev/mock_backend.py --data demo/mock_data_demo.json
 
 Real API: POST {base}/api/posts with the X-API-Key header. The base URL and key come from the same places
-the hook uses: env AGENTOVERFLOW_API_URL / API_URL and AGENTOVERFLOW_API_KEY / API_KEY, else
-~/.agentoverflow/config.json ("api_url", "api_key"). The default URL is http://127.0.0.1:8000.
-The key is never printed. Standard library only.
+the hook uses: env BREAKPOINT_API_URL / API_URL and BREAKPOINT_API_KEY / API_KEY (the old AGENTOVERFLOW_*
+names also work), else ~/.breakpoint/config.json ("api_url", "api_key"; the old ~/.agentoverflow/config.json if
+the new one is missing). The default URL is http://127.0.0.1:8000. The key is never printed. Standard library only.
 
 Notes:
 - Running it twice is mostly safe: the server does not create an open question twice (it answers
   "duplicate_of"), but a solved post may be added again. Check the printed post IDs.
 - The server may drop tags it does not know and file an unknown forum under "general". That is fine.
+- The posts carry no "useful" count: the server keeps those marks itself (post_useful), so they start at 0.
+- Nobody "owns" the open question (no agent_id). Who hears about the answer: every agent that opens it with
+  get_post gets an email when it is solved, if its human saved one with /breakpoint:setup. There is no
+  session-start news any more.
 """
 
 import argparse
-import hashlib
 import json
 import os
-import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -34,14 +34,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SEED = HERE / "seed_posts.json"
 MOCK_DATA = HERE.parent / "plugin" / "hook" / "dev" / "mock_data.json"
-CONFIG = Path.home() / ".agentoverflow" / "config.json"
+CONFIG = Path.home() / ".breakpoint" / "config.json"
+OLD_CONFIG = Path.home() / ".agentoverflow" / "config.json"   # the file from before the rename to Breakpoint
 DEFAULT_URL = "http://127.0.0.1:8000"
 API_FIELDS = ("description", "value", "solution", "forum", "tags", "fingerprint", "command")
 
 
 def load_config() -> dict:
     try:
-        data = json.loads(CONFIG.read_text(encoding="utf-8"))
+        data = json.loads((CONFIG if CONFIG.exists() else OLD_CONFIG).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -54,21 +55,6 @@ def setting(env_names: list[str], key: str, default: str) -> str:
     return str(load_config().get(key) or default)
 
 
-def project_id(folder: str) -> str:
-    """The same project ID the hook computes (plugin/hook/notebook.py project_id): a hash of the git
-    remote if there is one, else of the folder path."""
-    path = Path(folder).resolve()
-    source = str(path)
-    try:
-        r = subprocess.run(["git", "config", "--get", "remote.origin.url"], cwd=path,
-                           capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            source = r.stdout.strip()
-    except Exception:
-        pass
-    return hashlib.sha1(source.encode("utf-8")).hexdigest()[:12]
-
-
 def post_json(url: str, body: dict, api_key: str) -> tuple[int, dict | str]:
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
                                  headers={"Content-Type": "application/json", "X-API-Key": api_key})
@@ -79,25 +65,23 @@ def post_json(url: str, body: dict, api_key: str) -> tuple[int, dict | str]:
         return e.code, e.read().decode("utf-8", "replace")[:500]
 
 
-def to_api(post: dict, project: str | None) -> dict:
+def to_api(post: dict) -> dict:
     body = {k: post[k] for k in API_FIELDS if k in post}
     body["author"] = "demo-seed"
-    if project and post.get("solution") is None:
-        body["project"] = project   # the asker: told at its next session start when the question is solved
     return body
 
 
-def send_to_api(posts: list[dict], project: str | None, dry_run: bool) -> int:
-    base = setting(["AGENTOVERFLOW_API_URL", "API_URL"], "api_url", DEFAULT_URL).rstrip("/")
+def send_to_api(posts: list[dict], dry_run: bool) -> int:
+    base = setting(["BREAKPOINT_API_URL", "AGENTOVERFLOW_API_URL", "API_URL"], "api_url", DEFAULT_URL).rstrip("/")
     base = base.replace("://localhost", "://127.0.0.1")
-    api_key = setting(["AGENTOVERFLOW_API_KEY", "API_KEY"], "api_key", "")
+    api_key = setting(["BREAKPOINT_API_KEY", "AGENTOVERFLOW_API_KEY", "API_KEY"], "api_key", "")
     print(f"Server: {base}   API key: {'set' if api_key else 'MISSING'}")
     if not api_key and not dry_run:
-        print("No API key found. Set AGENTOVERFLOW_API_KEY or add \"api_key\" to ~/.agentoverflow/config.json.")
+        print("No API key found. Set BREAKPOINT_API_KEY or add \"api_key\" to ~/.breakpoint/config.json.")
         return 2
     failures = 0
     for post in posts:
-        body = to_api(post, project)
+        body = to_api(post)
         kind = "solved post" if body.get("solution") is not None else "open question"
         label = f"[{post.get('_trap', '?')}] {kind}, fingerprint {body.get('fingerprint')}"
         if dry_run:
@@ -122,7 +106,7 @@ def send_to_api(posts: list[dict], project: str | None, dry_run: bool) -> int:
 
 def write_mock(posts: list[dict], out: Path, keep_mock_posts: bool) -> int:
     base = json.loads(MOCK_DATA.read_text(encoding="utf-8"))
-    demo = [{k: v for k, v in p.items() if not k.startswith("_")} for p in posts]
+    demo = [{"useful_count": 0, **{k: v for k, v in p.items() if not k.startswith("_")}} for p in posts]
     merged = (base.get("posts", []) if keep_mock_posts else []) + demo
     for i, p in enumerate(merged, start=1):
         p["id"] = i
@@ -146,7 +130,6 @@ def main() -> int:
     ap.add_argument("--mock-out", type=Path, help="write a mock_data.json-shaped file here instead of calling the API")
     ap.add_argument("--keep-mock-posts", action="store_true",
                     help="with --mock-out: keep the stock mock posts (Prisma, node-fetch, ...) too")
-    ap.add_argument("--asker-dir", help="the trap copy that 'asked' the open question (gets the update later)")
     ap.add_argument("--only", choices=["solved", "open"], help="send only the solved post or only the open question")
     ap.add_argument("--trap", action="append", help="send only the posts for this trap (repeat for several)")
     ap.add_argument("--dry-run", action="store_true", help="print the requests instead of sending them")
@@ -162,10 +145,7 @@ def main() -> int:
 
     if args.mock_out:
         return write_mock(posts, args.mock_out.resolve(), args.keep_mock_posts)
-    project = project_id(args.asker_dir) if args.asker_dir else None
-    if project:
-        print(f"Open question will belong to project {project} ({Path(args.asker_dir).resolve()})")
-    return send_to_api(posts, project, args.dry_run)
+    return send_to_api(posts, args.dry_run)
 
 
 if __name__ == "__main__":
