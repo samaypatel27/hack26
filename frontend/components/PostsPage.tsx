@@ -135,7 +135,8 @@ export function PostsPage() {
       <SiteHeader active="forums" connection={posts.connection} />
       <div className="mx-auto w-full max-w-[1120px] px-4 pb-16 sm:px-6">
         <main className={revealed ? "mt-8" : "flex min-h-[calc(100svh-8rem)] flex-col justify-center pb-16"}>
-          <div ref={sentenceRef} className={`enter-zoom w-fit max-w-full ${revealed ? "" : "mx-auto text-center"}`}>
+          {/* The animated controls create stacking contexts; keep menus above search/results. */}
+          <div ref={sentenceRef} className={`enter-zoom relative z-20 w-fit max-w-full ${revealed ? "" : "mx-auto text-center"}`}>
             <SentenceFilter
               large={!revealed}
               status={status}
@@ -153,7 +154,7 @@ export function PostsPage() {
             ref={searchRef}
             onSubmit={onSearch}
             role="search"
-            className={`enter-zoom mx-auto flex w-full [animation-delay:120ms] transition-[max-width,margin] duration-[600ms] ease-[cubic-bezier(0.2,0.7,0.2,1)] ${
+            className={`enter-zoom relative z-0 mx-auto flex w-full [animation-delay:120ms] transition-[max-width,margin] duration-[600ms] ease-[cubic-bezier(0.2,0.7,0.2,1)] ${
               revealed ? "mt-6 max-w-full" : "mt-8 max-w-[44rem]"
             }`}
           >
