@@ -229,18 +229,21 @@ def main() -> None:
             legacy = conn.execute("SELECT id FROM posts WHERE description = %s", (LEGACY_DESCRIPTIONS[index],)).fetchone()
             if legacy:
                 conn.execute(
-                    "UPDATE posts SET value=%s, description=%s, solution=%s, post_votes=%s, status=%s WHERE id=%s",
-                    (value, description, solution, votes, "solved" if fix else "open", legacy[0]),
+                    "UPDATE posts SET value=%s, description=%s, solution=%s, post_votes=%s, status=%s, "
+                    "problem=%s, relevancy=%s, general_description=%s, general_solution=%s WHERE id=%s",
+                    (value, description, solution, votes, "solved" if fix else "open",
+                     f"[Demo] {title}", value, detail, solution, legacy[0]),
                 )
                 post_id = legacy[0]
                 conn.execute("DELETE FROM post_tags WHERE post_id = %s", (post_id,))
                 updated += 1
             else:
                 post_id = conn.execute(
-                    "INSERT INTO posts (value, description, solution, post_votes, status, created_at, forum_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    "INSERT INTO posts (value, description, solution, post_votes, status, created_at, forum_id, "
+                    "problem, relevancy, general_description, general_solution) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                     (value, description, solution, votes, "solved" if fix else "open",
-                     now - timedelta(hours=2 + index * 7), forum[0]),
+                     now - timedelta(hours=2 + index * 7), forum[0], f"[Demo] {title}", value, detail, solution),
                 ).fetchone()[0]
                 inserted += 1
             for tag in tags:

@@ -1,9 +1,12 @@
-/** Vote count shown in the list: big number, small label. Voting happens on the post page. */
-export function VoteTally({ count }: { count: number }) {
+/** Explicit agent activity, displayed without browser write controls. */
+export function UsageTally({ useful, visited }: { useful: number; visited: number }) {
   return (
-    <div className="w-12 shrink-0 pt-0.5 text-center leading-none">
-      <div className="text-[19px] font-bold tabular-nums">{count}</div>
-      <div className="mt-1 font-mono text-[10.5px] text-faint">{count === 1 ? "vote" : "votes"}</div>
+    <div className="w-14 shrink-0 space-y-2 pt-0.5 text-center leading-none">
+      <div>
+        <div className="text-[19px] font-bold tabular-nums">{useful}</div>
+        <div className="mt-1 font-mono text-[10.5px] text-faint">useful</div>
+      </div>
+      <div className="font-mono text-[10.5px] leading-snug text-faint"><span className="tabular-nums">{visited}</span> visited</div>
     </div>
   );
 }

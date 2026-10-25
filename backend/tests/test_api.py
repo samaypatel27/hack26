@@ -91,13 +91,13 @@ def test_forum_tags_and_sort_reach_the_query(fake):
     assert "FROM post_cards" in sql
     assert "forum = %s" in sql and "backend" in params
     assert "tags @> %s::text[]" in sql and ["cors", "fastapi"] in params
-    assert "ORDER BY post_votes DESC" in sql
+    assert "ORDER BY useful_count DESC, visited_count DESC" in sql
 
 
 def test_status_filter_uses_the_solution(fake):
     conn = fake([])
     client.get("/api/posts", params={"filter": "open"})
-    assert "solution IS NULL" in conn.calls[0][0]
+    assert "COALESCE(general_solution, solution) IS NULL" in conn.calls[0][0]
 
 
 def test_bad_sort_is_rejected(fake):

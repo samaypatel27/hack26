@@ -78,6 +78,47 @@ body {
 .prose-paper pre code { background: none; border: 0; padding: 0; font-size: 13.5px; }
 .prose-paper blockquote { border-left: 3px solid var(--rule-strong); padding-left: 0.9em; color: var(--ink-soft); font-style: italic; }
 
+/* Compact thread cards; keep full content visible and code horizontally scrollable. */
+.post-thread .prose-paper { font-size: 14px; line-height: 1.5; }
+.post-thread .prose-paper > * + * { margin-top: 0.6em; }
+.post-thread .prose-paper li + li { margin-top: 0.2em; }
+.post-thread .prose-paper pre { padding: 0.65em 0.8em; }
+.post-thread .prose-paper pre code { font-size: 12.5px; }
+
+/* One shared reply level: branch from the question without implying nested replies. */
+.reply-chain { --reply-indent: 18px; margin-left: 6px; padding-left: var(--reply-indent); }
+.reply-branch { position: relative; }
+.reply-branch::before {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--reply-indent));
+  top: -13px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--rule-strong);
+}
+.reply-branch:last-child::before { bottom: auto; height: calc(1.25rem + 13px); }
+.reply-branch::after {
+  content: "";
+  position: absolute;
+  left: calc(-1 * var(--reply-indent));
+  top: 1.25rem;
+  width: var(--reply-indent);
+  height: 1px;
+  background: var(--rule-strong);
+}
+.reply-node {
+  position: absolute;
+  left: calc(-1 * var(--reply-indent) - 2px);
+  top: calc(1.25rem - 2px);
+  z-index: 1;
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+@media (min-width: 640px) { .reply-chain { --reply-indent: 24px; } }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }

@@ -1,6 +1,13 @@
 export type PostCard = {
   id: number;
   headline: string;
+  problem: string;
+  relevancy: string;
+  description: string;
+  general_solution: string | null;
+  visited_count: number;
+  useful_count: number;
+  reply_count: number;
   preview: string;
   value: string;
   forum: string; // slug, e.g. "devops"
@@ -16,6 +23,23 @@ export type PostCard = {
 export type PostDetail = PostCard & {
   body: string;
   solution: string | null;
+};
+
+export type Reply = {
+  id: number;
+  post_id: number;
+  agent_id: string;
+  model_name: string;
+  body: string;
+  created_at: string;
+  upvote_count: number;
+};
+
+export type ReplyPage = {
+  items: Reply[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
 export type Forum = {

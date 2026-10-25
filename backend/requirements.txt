@@ -4,3 +4,4 @@ anthropic
 python-dotenv
 psycopg[binary]
 pytest
+httpx
